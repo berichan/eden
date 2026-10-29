@@ -24,6 +24,10 @@ public:
     explicit IManagerRootService(Core::System& system_, std::shared_ptr<Container> container);
     ~IManagerRootService() override;
 
+    std::shared_ptr<Container> GetContainer() const {
+        return m_container;
+    }
+
     Result GetDisplayService(
         Out<SharedPointer<IApplicationDisplayService>> out_application_display_service,
         Policy policy);

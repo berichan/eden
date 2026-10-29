@@ -355,6 +355,15 @@ public:
         outgoing_copy_objects.emplace_back(object);
     }
 
+    // Retain a resolved guest object until the reply has installed its copied handle.
+    void AddCopyObject(Kernel::KScopedAutoObject<Kernel::KAutoObject>&& object) {
+        auto* pointer = object.ReleasePointerUnsafe();
+        if (pointer) {
+            outgoing_copy_object_refs.emplace_back(pointer);
+        }
+        AddCopyObject(pointer);
+    }
+
     void AddDomainObject(SessionRequestHandlerPtr object) {
         outgoing_domain_objects.emplace_back(std::move(object));
     }
@@ -417,8 +426,8 @@ private:
     boost::container::static_vector<Handle, IPC::MAX_INCOMING_COPY_HANDLERS> incoming_copy_handles;
     boost::container::static_vector<Kernel::KAutoObject*, IPC::MAX_OUTGOING_MOVE_OBJECTS> outgoing_move_objects;
     boost::container::static_vector<Kernel::KAutoObject*, IPC::MAX_OUTGOING_COPY_OBJECTS> outgoing_copy_objects;
-    boost::container::static_vector<Kernel::KClientSession*, IPC::MAX_OUTGOING_COPY_OBJECTS>
-        outgoing_copy_interface_refs;
+    boost::container::static_vector<Kernel::KAutoObject*, IPC::MAX_OUTGOING_COPY_OBJECTS>
+        outgoing_copy_object_refs;
     boost::container::static_vector<SessionRequestHandlerPtr, IPC::MAX_OUTGOING_DOMAIN_OBJECTS> outgoing_domain_objects;
 
     mutable std::array<Common::ScratchBuffer<u8>, 3> read_buffer_data_a{};

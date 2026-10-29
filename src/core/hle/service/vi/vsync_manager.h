@@ -10,11 +10,8 @@
 
 namespace Kernel {
 class KernelCore;
-}
-
-namespace Service {
-class Event;
-}
+class KReadableEvent;
+} // namespace Kernel
 
 namespace Service::VI {
 
@@ -26,15 +23,15 @@ public:
     ~VsyncManager();
 
     void SignalVsync(Kernel::KernelCore& kernel);
-    void LinkVsyncEvent(Event* event) {
+    void LinkVsyncEvent(Kernel::KReadableEvent* event) {
         m_vsync_events.insert(event);
     }
-    void UnlinkVsyncEvent(Event* event) {
+    void UnlinkVsyncEvent(Kernel::KReadableEvent* event) {
         m_vsync_events.erase(event);
     }
 
 private:
-    std::set<Event*> m_vsync_events;
+    std::set<Kernel::KReadableEvent*> m_vsync_events;
 };
 
 } // namespace Service::VI

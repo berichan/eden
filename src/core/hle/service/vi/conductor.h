@@ -7,6 +7,7 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include "common/container/unordered_map.h"
 
 #include "common/common_types.h"
@@ -23,8 +24,8 @@ namespace Core::Timing {
 struct EventType;
 }
 
-namespace Service {
-class Event;
+namespace Kernel {
+class KReadableEvent;
 }
 
 namespace Service::VI {
@@ -37,8 +38,8 @@ public:
     explicit Conductor(Core::System& system, Container& container, DisplayList& displays);
     ~Conductor();
 
-    void LinkVsyncEvent(u64 display_id, Event* event);
-    void UnlinkVsyncEvent(u64 display_id, Event* event);
+    void LinkVsyncEvent(u64 display_id, Kernel::KReadableEvent* event);
+    void UnlinkVsyncEvent(u64 display_id, Kernel::KReadableEvent* event);
 
 private:
     void ProcessVsync();
@@ -52,6 +53,7 @@ private:
     ::Common::unordered_map<u64, VsyncManager> m_vsync_managers;
     std::shared_ptr<Core::Timing::EventType> m_event;
     Common::Event m_signal;
+    std::mutex m_vsync_lock;
     std::jthread m_thread;
 
 private:

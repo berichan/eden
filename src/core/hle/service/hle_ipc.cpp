@@ -140,8 +140,8 @@ HLERequestContext::HLERequestContext(Kernel::KernelCore& kernel_, Core::Memory::
 }
 
 HLERequestContext::~HLERequestContext() {
-    for (auto* session : outgoing_copy_interface_refs) {
-        session->Close(kernel);
+    for (auto* object : outgoing_copy_object_refs) {
+        object->Close(kernel);
     }
 }
 
@@ -532,7 +532,7 @@ Result HLERequestContext::TryAddCopyInterface(SessionRequestHandlerPtr s) {
     Kernel::KClientSession* session{};
     R_TRY(CreateInterfaceSession(&session, std::move(s)));
     // Keep the new client alive until its handle has been copied to the reply, including on error.
-    outgoing_copy_interface_refs.push_back(session);
+    outgoing_copy_object_refs.push_back(session);
     AddCopyObject(session);
     R_SUCCEED();
 }

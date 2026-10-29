@@ -468,7 +468,60 @@ TEST_CASE("Native display control replies expose bounded pools and reject invali
     const std::array<u32, 1> invalid_semaphore{8};
     REQUIRE(RequestWords(caller, service, 31, invalid_semaphore).first ==
             Result{ErrorModule::VI, 4});
+    REQUIRE(RequestWords(caller, service, 32, {}).first == Kernel::ResultInvalidSize);
+    REQUIRE(RequestWords(caller, service, 32, invalid_semaphore).first ==
+            Result{ErrorModule::VI, 4});
+    const std::array<u32, 1> missing_semaphore{0};
+    REQUIRE(RequestWords(caller, service, 32, missing_semaphore).first ==
+            Result{ErrorModule::VI, 7});
     REQUIRE(RequestWords(caller, service, 21, {}).first == Result{ErrorModule::VI, 5});
     const std::array<u32, 1> notify{1};
     REQUIRE(RequestWords(caller, service, 13, notify).first.IsSuccess());
+}
+
+TEST_CASE("Native display registration validates names, notification slots, and packet sizes",
+          "[core][ipc][gsv]") {
+    Caller caller;
+    Service::GSV::DisplaySession service{caller.system, &caller.process};
+    REQUIRE(RequestWords(caller, service, 101, {}).first == Kernel::ResultInvalidSize);
+    const std::array<u32, 3> empty_name{0, 0, 1};
+    REQUIRE(RequestWords(caller, service, 101, empty_name).first == Result{ErrorModule::VI, 4});
+    const std::array<u32, 3> zero_slot{0x61666564, 0x00746c75, 0};
+    REQUIRE(RequestWords(caller, service, 101, zero_slot).first == Result{ErrorModule::VI, 4});
+    const std::array<u32, 3> invalid_slot{0x61666564, 0x00746c75, 1024};
+    REQUIRE(RequestWords(caller, service, 101, invalid_slot).first == Result{ErrorModule::VI, 4});
+    const std::array<u32, 3> unknown_name{0x74736574, 0, 1};
+    REQUIRE(RequestWords(caller, service, 101, unknown_name).first == Result{ErrorModule::VI, 7});
+    REQUIRE(RequestWords(caller, service, 102, {}).first == Kernel::ResultInvalidSize);
+    const std::array<u32, 2> default_name{0x61666564, 0x00746c75};
+    REQUIRE(RequestWords(caller, service, 102, default_name).first.IsSuccess());
+    REQUIRE(RequestWords(caller, service, 102, default_name).first.IsSuccess());
+    const std::array<u32, 2> absent_name{};
+    REQUIRE(RequestWords(caller, service, 102, absent_name).first.IsSuccess());
+    REQUIRE(RequestWords(caller, service, 261, {}).first == Kernel::ResultInvalidSize);
+    const std::array<u32, 3> invalid_semaphore{0x61666564, 0x00746c75, 8};
+    REQUIRE(RequestWords(caller, service, 261, invalid_semaphore).first ==
+            Result{ErrorModule::VI, 4});
+    const std::array<u32, 3> unregistered_display{0x61666564, 0x00746c75, 0};
+    REQUIRE(RequestWords(caller, service, 261, unregistered_display).first ==
+            Result{ErrorModule::VI, 7});
+    REQUIRE(RequestWords(caller, service, 262, {}).first == Kernel::ResultInvalidSize);
+    REQUIRE(RequestWords(caller, service, 262, unregistered_display).first.IsSuccess());
+    REQUIRE(RequestWords(caller, service, 262, invalid_semaphore).first.IsSuccess());
+}
+
+TEST_CASE("Copied guest objects remain referenced until the IPC reply is released", "[core][ipc]") {
+    Caller caller;
+    const auto references = caller.process.GetReferenceCount();
+    {
+        Service::HLERequestContext ctx{caller.system.Kernel(), caller.process.GetMemory(), nullptr,
+                                       &caller.thread};
+        Kernel::KScopedAutoObject<Kernel::KAutoObject> object{caller.system.Kernel(),
+                                                              &caller.process};
+        REQUIRE(caller.process.GetReferenceCount() == references + 1);
+        ctx.AddCopyObject(std::move(object));
+        REQUIRE(object.IsNull());
+        REQUIRE(caller.process.GetReferenceCount() == references + 1);
+    }
+    REQUIRE(caller.process.GetReferenceCount() == references);
 }

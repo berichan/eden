@@ -10,6 +10,7 @@
 #include "core/hle/service/nvnflinger/hos_binder_driver.h"
 #include "core/hle/service/nvnflinger/hos_binder_driver_server.h"
 #include "core/hle/service/nvnflinger/surface_flinger.h"
+#include "core/hle/service/os/event.h"
 #include "core/hle/service/sm/sm.h"
 #include "core/hle/service/vi/container.h"
 #include "core/hle/service/vi/vi_results.h"
@@ -187,11 +188,19 @@ Result Container::SetLayerIsOverlay(u64 layer_id, bool is_overlay) {
 }
 
 void Container::LinkVsyncEvent(u64 display_id, Event* event) {
+    LinkVsyncEvent(display_id, event->GetHandle());
+}
+
+void Container::UnlinkVsyncEvent(u64 display_id, Event* event) {
+    UnlinkVsyncEvent(display_id, event->GetHandle());
+}
+
+void Container::LinkVsyncEvent(u64 display_id, Kernel::KReadableEvent* event) {
     std::scoped_lock lk{m_lock};
     m_conductor->LinkVsyncEvent(display_id, event);
 }
 
-void Container::UnlinkVsyncEvent(u64 display_id, Event* event) {
+void Container::UnlinkVsyncEvent(u64 display_id, Kernel::KReadableEvent* event) {
     std::scoped_lock lk{m_lock};
     m_conductor->UnlinkVsyncEvent(display_id, event);
 }

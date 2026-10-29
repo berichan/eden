@@ -4,7 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include "core/hle/service/os/event.h"
+#include "core/hle/kernel/k_readable_event.h"
 #include "core/hle/service/vi/vsync_manager.h"
 
 namespace Service::VI {

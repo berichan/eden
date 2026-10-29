@@ -17,6 +17,10 @@
 
 union Result;
 
+namespace Kernel {
+class KReadableEvent;
+}
+
 namespace Service::android {
 class BufferQueueProducer;
 }
@@ -72,6 +76,8 @@ public:
 
     void LinkVsyncEvent(u64 display_id, Event* event);
     void UnlinkVsyncEvent(u64 display_id, Event* event);
+    void LinkVsyncEvent(u64 display_id, Kernel::KReadableEvent* event);
+    void UnlinkVsyncEvent(u64 display_id, Kernel::KReadableEvent* event);
 
 private:
     Result CreateLayerLocked(u64* out_layer_id, u64 display_id, u64 owner_aruid);
