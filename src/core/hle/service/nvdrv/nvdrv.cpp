@@ -21,6 +21,7 @@
 #include "core/hle/service/nvdrv/devices/nvhost_nvdec.h"
 #include "core/hle/service/nvdrv/devices/nvhost_nvdec_common.h"
 #include "core/hle/service/nvdrv/devices/nvhost_nvjpg.h"
+#include "core/hle/service/nvdrv/devices/nvhost_tsg_gpu.h"
 #include "core/hle/service/nvdrv/devices/nvhost_vic.h"
 #include "core/hle/service/nvdrv/devices/nvmap.h"
 #include "core/hle/service/nvdrv/nvdrv.h"
@@ -127,6 +128,12 @@ Module::Module(Core::System& system,
                 std::shared_ptr<GSV::GpuAddressSpacePool> native_address_spaces_)
     : container{system.Host1x()}, native_address_spaces{std::move(native_address_spaces_)},
       service_context{system, "nvdrv"}, events_interface{*this} {
+    if (native_address_spaces) {
+        builders["/dev/nvhost-tsg-gpu"] = [this, &system](DeviceFD fd) {
+            auto device = std::make_shared<Devices::nvhost_tsg_gpu>(system);
+            return open_files.emplace(fd, std::move(device)).first;
+        };
+    }
     builders["/dev/nvhost-as-gpu"] = [this, &system](DeviceFD fd) {
         auto device = std::make_shared<Devices::nvhost_as_gpu>(system, *this, container);
         return open_files.emplace(fd, std::move(device)).first;
@@ -193,6 +200,7 @@ DeviceFD Module::Open(const std::string& device_name, NvCore::SessionId session_
     auto device = builder(fd)->second;
 
     device->OnOpen(session_id, fd);
+    LOG_DEBUG(Service_NVDRV, "Opened device {} as fd={}", device_name, fd);
 
     return fd;
 }

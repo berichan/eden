@@ -21,6 +21,7 @@ add_executable(tests
     core/hle/tipc.cpp
     core/hle/native_gpu_characteristics.cpp
     core/hle/native_gpu_address_space.cpp
+    core/hle/native_gpu_scheduling_group.cpp
     core/hle/native_syncpoint_shim.cpp
     core/hle/gpu_memory_attribute.cpp
     core/hle/native_image_layout.cpp

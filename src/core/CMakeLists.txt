@@ -880,6 +880,8 @@ add_library(core STATIC
     hle/service/nvdrv/devices/nvhost_ctrl_gpu.h
     hle/service/nvdrv/devices/nvhost_gpu.cpp
     hle/service/nvdrv/devices/nvhost_gpu.h
+    hle/service/nvdrv/devices/nvhost_tsg_gpu.cpp
+    hle/service/nvdrv/devices/nvhost_tsg_gpu.h
     hle/service/nvdrv/devices/nvhost_nvdec.cpp
     hle/service/nvdrv/devices/nvhost_nvdec.h
     hle/service/nvdrv/devices/nvhost_nvdec_common.cpp

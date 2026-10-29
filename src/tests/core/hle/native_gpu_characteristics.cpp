@@ -118,7 +118,8 @@ TEST_CASE("Native engine enumeration reports total size and copies only whole re
                             [](u8 value) { return value == 0xcc; }));
         const auto count = std::min<size_t>(available / 16, 2);
         if (count >= 1) {
-            REQUIRE(Read<u32_le>(inline_output, 4) == 1U);
+            // The SDK matches type 0/instance 0 to its graphics engine before opening a channel.
+            REQUIRE(Read<u32_le>(inline_output, 4) == 0U);
             REQUIRE(Read<u32_le>(inline_output, 8) == 0U);
             REQUIRE(Read<s32_le>(inline_output, 12) == 0);
             REQUIRE(Read<u32_le>(inline_output, 16) == 0U);

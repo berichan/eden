@@ -95,7 +95,7 @@ inline NvResult ReadNativeGpuCharacteristics(std::span<const u8> input, std::spa
 }
 
 struct NativeGpuEngineInfo {
-    u32_le engine_id;
+    u32_le engine_type;
     u32_le instance;
     s32_le runlist_id;
     u32_le reserved;
@@ -110,7 +110,9 @@ inline NvResult ReadNativeGpuEngineInfo(std::span<const u8> input, std::span<u8>
     }
     // Logical graphics/compute and copy runlists. Submission still goes through the device
     // handlers, which must reject unsupported operations instead of completing work here.
-    const std::array<NativeGpuEngineInfo, 2> engines{{{1, 0, 0, 0}, {2, 0, 1, 0}}};
+    // Type 0 is graphics; type 2 is copy on a separate runlist. Type 1 would describe
+    // a copy engine sharing the graphics runlist and cannot identify the graphics engine.
+    const std::array<NativeGpuEngineInfo, 2> engines{{{0, 0, 0, 0}, {2, 0, 1, 0}}};
     std::memmove(output.data(), input.data(), RequestSize);
     const u32_le full_size{sizeof(engines)};
     std::memcpy(output.data(), &full_size, sizeof(full_size));
