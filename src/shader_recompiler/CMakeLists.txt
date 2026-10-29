@@ -31,6 +31,10 @@ add_library(shader_recompiler STATIC
     backend/spirv/spirv_emit_context.h
     environment.h
     exception.h
+    frontend/ampere/lower_to_maxwell.cpp
+    frontend/ampere/lower_to_maxwell.h
+    frontend/ampere/program_address_map.h
+    frontend/ampere/program_capture.h
     frontend/ir/abstract_syntax_list.h
     frontend/ir/attribute.h
     frontend/ir/basic_block.cpp

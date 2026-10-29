@@ -31,6 +31,7 @@ add_executable(tests
     core/loader/deconstructed_rom_directory.cpp
     video_core/memory_tracker.cpp
     video_core/turing_macro.cpp
+    video_core/native_shader.cpp
     input_common/calibration_configuration_job.cpp
 )
 
