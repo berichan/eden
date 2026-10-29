@@ -12,6 +12,7 @@
 #include "core/hle/kernel/k_transfer_memory.h"
 #include "core/hle/kernel/svc_results.h"
 #include "core/hle/service/gsv/display_session.h"
+#include "core/hle/service/gsv/gpu_address_space_pool.h"
 #include "core/hle/service/gsv/gpu_session.h"
 #include "core/hle/service/gsv/syncpt_session.h"
 #include "core/hle/service/gsv/user_session.h"
@@ -55,6 +56,7 @@ UserSession::UserSession(Core::System& system, Kernel::KProcess* process, u64 ar
         {305, &UserSession::InitializeDisplayContext, "InitializeDisplayContext"},
         {401, &UserSession::CreateGpuContext, "CreateGpuContext"},
         {402, &UserSession::InitializeGpuContext, "InitializeGpuContext"},
+        {434, &UserSession::ExistsAddressSpace, "ExistsAddressSpace"},
         {497, &UserSession::CreateGpuSessionWithRemoteMemory, "CreateGpuSessionWithRemoteMemory"},
         {1101, &UserSession::CreateGraphicsFrameContext, "CreateGraphicsFrameContext"},
         {1102, &UserSession::InitializeGraphicsFrameContext, "InitializeGraphicsFrameContext"},
@@ -223,6 +225,19 @@ void UserSession::InitializeGpuContext(HLERequestContext& ctx) {
         return;
     }
     Reply(ctx, m_gpu_session ? m_gpu_session->InitializeContext() : Kernel::ResultInvalidState);
+}
+
+void UserSession::ExistsAddressSpace(HLERequestContext& ctx) {
+    const auto result = [&]() -> Result {
+        R_UNLESS(HasInputData(ctx, sizeof(u32)), Kernel::ResultInvalidSize);
+        R_UNLESS(m_gpu_session, GpuAddressSpacePool::InvalidAddressSpace);
+        IPC::RequestParser rp{ctx};
+        const auto handle = rp.Pop<u32>();
+        R_TRY(m_gpu_session->ExistsAddressSpace(handle));
+        LOG_DEBUG(Service, "GSV native GPU address space verified: handle={:#x}", handle);
+        R_SUCCEED();
+    }();
+    Reply(ctx, result);
 }
 
 void UserSession::CreateDisplayContext(HLERequestContext& ctx) {

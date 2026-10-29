@@ -44,6 +44,7 @@ private:
     void CreateGpuSessionWithRemoteMemory(HLERequestContext& ctx);
     void CreateGpuContext(HLERequestContext& ctx);
     void InitializeGpuContext(HLERequestContext& ctx);
+    void ExistsAddressSpace(HLERequestContext& ctx);
     void CreateDisplayContext(HLERequestContext& ctx);
     void InitializeDisplayContext(HLERequestContext& ctx);
     void CreateSyncptContext(HLERequestContext& ctx);

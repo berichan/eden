@@ -14,7 +14,9 @@
 #include "core/hle/kernel/svc_results.h"
 #include "core/hle/service/gsv/display_event_queue.h"
 #include "core/hle/service/gsv/display_session.h"
+#include "core/hle/service/gsv/gpu_address_space_pool.h"
 #include "core/hle/service/gsv/gpu_session.h"
+#include "core/hle/service/gsv/graphics_device_table.h"
 #include "core/hle/service/gsv/syncpt_session.h"
 #include "core/hle/service/gsv/user_session.h"
 #include "core/hle/service/hle_ipc.h"
@@ -108,6 +110,106 @@ std::pair<Result, u64> RequestWords(Caller& caller, Service::ServiceFrameworkBas
 }
 
 } // namespace
+
+TEST_CASE("Native graphics device records retain metadata and enforce the eight-slot limit",
+          "[core][ipc]") {
+    Service::GSV::GraphicsDeviceTable devices;
+    u8 id{0xff};
+    REQUIRE(devices.Create(&id, 0, 0, 0) == Service::GSV::GraphicsDeviceTable::InvalidArgument);
+    REQUIRE(id == 0xff);
+    for (u8 index = 0; index < 8; ++index) {
+        REQUIRE(devices.Create(&id, 0x74736574, u64{1} << (32 + index), index).IsSuccess());
+        REQUIRE(id == index);
+        const auto* device = devices.Get(id);
+        REQUIRE(device != nullptr);
+        REQUIRE(device->name == 0x74736574);
+        REQUIRE(device->memory_budget == u64{1} << (32 + index));
+        REQUIRE(device->debug_label == index);
+    }
+    id = 0xff;
+    REQUIRE(devices.Create(&id, 1, 0, 0) == Service::GSV::GraphicsDeviceTable::OutOfDevices);
+    REQUIRE(id == 0xff);
+    REQUIRE(devices.Destroy(8) == Service::GSV::GraphicsDeviceTable::InvalidArgument);
+    REQUIRE(devices.Destroy(3).IsSuccess());
+    REQUIRE(devices.Get(3) == nullptr);
+    REQUIRE(devices.Destroy(3) == Service::GSV::GraphicsDeviceTable::InvalidDevice);
+    REQUIRE(devices.Create(&id, 2, 3, 4).IsSuccess());
+    REQUIRE(id == 3);
+    Service::GSV::GraphicsDeviceTable other;
+    REQUIRE(other.Destroy(3) == Service::GSV::GraphicsDeviceTable::InvalidDevice);
+    REQUIRE(devices.Get(3)->debug_label == 4);
+}
+
+TEST_CASE("Native graphics device commands enforce initialization, packet sizes and lifetime",
+          "[core][ipc]") {
+    Caller caller;
+    Service::GSV::GpuSession gpu{caller.system, &caller.process};
+    const std::array<u32, 6> arguments{0x74736574, 0, 0, 1, 0x1234, 0};
+    REQUIRE(RequestWords(caller, gpu, 41, arguments, 2).first == Kernel::ResultInvalidState);
+    REQUIRE(gpu.CreateContext().IsSuccess());
+    REQUIRE(gpu.InitializeContext().IsSuccess());
+    for (const size_t count : {0U, 5U}) {
+        REQUIRE(RequestWords(caller, gpu, 41, std::span{arguments}.first(count), 2).first ==
+                Kernel::ResultInvalidSize);
+    }
+    const std::array<u32, 6> empty_name{};
+    const auto empty = RequestWords(caller, gpu, 41, empty_name, 2);
+    REQUIRE(empty.first == Service::GSV::GraphicsDeviceTable::InvalidArgument);
+    REQUIRE(static_cast<u32>(empty.second) == 0);
+    for (u32 id = 0; id < 8; ++id) {
+        const auto result = RequestWords(caller, gpu, 41, arguments, 2);
+        REQUIRE(result.first.IsSuccess());
+        REQUIRE(static_cast<u32>(result.second) == id);
+    }
+    REQUIRE(RequestWords(caller, gpu, 41, arguments, 2).first ==
+            Service::GSV::GraphicsDeviceTable::OutOfDevices);
+    REQUIRE(RequestWords(caller, gpu, 42, {}).first == Kernel::ResultInvalidSize);
+    REQUIRE(RequestWords(caller, gpu, 42, std::array<u32, 1>{8}).first ==
+            Service::GSV::GraphicsDeviceTable::InvalidArgument);
+    REQUIRE(RequestWords(caller, gpu, 42, std::array<u32, 1>{0}).first.IsSuccess());
+    REQUIRE(RequestWords(caller, gpu, 42, std::array<u32, 1>{0}).first ==
+            Service::GSV::GraphicsDeviceTable::InvalidDevice);
+    REQUIRE(static_cast<u32>(RequestWords(caller, gpu, 41, arguments, 2).second) == 0);
+}
+
+TEST_CASE("Native GPU address space requests validate their wire format before allocation",
+          "[core][ipc]") {
+    Caller caller;
+    Service::GSV::GpuSession gpu{caller.system, &caller.process};
+    REQUIRE(RequestWords(caller, gpu, 34, {}, 2).first == Kernel::ResultInvalidState);
+    REQUIRE(gpu.ExistsAddressSpace(0x02000000) == Kernel::ResultInvalidState);
+    REQUIRE(gpu.CreateContext().IsSuccess());
+    REQUIRE(gpu.InitializeContext().IsSuccess());
+    const auto limit = RequestWords(caller, gpu, 34, {}, 2);
+    REQUIRE(limit.first.IsSuccess());
+    REQUIRE(static_cast<u32>(limit.second) == 7);
+    REQUIRE(RequestWords(caller, gpu, 34, std::array<u32, 1>{0}, 2).first ==
+            Kernel::ResultInvalidSize);
+    REQUIRE(RequestWords(caller, gpu, 33, {}, 2).first == Kernel::ResultInvalidSize);
+    REQUIRE(RequestWords(caller, gpu, 33, std::array<u32, 2>{0, 0}, 2).first ==
+            Kernel::ResultInvalidSize);
+    const auto stopped = RequestWords(caller, gpu, 33, std::array<u32, 1>{0}, 2);
+    REQUIRE(stopped.first == Kernel::ResultInvalidState);
+    REQUIRE(static_cast<u32>(stopped.second) == 0);
+    REQUIRE(gpu.ExistsAddressSpace(0x02000000) ==
+            Service::GSV::GpuAddressSpacePool::InvalidAddressSpace);
+    for (const u32 command : {201U, 202U}) {
+        REQUIRE(RequestWords(caller, gpu, command, {}, 5).first == Kernel::ResultInvalidSize);
+        const auto invalid = RequestWords(caller, gpu, command, std::array<u32, 1>{0x02000000}, 5);
+        REQUIRE(invalid.first == Service::GSV::GpuAddressSpacePool::InvalidAddressSpace);
+        REQUIRE(invalid.second == 0);
+    }
+}
+
+TEST_CASE("GSV address space verification rejects malformed or absent contexts", "[core][ipc]") {
+    Caller caller;
+    Service::GSV::UserSession service{caller.system, &caller.process, 0x51};
+    REQUIRE(RequestWords(caller, service, 434, {}).first == Kernel::ResultInvalidSize);
+    REQUIRE(RequestWords(caller, service, 434, std::array<u32, 2>{0x02000000, 0}).first ==
+            Kernel::ResultInvalidSize);
+    REQUIRE(RequestWords(caller, service, 434, std::array<u32, 1>{0x02000000}).first ==
+            Service::GSV::GpuAddressSpacePool::InvalidAddressSpace);
+}
 
 TEST_CASE("TIPC arguments follow handle and buffer descriptors", "[core][ipc]") {
     Caller caller;
