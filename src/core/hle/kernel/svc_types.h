@@ -157,8 +157,14 @@ enum class InfoType : u32 {
     IsSvcPermitted = 26,
     IoRegionHint = 27,
     AliasRegionExtraSize = 28,
+    RemoteRegionAddress = 29,
+    RemoteRegionSize = 30,
+    RemoteMemoryUsage = 31,
+    RemoteMemoryUsagePeak = 32,
+    ProcessPageSize = 33,
 
     TransferMemoryHint = 34,
+    AddressSpaceSize = 36,
 
     Unknown37 = 37,
     Unknown38 = 38,

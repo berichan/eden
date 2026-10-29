@@ -40,7 +40,13 @@ Result GetInfo(Core::System& system, u64* result, InfoType info_id_type, Handle 
     case InfoType::UsedNonSystemMemorySize:
     case InfoType::IsApplication:
     case InfoType::FreeThreadCount:
-    case InfoType::AliasRegionExtraSize: {
+    case InfoType::AliasRegionExtraSize:
+    case InfoType::RemoteRegionAddress:
+    case InfoType::RemoteRegionSize:
+    case InfoType::RemoteMemoryUsage:
+    case InfoType::RemoteMemoryUsagePeak:
+    case InfoType::ProcessPageSize:
+    case InfoType::AddressSpaceSize: {
         R_UNLESS(info_sub_id == 0, ResultInvalidEnumValue);
 
         const auto& handle_table = GetCurrentProcess(system.Kernel()).GetHandleTable();
@@ -71,6 +77,20 @@ Result GetInfo(Core::System& system, u64* result, InfoType info_id_type, Handle 
             R_SUCCEED();
         case InfoType::AslrRegionSize:
             *result = process->GetPageTable().GetAliasCodeRegionSize();
+            R_SUCCEED();
+        case InfoType::RemoteRegionAddress:
+        case InfoType::RemoteRegionSize:
+        case InfoType::RemoteMemoryUsage:
+        case InfoType::RemoteMemoryUsagePeak:
+            // The current memory profile has no remote region or remote mappings.
+            // An empty region also gives the SDK's remote allocator no capacity.
+            *result = 0;
+            R_SUCCEED();
+        case InfoType::ProcessPageSize:
+            *result = PageSize;
+            R_SUCCEED();
+        case InfoType::AddressSpaceSize:
+            *result = process->GetPageTable().GetAddressSpaceSize();
             R_SUCCEED();
         case InfoType::StackRegionAddress:
             *result = GetInteger(process->GetPageTable().GetStackRegionStart());
