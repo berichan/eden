@@ -6,6 +6,7 @@
 #include <array>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include "common/common_types.h"
 
 namespace Tegra {
@@ -22,9 +23,15 @@ struct AmpereGraphicsState {
 
     AmpereGraphicsState();
 
+    struct ZCullBinding {
+        u64 address;
+        u32 mode;
+    };
+
     std::mutex mutex;
     std::array<u32, MethodCount> registers{};
     std::array<u32, MethodCount> shadow_registers{};
+    std::optional<ZCullBinding> zcull_binding;
 };
 
 // A scheduling group shares graphics state while each address space retains its own binding.
@@ -36,6 +43,8 @@ public:
 
     const std::shared_ptr<AmpereGraphicsState>& GetState() const;
     const std::shared_ptr<MemoryManager>& GetAddressSpace() const;
+    bool BindZCull(u64 address, u32 mode);
+    std::optional<AmpereGraphicsState::ZCullBinding> GetZCullBinding() const;
 
 private:
     const std::shared_ptr<AmpereGraphicsState> state;

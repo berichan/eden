@@ -25,4 +25,21 @@ const std::shared_ptr<MemoryManager>& NativeGpuGraphicsContext::GetAddressSpace(
     return address_space;
 }
 
+bool NativeGpuGraphicsContext::BindZCull(u64 address, u32 mode) {
+    if (mode > 3 || (mode == 2 && address == 0)) {
+        return false;
+    }
+    std::scoped_lock lock{state->mutex};
+    if (!state->zcull_binding || state->zcull_binding->address == 0) {
+        // The driver retains the GPU address without dereferencing it during binding.
+        state->zcull_binding = AmpereGraphicsState::ZCullBinding{address, mode};
+    }
+    return true;
+}
+
+std::optional<AmpereGraphicsState::ZCullBinding> NativeGpuGraphicsContext::GetZCullBinding() const {
+    std::scoped_lock lock{state->mutex};
+    return state->zcull_binding;
+}
+
 } // namespace Tegra::Control

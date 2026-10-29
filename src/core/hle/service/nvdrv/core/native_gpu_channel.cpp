@@ -249,6 +249,27 @@ u32 NativeGpuChannel::GetChannelIndex() const {
     return syncpoint->GetId() - Tegra::Host1x::SyncpointManager::NativeChannelSyncpointBase;
 }
 
+NvResult NativeGpuChannel::BindZCull(u64 address, u32 mode) {
+    if (mode > 3 || (mode == 2 && address == 0)) {
+        return NvResult::BadParameter;
+    }
+    std::scoped_lock lock{mutex};
+    if (!open || !address_space || !group) {
+        return NvResult::InvalidState;
+    }
+    if (runlist != 0) {
+        return NvResult::BadParameter;
+    }
+    if (!graphics_context) {
+        const auto result =
+            group->AcquireGraphicsContext(&graphics_context, subcontext, address_space);
+        if (result != NvResult::Success) {
+            return result;
+        }
+    }
+    return graphics_context->BindZCull(address, mode) ? NvResult::Success : NvResult::BadParameter;
+}
+
 NvResult NativeGpuChannel::SetClientData(u64 data) {
     std::scoped_lock lock{mutex};
     if (!open) {
@@ -350,6 +371,11 @@ NvResult NativeGpuChannels::AllocateObjectContext(DeviceFD fd, SessionId owner, 
 NvResult NativeGpuChannels::SetClientData(DeviceFD fd, SessionId owner, u64 data) {
     const auto channel = Get(fd, owner);
     return channel ? channel->SetClientData(data) : NvResult::BadParameter;
+}
+
+NvResult NativeGpuChannels::BindZCull(DeviceFD fd, SessionId owner, u64 address, u32 mode) {
+    const auto channel = Get(fd, owner);
+    return channel ? channel->BindZCull(address, mode) : NvResult::BadParameter;
 }
 
 NvResult NativeGpuChannels::SetTimeout(DeviceFD fd, SessionId owner, u32 timeout) {

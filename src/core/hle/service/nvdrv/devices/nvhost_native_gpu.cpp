@@ -52,7 +52,7 @@ NvResult nvhost_native_gpu::Ioctl1(DeviceFD fd, Ioctl command, std::span<const u
     }
     if (command.group != 'H' ||
         (command.cmd != 0x20 && command.cmd != 0x1a && command.cmd != 0x1e && command.cmd != 9 &&
-         command.cmd != 0xc && command.cmd != 0x17 && command.cmd != 3)) {
+         command.cmd != 0xc && command.cmd != 0x17 && command.cmd != 3 && command.cmd != 0xb)) {
         LOG_ERROR(Service_NVDRV, "Unsupported native channel ioctl={:08X}", command.raw);
         return NvResult::NotSupported;
     }
@@ -60,6 +60,24 @@ NvResult nvhost_native_gpu::Ioctl1(DeviceFD fd, Ioctl command, std::span<const u
     const bool input_only = command.cmd == 0x20 || command.cmd == 3;
     if (command.is_in == 0 || command.is_out != static_cast<u32>(!input_only)) {
         return NvResult::BadParameter;
+    }
+    if (command.cmd == 0xb) {
+        constexpr size_t RequestSize = 16;
+        if (command.length != RequestSize || input.size() < RequestSize ||
+            output.size() < RequestSize) {
+            return NvResult::InvalidSize;
+        }
+        u64_le address;
+        u32_le mode;
+        std::memcpy(&address, input.data(), sizeof(address));
+        std::memcpy(&mode, input.data() + sizeof(address), sizeof(mode));
+        const auto result = channels.BindZCull(fd, owner, address, mode);
+        if (result == NvResult::Success) {
+            std::memmove(output.data(), input.data(), RequestSize);
+        }
+        LOG_DEBUG(Service_NVDRV, "Native Z-cull binding: fd={}, gpu={:#x}, mode={}, result={}", fd,
+                  address, mode, result);
+        return result;
     }
     if (command.cmd == 0xc || command.cmd == 0x17) {
         const bool configure = command.cmd == 0xc;

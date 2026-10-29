@@ -216,6 +216,83 @@ TEST_CASE("Native channel client data is opaque, independent, and limited to its
     REQUIRE(untouched == 0);
 }
 
+TEST_CASE("Native Z-cull binding is owned by shared graphics state and preserves its first address",
+          "[core][ipc]") {
+    using namespace Service::Nvidia;
+    Core::System system;
+    Core::DeviceMemory memory;
+    Tegra::MaxwellDeviceMemoryManager backing{memory};
+    auto space = std::make_shared<Tegra::MemoryManager>(system, backing, 32, 1ULL << 32, 16, 12);
+    Tegra::Host1x::SyncpointManager syncpoints;
+    NvCore::NativeGpuChannels channels{syncpoints};
+    constexpr NvCore::SessionId owner{7};
+    Devices::nvhost_native_gpu device{system, channels};
+    device.OnOpen(owner, 4);
+    const Ioctl bind{.raw = 0xc010480b};
+    std::array<u8, 16> input{};
+    std::array<u8, 24> output{};
+    output.fill(0xcc);
+    const auto set_params = [&](u64 address, u32 mode) {
+        const u64_le wire_address{address};
+        const u32_le wire_mode{mode};
+        std::memcpy(input.data(), &wire_address, sizeof(wire_address));
+        std::memcpy(input.data() + 8, &wire_mode, sizeof(wire_mode));
+        input[12] = 0xa5;
+    };
+    REQUIRE(device.Ioctl1(4, bind, input, output) == NvResult::BadParameter);
+    REQUIRE(channels.Allocate(4, owner, 0) == NvResult::Success);
+    const auto channel = channels.Get(4, owner);
+    REQUIRE(device.Ioctl1(4, bind, input, output) == NvResult::InvalidState);
+    REQUIRE(channel->BindAddressSpace(space) == NvResult::Success);
+    REQUIRE(device.Ioctl1(4, bind, input, output) == NvResult::InvalidState);
+    auto group = std::make_shared<NvCore::NativeGpuSchedulingGroup>(owner);
+    REQUIRE(channel->BindGroup(group, 0) == NvResult::Success);
+    for (u32 raw : {0x4010480bU, 0x8010480bU, 0x0010480bU}) {
+        REQUIRE(device.Ioctl1(4, Ioctl{.raw = raw}, input, output) == NvResult::BadParameter);
+    }
+    REQUIRE(device.Ioctl1(4, Ioctl{.raw = 0xc014480b}, input, output) == NvResult::InvalidSize);
+    REQUIRE(device.Ioctl1(4, bind, std::span{input}.first(15), output) == NvResult::InvalidSize);
+    REQUIRE(device.Ioctl1(4, bind, input, std::span{output}.first(15)) == NvResult::InvalidSize);
+    set_params(0x20000000, 4);
+    REQUIRE(device.Ioctl1(4, bind, input, output) == NvResult::BadParameter);
+    set_params(0, 2);
+    REQUIRE(device.Ioctl1(4, bind, input, output) == NvResult::BadParameter);
+    REQUIRE(channel->GetGraphicsContext() == nullptr);
+    REQUIRE(output[0] == 0xcc);
+    REQUIRE(channels.BindZCull(4, NvCore::SessionId{8}, 0, 0) == NvResult::BadParameter);
+    for (u32 mode : {0U, 1U, 3U}) {
+        set_params(0, mode);
+        REQUIRE(device.Ioctl1(4, bind, input, output) == NvResult::Success);
+        REQUIRE(channel->GetGraphicsContext()->GetZCullBinding()->address == 0);
+        REQUIRE(channel->GetGraphicsContext()->GetZCullBinding()->mode == mode);
+    }
+    REQUIRE(channels.AllocateObjectContext(4, owner, 0xc797, 0) == NvResult::Success);
+    set_params(0x20000000, 2);
+    REQUIRE(device.Ioctl1(4, bind, input, output) == NvResult::Success);
+    REQUIRE(std::memcmp(input.data(), output.data(), input.size()) == 0);
+    REQUIRE(output[16] == 0xcc);
+    auto context = channel->GetGraphicsContext();
+    REQUIRE(context->GetZCullBinding()->address == 0x20000000);
+    REQUIRE(context->GetZCullBinding()->mode == 2);
+    set_params(0x30000000, 1);
+    REQUIRE(device.Ioctl1(4, bind, input, input) == NvResult::Success);
+    REQUIRE(context->GetZCullBinding()->address == 0x20000000);
+    REQUIRE(context->GetZCullBinding()->mode == 2);
+    REQUIRE(channels.Allocate(5, owner, 0) == NvResult::Success);
+    const auto sibling = channels.Get(5, owner);
+    REQUIRE(sibling->BindAddressSpace(space) == NvResult::Success);
+    REQUIRE(sibling->BindGroup(group, 0) == NvResult::Success);
+    REQUIRE(channels.AllocateObjectContext(5, owner, 0xc797, 0) == NvResult::Success);
+    REQUIRE(sibling->GetGraphicsContext()->GetZCullBinding()->address == 0x20000000);
+    REQUIRE(channel->UnbindGroup(group) == NvResult::Success);
+    REQUIRE(channel->BindGroup(group, 0) == NvResult::Success);
+    REQUIRE(channels.AllocateObjectContext(4, owner, 0xc797, 0) == NvResult::Success);
+    REQUIRE(channel->GetGraphicsContext()->GetZCullBinding()->address == 0x20000000);
+    device.OnClose(4);
+    REQUIRE(context->GetZCullBinding()->address == 0x20000000);
+    REQUIRE(device.Ioctl1(4, bind, input, output) == NvResult::InvalidState);
+}
+
 TEST_CASE("Native error notification records latch the first fault and reset on configuration",
           "[core][ipc]") {
     using namespace Service::Nvidia;

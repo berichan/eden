@@ -102,6 +102,7 @@ private:
     friend class NativeGpuChannels;
     void Close();
     NvResult AllocateObjectContext(u32 class_id, u32 flags);
+    NvResult BindZCull(u64 address, u32 mode);
     NvResult SetClientData(u64 data);
     NvResult SetTimeout(u32 timeout);
     NvResult GetClientData(u64* out_data) const;
@@ -133,6 +134,7 @@ public:
     ~NativeGpuChannels();
     NvResult Allocate(DeviceFD fd, SessionId owner, u32 requested_runlist);
     NvResult AllocateObjectContext(DeviceFD fd, SessionId owner, u32 class_id, u32 flags);
+    NvResult BindZCull(DeviceFD fd, SessionId owner, u64 address, u32 mode);
     NvResult SetClientData(DeviceFD fd, SessionId owner, u64 data);
     NvResult SetTimeout(DeviceFD fd, SessionId owner, u32 timeout);
     NvResult GetClientData(u64* out_data, DeviceFD fd, SessionId owner) const;
