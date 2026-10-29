@@ -169,7 +169,11 @@ void EmitA64ConditionFailedTerminal(oaknut::CodeGenerator& code, EmitContext& ct
 }
 
 void EmitA64CheckMemoryAbort(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst, oaknut::Label& end) {
-    if (!ctx.conf.check_halt_on_memory_access) {
+    EmitA64CheckMemoryAbort(code, ctx, inst, end, false);
+}
+
+void EmitA64CheckMemoryAbort(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst, oaknut::Label& end, bool force) {
+    if (!ctx.conf.check_halt_on_memory_access && !force) {
         return;
     }
 

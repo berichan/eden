@@ -76,6 +76,38 @@ public:
         MemoryWrite(vaddr + 8, value[1], sizeof(u64));
     }
 
+    u8 MemoryCompareExchange8(u64 address, u8 expected, u8 value) override {
+        const auto observed = static_cast<u8>(MemoryRead(address, sizeof(u8)));
+        if (observed == expected) {
+            MemoryWrite(address, value, sizeof(u8));
+        }
+        return observed;
+    }
+
+    u16 MemoryCompareExchange16(u64 address, u16 expected, u16 value) override {
+        const auto observed = static_cast<u16>(MemoryRead(address, sizeof(u16)));
+        if (observed == expected) {
+            MemoryWrite(address, value, sizeof(u16));
+        }
+        return observed;
+    }
+
+    u32 MemoryCompareExchange32(u64 address, u32 expected, u32 value) override {
+        const auto observed = static_cast<u32>(MemoryRead(address, sizeof(u32)));
+        if (observed == expected) {
+            MemoryWrite(address, value, sizeof(u32));
+        }
+        return observed;
+    }
+
+    u64 MemoryCompareExchange64(u64 address, u64 expected, u64 value) override {
+        const auto observed = static_cast<u64>(MemoryRead(address, sizeof(u64)));
+        if (observed == expected) {
+            MemoryWrite(address, value, sizeof(u64));
+        }
+        return observed;
+    }
+
     void CallSVC(u32) override {
         // Do something.
     }

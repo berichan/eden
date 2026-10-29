@@ -108,6 +108,13 @@ struct UserCallbacks {
     virtual bool MemoryWriteExclusive64(VAddr /*vaddr*/, std::uint64_t /*value*/, std::uint64_t /*expected*/) { return false; }
     virtual bool MemoryWriteExclusive128(VAddr /*vaddr*/, Vector /*value*/, Vector /*expected*/) { return false; }
 
+    // Naturally aligned, sequentially consistent atomic compare-and-exchange.
+    // Return the observed value, whether or not the exchange succeeds.
+    virtual std::uint8_t MemoryCompareExchange8(VAddr vaddr, std::uint8_t expected, std::uint8_t value) = 0;
+    virtual std::uint16_t MemoryCompareExchange16(VAddr vaddr, std::uint16_t expected, std::uint16_t value) = 0;
+    virtual std::uint32_t MemoryCompareExchange32(VAddr vaddr, std::uint32_t expected, std::uint32_t value) = 0;
+    virtual std::uint64_t MemoryCompareExchange64(VAddr vaddr, std::uint64_t expected, std::uint64_t value) = 0;
+
     // If this callback returns true, the JIT will assume MemoryRead* callbacks will always
     // return the same value at any point in time for this vaddr. The JIT may use this information
     // in optimizations.

@@ -166,14 +166,25 @@ constexpr bool IsExclusiveMemoryWrite(const Opcode op) noexcept {
     }
 }
 
+constexpr bool IsAtomicMemoryOperation(const Opcode op) noexcept {
+    return op == Opcode::A64AtomicMemory8
+        || op == Opcode::A64AtomicMemory16
+        || op == Opcode::A64AtomicMemory32
+        || op == Opcode::A64AtomicMemory64
+        || op == Opcode::A64CompareExchangeMemory8
+        || op == Opcode::A64CompareExchangeMemory16
+        || op == Opcode::A64CompareExchangeMemory32
+        || op == Opcode::A64CompareExchangeMemory64;
+}
+
 /// @brief Determines whether or not this instruction performs any kind of memory read.
 constexpr bool IsMemoryRead(const Opcode op) noexcept {
-    return IsSharedMemoryRead(op) || IsExclusiveMemoryRead(op);
+    return IsSharedMemoryRead(op) || IsExclusiveMemoryRead(op) || IsAtomicMemoryOperation(op);
 }
 
 /// @brief Determines whether or not this instruction performs any kind of memory write.
 constexpr bool IsMemoryWrite(const Opcode op) noexcept {
-    return IsSharedMemoryWrite(op) || IsExclusiveMemoryWrite(op);
+    return IsSharedMemoryWrite(op) || IsExclusiveMemoryWrite(op) || IsAtomicMemoryOperation(op);
 }
 
 /// @brief Determines whether or not this instruction performs any kind of memory access.

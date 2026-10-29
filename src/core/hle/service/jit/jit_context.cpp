@@ -13,6 +13,7 @@
 #include <dynarmic/interface/code_page.h>
 
 #include "common/alignment.h"
+#include "common/atomic_ops.h"
 #include "common/common_funcs.h"
 #include "common/div_ceil.h"
 #include "common/elf.h"
@@ -120,6 +121,68 @@ public:
         return WriteMemory<u128>(vaddr, value);
     }
 
+    u8 MemoryCompareExchange8(u64 address, u8 expected, u8 value) override {
+        if (boost::icl::contains(mapped_ranges, address)) {
+            if ((address & (sizeof(u8) - 1)) != 0 ||
+                !memory.IsValidVirtualAddressRange(address, sizeof(u8))) {
+                AtomicAccessFault(address);
+                return expected;
+            }
+            return memory.CompareExchange8(address, expected, value);
+        }
+        return CompareExchangeLocal<u8>(address, expected, value);
+    }
+
+    u16 MemoryCompareExchange16(u64 address, u16 expected, u16 value) override {
+        if (boost::icl::contains(mapped_ranges, address)) {
+            if ((address & (sizeof(u16) - 1)) != 0 ||
+                !memory.IsValidVirtualAddressRange(address, sizeof(u16))) {
+                AtomicAccessFault(address);
+                return expected;
+            }
+            return memory.CompareExchange16(address, expected, value);
+        }
+        return CompareExchangeLocal<u16>(address, expected, value);
+    }
+
+    u32 MemoryCompareExchange32(u64 address, u32 expected, u32 value) override {
+        if (boost::icl::contains(mapped_ranges, address)) {
+            if ((address & (sizeof(u32) - 1)) != 0 ||
+                !memory.IsValidVirtualAddressRange(address, sizeof(u32))) {
+                AtomicAccessFault(address);
+                return expected;
+            }
+            return memory.CompareExchange32(address, expected, value);
+        }
+        return CompareExchangeLocal<u32>(address, expected, value);
+    }
+
+    u64 MemoryCompareExchange64(u64 address, u64 expected, u64 value) override {
+        if (boost::icl::contains(mapped_ranges, address)) {
+            if ((address & (sizeof(u64) - 1)) != 0 ||
+                !memory.IsValidVirtualAddressRange(address, sizeof(u64))) {
+                AtomicAccessFault(address);
+                return expected;
+            }
+            return memory.CompareExchange64(address, expected, value);
+        }
+        return CompareExchangeLocal<u64>(address, expected, value);
+    }
+
+    template <typename T>
+    T CompareExchangeLocal(u64 address, T expected, T value) {
+        if ((address & (sizeof(T) - 1)) != 0 || address > local_memory.size() ||
+            sizeof(T) > local_memory.size() - address) {
+            AtomicAccessFault(address);
+            return expected;
+        }
+        T observed{};
+        static_cast<void>(Common::AtomicCompareAndSwap(
+            reinterpret_cast<T*>(local_memory.data() + address), value, expected, observed));
+        return observed;
+    }
+
+    void AtomicAccessFault(u64 address);
     void CallSVC(u32 swi) override;
     void ExceptionRaised(u64 pc, Dynarmic::A64::Exception exception) override;
 
@@ -413,6 +476,11 @@ void DynarmicCallbacks64::CallSVC(u32 swi) {
         LOG_CRITICAL(Service_JIT, "plugin issued syscall at unknown address {:#x}", pc);
         parent.jit->HaltExecution();
     }
+}
+
+void DynarmicCallbacks64::AtomicAccessFault(u64 address) {
+    LOG_CRITICAL(Service_JIT, "Invalid atomic access @ {:#016x}", address);
+    parent.jit->HaltExecution(Dynarmic::HaltReason::MemoryAbort);
 }
 
 void DynarmicCallbacks64::ExceptionRaised(u64 pc, Dynarmic::A64::Exception exception) {

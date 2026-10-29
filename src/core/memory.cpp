@@ -201,6 +201,22 @@ struct Memory::Impl {
         }
     }
 
+    u8 CompareExchange8(Common::ProcessAddress addr, u8 expected, u8 value) {
+        return CompareExchange<u8>(addr, expected, value);
+    }
+
+    u16 CompareExchange16(Common::ProcessAddress addr, u16 expected, u16 value) {
+        return CompareExchange<u16_le>(addr, expected, value);
+    }
+
+    u32 CompareExchange32(Common::ProcessAddress addr, u32 expected, u32 value) {
+        return CompareExchange<u32_le>(addr, expected, value);
+    }
+
+    u64 CompareExchange64(Common::ProcessAddress addr, u64 expected, u64 value) {
+        return CompareExchange<u64_le>(addr, expected, value);
+    }
+
     bool WriteExclusive8(const Common::ProcessAddress addr, const u8 data, const u8 expected) {
         return WriteExclusive<u8>(addr, data, expected);
     }
@@ -650,6 +666,26 @@ struct Memory::Impl {
     }
 
     template <typename T>
+    T CompareExchange(Common::ProcessAddress vaddr, T expected, T value) {
+        const auto address = GetInteger(vaddr);
+        u8* const ptr = GetPointerImpl(
+            address,
+            [address]() {
+                LOG_ERROR(HW_Memory, "Unmapped compare-and-exchange @ {:#016x}", address);
+            },
+            [&]() {
+                HandleRasterizerDownload(address, sizeof(T));
+                HandleRasterizerWrite(address, sizeof(T));
+            });
+        T observed = expected;
+        if (ptr) {
+            static_cast<void>(
+                Common::AtomicCompareAndSwap(reinterpret_cast<T*>(ptr), value, expected, observed));
+        }
+        return observed;
+    }
+
+    template <typename T>
     bool WriteExclusive(Common::ProcessAddress vaddr, const T data, const T expected) {
         u8* const ptr = GetPointerImpl(
             GetInteger(vaddr),
@@ -874,6 +910,22 @@ void Memory::Write32(Common::ProcessAddress addr, u32 data) {
 
 void Memory::Write64(Common::ProcessAddress addr, u64 data) {
     impl->Write64(addr, data);
+}
+
+u8 Memory::CompareExchange8(Common::ProcessAddress addr, u8 expected, u8 value) {
+    return impl->CompareExchange8(addr, expected, value);
+}
+
+u16 Memory::CompareExchange16(Common::ProcessAddress addr, u16 expected, u16 value) {
+    return impl->CompareExchange16(addr, expected, value);
+}
+
+u32 Memory::CompareExchange32(Common::ProcessAddress addr, u32 expected, u32 value) {
+    return impl->CompareExchange32(addr, expected, value);
+}
+
+u64 Memory::CompareExchange64(Common::ProcessAddress addr, u64 expected, u64 value) {
+    return impl->CompareExchange64(addr, expected, value);
 }
 
 bool Memory::WriteExclusive8(Common::ProcessAddress addr, u8 data, u8 expected) {

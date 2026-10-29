@@ -124,6 +124,14 @@ protected:
         void* exclusive_write_memory_64;
         void* exclusive_write_memory_128;
 
+        void* compare_exchange_memory_8;
+        void* compare_exchange_memory_16;
+        void* compare_exchange_memory_32;
+        void* compare_exchange_memory_64;
+        void* atomic_memory_8;
+        void* atomic_memory_16;
+        void* atomic_memory_32;
+        void* atomic_memory_64;
         void* call_svc;
         void* exception_raised;
         void* dc_raised;

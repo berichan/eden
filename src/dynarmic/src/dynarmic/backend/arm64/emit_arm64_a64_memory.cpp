@@ -25,6 +25,60 @@ void EmitIR<IR::Opcode::A64ClearExclusive>(oaknut::CodeGenerator& code, EmitCont
     code.STR(WZR, Xstate, offsetof(A64JitState, exclusive_state));
 }
 
+template<std::size_t bitsize, LinkTarget target>
+static void EmitCompareExchangeMemory(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+    auto args = ctx.reg_alloc.GetArgumentInfo(inst);
+    ctx.reg_alloc.PrepareForCall({}, args[1], args[2], args[3]);
+    EmitRelocation(code, ctx, target);
+    if constexpr (bitsize < 32) {
+        code.UBFX(W0, W0, 0, bitsize);
+    }
+    oaknut::Label end;
+    EmitA64CheckMemoryAbort(code, ctx, inst, end, true);
+    code.l(end);
+    ctx.reg_alloc.DefineAsRegister(inst, X0);
+}
+
+template<>
+void EmitIR<IR::Opcode::A64CompareExchangeMemory8>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+    EmitCompareExchangeMemory<8, LinkTarget::CompareExchangeMemory8>(code, ctx, inst);
+}
+
+template<>
+void EmitIR<IR::Opcode::A64CompareExchangeMemory16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+    EmitCompareExchangeMemory<16, LinkTarget::CompareExchangeMemory16>(code, ctx, inst);
+}
+
+template<>
+void EmitIR<IR::Opcode::A64CompareExchangeMemory32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+    EmitCompareExchangeMemory<32, LinkTarget::CompareExchangeMemory32>(code, ctx, inst);
+}
+
+template<>
+void EmitIR<IR::Opcode::A64CompareExchangeMemory64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+    EmitCompareExchangeMemory<64, LinkTarget::CompareExchangeMemory64>(code, ctx, inst);
+}
+
+template<>
+void EmitIR<IR::Opcode::A64AtomicMemory8>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+    EmitCompareExchangeMemory<8, LinkTarget::AtomicMemory8>(code, ctx, inst);
+}
+
+template<>
+void EmitIR<IR::Opcode::A64AtomicMemory16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+    EmitCompareExchangeMemory<16, LinkTarget::AtomicMemory16>(code, ctx, inst);
+}
+
+template<>
+void EmitIR<IR::Opcode::A64AtomicMemory32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+    EmitCompareExchangeMemory<32, LinkTarget::AtomicMemory32>(code, ctx, inst);
+}
+
+template<>
+void EmitIR<IR::Opcode::A64AtomicMemory64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+    EmitCompareExchangeMemory<64, LinkTarget::AtomicMemory64>(code, ctx, inst);
+}
+
 template<>
 void EmitIR<IR::Opcode::A64ReadMemory8>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
     EmitReadMemory<8>(code, ctx, inst);

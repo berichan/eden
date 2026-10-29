@@ -691,6 +691,14 @@ A64OPC(GetTPIDRRO,                                          U64,                
 A64OPC(SetTPIDR,                                            Void,           U64                                                             )
 
 // A64 Memory access
+A64OPC(AtomicMemory8, U8, U64, U64, U8, U8)
+A64OPC(AtomicMemory16, U16, U64, U64, U16, U8)
+A64OPC(AtomicMemory32, U32, U64, U64, U32, U8)
+A64OPC(AtomicMemory64, U64, U64, U64, U64, U8)
+A64OPC(CompareExchangeMemory8, U8, U64, U64, U8, U8)
+A64OPC(CompareExchangeMemory16, U16, U64, U64, U16, U16)
+A64OPC(CompareExchangeMemory32, U32, U64, U64, U32, U32)
+A64OPC(CompareExchangeMemory64, U64, U64, U64, U64, U64)
 A64OPC(ClearExclusive,                                      Void,                                                                           )
 A64OPC(ReadMemory8,                                         U8,             U64,            U64,            AccType                         )
 A64OPC(ReadMemory16,                                        U16,            U64,            U64,            AccType                         )

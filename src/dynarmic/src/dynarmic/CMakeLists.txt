@@ -9,6 +9,7 @@ add_library(dynarmic STATIC
     mcl/intrusive_list.hpp
     mcl/is_instance_of_template.hpp
 
+    backend/atomic_memory.h
     backend/block_range_information.cpp
     backend/block_range_information.h
     backend/exception_handler.h

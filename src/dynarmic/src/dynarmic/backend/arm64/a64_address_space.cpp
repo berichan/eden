@@ -13,6 +13,7 @@
 #include "dynarmic/backend/arm64/devirtualize.h"
 #include "dynarmic/backend/arm64/emit_arm64.h"
 #include "dynarmic/backend/arm64/stack_layout.h"
+#include "dynarmic/backend/atomic_memory.h"
 #include "dynarmic/common/cast_util.h"
 #include "dynarmic/frontend/A64/a64_location_descriptor.h"
 #include "dynarmic/frontend/A64/translate/a64_translate.h"
@@ -60,6 +61,26 @@ static void* EmitCallWriteTrampoline(oaknut::CodeGenerator& code, T* this_, size
     code.dx(info.this_ptr);
     code.l(l_addr);
     code.dx(info.fn_ptr);
+    return target;
+}
+
+template<auto callback, typename T, bool atomic = false>
+static void* EmitCompareExchangeTrampoline(oaknut::CodeGenerator& code, const A64::UserConfig& conf) {
+    using namespace oaknut::util;
+    oaknut::Label l_addr, l_conf;
+    void* target = code.xptr<void*>();
+    code.LDR(X0, l_conf);
+    code.LDR(Xscratch0, l_addr);
+    code.BR(Xscratch0);
+    code.align(8);
+    code.l(l_conf);
+    code.dx(reinterpret_cast<u64>(&conf));
+    code.l(l_addr);
+    if constexpr (atomic) {
+        code.dx(reinterpret_cast<u64>(&Backend::AtomicMemory<callback, T>));
+    } else {
+        code.dx(reinterpret_cast<u64>(&Backend::CompareExchangeMemory<callback, T>));
+    }
     return target;
 }
 
@@ -410,6 +431,14 @@ void A64AddressSpace::EmitPrelude() {
     prelude_info.exclusive_write_memory_32 = EmitExclusiveWriteCallTrampoline<&A64::UserCallbacks::MemoryWriteExclusive32, u32>(code, conf);
     prelude_info.exclusive_write_memory_64 = EmitExclusiveWriteCallTrampoline<&A64::UserCallbacks::MemoryWriteExclusive64, u64>(code, conf);
     prelude_info.exclusive_write_memory_128 = EmitExclusiveWrite128CallTrampoline(code, conf);
+    prelude_info.compare_exchange_memory_8 = EmitCompareExchangeTrampoline<&A64::UserCallbacks::MemoryCompareExchange8, u8>(code, conf);
+    prelude_info.compare_exchange_memory_16 = EmitCompareExchangeTrampoline<&A64::UserCallbacks::MemoryCompareExchange16, u16>(code, conf);
+    prelude_info.compare_exchange_memory_32 = EmitCompareExchangeTrampoline<&A64::UserCallbacks::MemoryCompareExchange32, u32>(code, conf);
+    prelude_info.compare_exchange_memory_64 = EmitCompareExchangeTrampoline<&A64::UserCallbacks::MemoryCompareExchange64, u64>(code, conf);
+    prelude_info.atomic_memory_8 = EmitCompareExchangeTrampoline<&A64::UserCallbacks::MemoryCompareExchange8, u8, true>(code, conf);
+    prelude_info.atomic_memory_16 = EmitCompareExchangeTrampoline<&A64::UserCallbacks::MemoryCompareExchange16, u16, true>(code, conf);
+    prelude_info.atomic_memory_32 = EmitCompareExchangeTrampoline<&A64::UserCallbacks::MemoryCompareExchange32, u32, true>(code, conf);
+    prelude_info.atomic_memory_64 = EmitCompareExchangeTrampoline<&A64::UserCallbacks::MemoryCompareExchange64, u64, true>(code, conf);
     prelude_info.call_svc = EmitCallTrampoline<&A64::UserCallbacks::CallSVC>(code, conf.callbacks);
     prelude_info.exception_raised = EmitCallTrampoline<&A64::UserCallbacks::ExceptionRaised>(code, conf.callbacks);
     prelude_info.isb_raised = EmitCallTrampoline<&A64::UserCallbacks::InstructionSynchronizationBarrierRaised>(code, conf.callbacks);

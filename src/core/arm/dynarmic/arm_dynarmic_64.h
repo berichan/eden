@@ -52,6 +52,11 @@ public:
     bool MemoryWriteExclusive128(u64 vaddr, Dynarmic::A64::Vector value, Dynarmic::A64::Vector expected) override;
     void InstructionCacheOperationRaised(Dynarmic::A64::InstructionCacheOperation op, u64 value) override;
     void ExceptionRaised(u64 pc, Dynarmic::A64::Exception exception) override;
+    u8 MemoryCompareExchange8(u64 address, u8 expected, u8 value) override;
+    u16 MemoryCompareExchange16(u64 address, u16 expected, u16 value) override;
+    u32 MemoryCompareExchange32(u64 address, u32 expected, u32 value) override;
+    u64 MemoryCompareExchange64(u64 address, u64 expected, u64 value) override;
+    bool CheckAtomicAccess(u64 address, size_t size);
     void CallSVC(u32 svc) override;
     void AddTicks(u64 ticks) override;
     u64 GetTicksRemaining() override;

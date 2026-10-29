@@ -76,6 +76,14 @@ enum class LinkTarget {
     ExclusiveWriteMemory32,
     ExclusiveWriteMemory64,
     ExclusiveWriteMemory128,
+    CompareExchangeMemory8,
+    CompareExchangeMemory16,
+    CompareExchangeMemory32,
+    CompareExchangeMemory64,
+    AtomicMemory8,
+    AtomicMemory16,
+    AtomicMemory32,
+    AtomicMemory64,
     CallSVC,
     ExceptionRaised,
     InstructionSynchronizationBarrierRaised,
@@ -183,5 +191,6 @@ void EmitA32ConditionFailedTerminal(oaknut::CodeGenerator& code, EmitContext& ct
 void EmitA64ConditionFailedTerminal(oaknut::CodeGenerator& code, EmitContext& ctx);
 void EmitA32CheckMemoryAbort(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst, oaknut::Label& end);
 void EmitA64CheckMemoryAbort(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst, oaknut::Label& end);
+void EmitA64CheckMemoryAbort(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst, oaknut::Label& end, bool force);
 
 }  // namespace Dynarmic::Backend::Arm64

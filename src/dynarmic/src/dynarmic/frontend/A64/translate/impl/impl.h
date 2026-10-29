@@ -248,10 +248,11 @@ struct TranslatorVisitor final {
     bool STLR(Imm<2> size, Reg Rn, Reg Rt);
     bool LDLAR(Imm<2> size, Reg Rn, Reg Rt);
     bool LDAR(Imm<2> size, Reg Rn, Reg Rt);
+    bool CAS(Imm<2> size, bool acquire, Reg Rs, bool release, Reg Rn, Reg Rt);
+    bool AtomicMemory(Imm<2> size, bool acquire, bool release, Reg Rs, Imm<4> operation, Reg Rn, Reg Rt);
     bool CASP(bool sz, bool L, Reg Rs, bool o0, Reg Rn, Reg Rt);
     bool CASB(bool L, Reg Rs, bool o0, Reg Rn, Reg Rt);
     bool CASH(bool L, Reg Rs, bool o0, Reg Rn, Reg Rt);
-    bool CAS(bool sz, bool L, Reg Rs, bool o0, Reg Rn, Reg Rt);
 
     // Loads and stores - Load register (literal)
     bool LDR_lit_gen(bool opc_0, Imm<19> imm19, Reg Rt);

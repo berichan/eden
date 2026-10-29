@@ -241,6 +241,30 @@ void AddressSpace::Link(EmittedBlockInfo& block_info) {
         case LinkTarget::ExclusiveWriteMemory128:
             c.BL(prelude_info.exclusive_write_memory_128);
             break;
+        case LinkTarget::CompareExchangeMemory8:
+            c.BL(prelude_info.compare_exchange_memory_8);
+            break;
+        case LinkTarget::CompareExchangeMemory16:
+            c.BL(prelude_info.compare_exchange_memory_16);
+            break;
+        case LinkTarget::CompareExchangeMemory32:
+            c.BL(prelude_info.compare_exchange_memory_32);
+            break;
+        case LinkTarget::CompareExchangeMemory64:
+            c.BL(prelude_info.compare_exchange_memory_64);
+            break;
+        case LinkTarget::AtomicMemory8:
+            c.BL(prelude_info.atomic_memory_8);
+            break;
+        case LinkTarget::AtomicMemory16:
+            c.BL(prelude_info.atomic_memory_16);
+            break;
+        case LinkTarget::AtomicMemory32:
+            c.BL(prelude_info.atomic_memory_32);
+            break;
+        case LinkTarget::AtomicMemory64:
+            c.BL(prelude_info.atomic_memory_64);
+            break;
         case LinkTarget::CallSVC:
             c.BL(prelude_info.call_svc);
             break;

@@ -206,6 +206,72 @@ bool TranslatorVisitor::LDAR(Imm<2> sz, Reg Rn, Reg Rt) {
     return OrderedSharedDecodeAndOperation(*this, size, L, o0, Rn, Rt);
 }
 
+bool TranslatorVisitor::CAS(Imm<2> size, bool /*acquire*/, Reg Rs, bool /*release*/, Reg Rn, Reg Rt) {
+    IR::U64 address;
+    if (Rn == Reg::SP) {
+        address = SP(64);
+    } else {
+        address = X(64, Rn);
+    }
+    const size_t bitsize = 8 << size.ZeroExtend<size_t>();
+    const auto expected = X(bitsize, Rs);
+    const auto value = X(bitsize, Rt);
+    IR::UAny observed;
+    // Sequential consistency also satisfies the acquire/release variants.
+    switch (bitsize) {
+    case 8:
+        observed = ir.CompareExchangeMemory8(address, expected, value);
+        break;
+    case 16:
+        observed = ir.CompareExchangeMemory16(address, expected, value);
+        break;
+    case 32:
+        observed = ir.CompareExchangeMemory32(address, expected, value);
+        break;
+    case 64:
+        observed = ir.CompareExchangeMemory64(address, expected, value);
+        break;
+    default:
+        UNREACHABLE();
+    }
+    X(bitsize == 64 ? 64 : 32, Rs, ZeroExtend(observed, bitsize == 64 ? 64 : 32));
+    return true;
+}
+
+bool TranslatorVisitor::AtomicMemory(Imm<2> size, bool /*acquire*/, bool /*release*/, Reg Rs, Imm<4> operation, Reg Rn, Reg Rt) {
+    const auto op = operation.ZeroExtend<u8>();
+    if (op > 8) {
+        return UnallocatedEncoding();
+    }
+    IR::U64 address;
+    if (Rn == Reg::SP) {
+        address = SP(64);
+    } else {
+        address = X(64, Rn);
+    }
+    const size_t bitsize = 8 << size.ZeroExtend<size_t>();
+    const auto operand = X(bitsize, Rs);
+    IR::UAny observed;
+    switch (bitsize) {
+    case 8:
+        observed = ir.AtomicMemory8(address, operand, op);
+        break;
+    case 16:
+        observed = ir.AtomicMemory16(address, operand, op);
+        break;
+    case 32:
+        observed = ir.AtomicMemory32(address, operand, op);
+        break;
+    case 64:
+        observed = ir.AtomicMemory64(address, operand, op);
+        break;
+    default:
+        UNREACHABLE();
+    }
+    X(bitsize == 64 ? 64 : 32, Rt, ZeroExtend(observed, bitsize == 64 ? 64 : 32));
+    return true;
+}
+
 bool TranslatorVisitor::LDAPR(Imm<2> sz, Reg Rn, Reg Rt) {
     // RCpc acquire permits weaker ordering than LDAR. The existing ordered load
     // path provides the required acquire semantics on each host backend.

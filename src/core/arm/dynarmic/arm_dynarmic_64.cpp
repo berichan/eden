@@ -130,6 +130,46 @@ void DynarmicCallbacks64::ExceptionRaised(u64 pc, Dynarmic::A64::Exception excep
     }
 }
 
+bool DynarmicCallbacks64::CheckAtomicAccess(u64 address, size_t size) {
+    Kernel::KMemoryInfo info{};
+    Kernel::Svc::PageInfo page{};
+    const auto query = m_process->GetPageTable().QueryInfo(&info, &page, address);
+    const auto permission = info.GetSvcMemoryInfo().permission;
+    const auto rw = Kernel::Svc::MemoryPermission::ReadWrite;
+    if ((address & (size - 1)) != 0 || query.IsError() || (permission & rw) != rw ||
+        !m_memory.IsValidVirtualAddressRange(address, size)) {
+        LOG_CRITICAL(Core_ARM, "Invalid atomic access at {:#x}, size={}", address, size);
+        m_parent.m_jit->HaltExecution(DataAbort | PrefetchAbort);
+        return false;
+    }
+    return CheckMemoryAccess(address, size, Kernel::DebugWatchpointType::Read) &&
+           CheckMemoryAccess(address, size, Kernel::DebugWatchpointType::Write);
+}
+
+u8 DynarmicCallbacks64::MemoryCompareExchange8(u64 address, u8 expected, u8 value) {
+    return CheckAtomicAccess(address, sizeof(u8))
+               ? m_memory.CompareExchange8(address, expected, value)
+               : expected;
+}
+
+u16 DynarmicCallbacks64::MemoryCompareExchange16(u64 address, u16 expected, u16 value) {
+    return CheckAtomicAccess(address, sizeof(u16))
+               ? m_memory.CompareExchange16(address, expected, value)
+               : expected;
+}
+
+u32 DynarmicCallbacks64::MemoryCompareExchange32(u64 address, u32 expected, u32 value) {
+    return CheckAtomicAccess(address, sizeof(u32))
+               ? m_memory.CompareExchange32(address, expected, value)
+               : expected;
+}
+
+u64 DynarmicCallbacks64::MemoryCompareExchange64(u64 address, u64 expected, u64 value) {
+    return CheckAtomicAccess(address, sizeof(u64))
+               ? m_memory.CompareExchange64(address, expected, value)
+               : expected;
+}
+
 void DynarmicCallbacks64::CallSVC(u32 svc) {
     m_parent.m_svc = svc;
     m_parent.m_jit->HaltExecution(SupervisorCall);

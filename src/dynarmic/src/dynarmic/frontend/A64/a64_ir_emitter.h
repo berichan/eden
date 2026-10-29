@@ -125,6 +125,38 @@ public:
         Inst(Opcode::A64ClearExclusive);
     }
 
+    IR::U8 CompareExchangeMemory8(const IR::U64& vaddr, const IR::U8& expected, const IR::U8& value) noexcept {
+        return Inst<IR::U8>(Opcode::A64CompareExchangeMemory8, ImmCurrentLocationDescriptor(), vaddr, expected, value);
+    }
+
+    IR::U16 CompareExchangeMemory16(const IR::U64& vaddr, const IR::U16& expected, const IR::U16& value) noexcept {
+        return Inst<IR::U16>(Opcode::A64CompareExchangeMemory16, ImmCurrentLocationDescriptor(), vaddr, expected, value);
+    }
+
+    IR::U32 CompareExchangeMemory32(const IR::U64& vaddr, const IR::U32& expected, const IR::U32& value) noexcept {
+        return Inst<IR::U32>(Opcode::A64CompareExchangeMemory32, ImmCurrentLocationDescriptor(), vaddr, expected, value);
+    }
+
+    IR::U64 CompareExchangeMemory64(const IR::U64& vaddr, const IR::U64& expected, const IR::U64& value) noexcept {
+        return Inst<IR::U64>(Opcode::A64CompareExchangeMemory64, ImmCurrentLocationDescriptor(), vaddr, expected, value);
+    }
+
+    IR::U8 AtomicMemory8(const IR::U64& vaddr, const IR::U8& value, u8 operation) noexcept {
+        return Inst<IR::U8>(Opcode::A64AtomicMemory8, ImmCurrentLocationDescriptor(), vaddr, value, Imm8(operation));
+    }
+
+    IR::U16 AtomicMemory16(const IR::U64& vaddr, const IR::U16& value, u8 operation) noexcept {
+        return Inst<IR::U16>(Opcode::A64AtomicMemory16, ImmCurrentLocationDescriptor(), vaddr, value, Imm8(operation));
+    }
+
+    IR::U32 AtomicMemory32(const IR::U64& vaddr, const IR::U32& value, u8 operation) noexcept {
+        return Inst<IR::U32>(Opcode::A64AtomicMemory32, ImmCurrentLocationDescriptor(), vaddr, value, Imm8(operation));
+    }
+
+    IR::U64 AtomicMemory64(const IR::U64& vaddr, const IR::U64& value, u8 operation) noexcept {
+        return Inst<IR::U64>(Opcode::A64AtomicMemory64, ImmCurrentLocationDescriptor(), vaddr, value, Imm8(operation));
+    }
+
     IR::U8 ReadMemory8(const IR::U64& vaddr, IR::AccType acc_type) noexcept {
         return Inst<IR::U8>(Opcode::A64ReadMemory8, ImmCurrentLocationDescriptor(), vaddr, IR::Value{acc_type});
     }

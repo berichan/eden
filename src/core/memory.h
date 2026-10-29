@@ -265,6 +265,11 @@ public:
      */
     bool WriteExclusive8(Common::ProcessAddress addr, u8 data, u8 expected);
 
+    u8 CompareExchange8(Common::ProcessAddress addr, u8 expected, u8 value);
+    u16 CompareExchange16(Common::ProcessAddress addr, u16 expected, u16 value);
+    u32 CompareExchange32(Common::ProcessAddress addr, u32 expected, u32 value);
+    u64 CompareExchange64(Common::ProcessAddress addr, u64 expected, u64 value);
+
     /**
      * Writes a 16-bit unsigned integer to the given virtual address in
      * the current process' address space if and only if the address contains

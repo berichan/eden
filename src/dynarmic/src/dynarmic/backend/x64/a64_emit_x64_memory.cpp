@@ -13,17 +13,18 @@
 
 #include <fmt/format.h>
 #include <fmt/ostream.h>
-#include "dynarmic/mcl/integer_of_size.hpp"
-#include "dynarmic/backend/x64/xbyak.h"
 
+#include "dynarmic/backend/atomic_memory.h"
 #include "dynarmic/backend/x64/a64_emit_x64.h"
 #include "dynarmic/backend/x64/abi.h"
 #include "dynarmic/backend/x64/devirtualize.h"
 #include "dynarmic/backend/x64/emit_x64_memory.h"
 #include "dynarmic/backend/x64/exclusive_monitor_friend.h"
 #include "dynarmic/backend/x64/perf_map.h"
+#include "dynarmic/backend/x64/xbyak.h"
 #include "dynarmic/common/spin_lock_x64.h"
 #include "dynarmic/interface/exclusive_monitor.h"
+#include "dynarmic/mcl/integer_of_size.hpp"
 
 namespace Dynarmic::Backend::X64 {
 
@@ -285,6 +286,52 @@ void A64EmitX64::GenFastmemFallbacks() {
 #include "dynarmic/backend/x64/emit_x64_memory.cpp.inc"
 #undef Axx
 
+template<std::size_t bitsize, auto callback, typename T, bool atomic>
+void A64EmitX64::EmitCompareExchangeMemory(A64EmitContext& ctx, IR::Inst* inst) {
+    auto args = ctx.reg_alloc.GetArgumentInfo(inst);
+    ctx.reg_alloc.HostCall(code, inst, {}, args[1], args[2], args[3]);
+    code.mov(code.ABI_PARAM1, reinterpret_cast<u64>(&conf));
+    if constexpr (atomic) {
+        code.CallFunction(&Backend::AtomicMemory<callback, T>);
+    } else {
+        code.CallFunction(&Backend::CompareExchangeMemory<callback, T>);
+    }
+    code.ZeroExtendFrom(bitsize, code.ABI_RETURN);
+    EmitCheckMemoryAbort(ctx, inst, nullptr, true);
+}
+
+void A64EmitX64::EmitA64CompareExchangeMemory8(A64EmitContext& ctx, IR::Inst* inst) {
+    EmitCompareExchangeMemory<8, &A64::UserCallbacks::MemoryCompareExchange8, u8>(ctx, inst);
+}
+
+void A64EmitX64::EmitA64CompareExchangeMemory16(A64EmitContext& ctx, IR::Inst* inst) {
+    EmitCompareExchangeMemory<16, &A64::UserCallbacks::MemoryCompareExchange16, u16>(ctx, inst);
+}
+
+void A64EmitX64::EmitA64CompareExchangeMemory32(A64EmitContext& ctx, IR::Inst* inst) {
+    EmitCompareExchangeMemory<32, &A64::UserCallbacks::MemoryCompareExchange32, u32>(ctx, inst);
+}
+
+void A64EmitX64::EmitA64CompareExchangeMemory64(A64EmitContext& ctx, IR::Inst* inst) {
+    EmitCompareExchangeMemory<64, &A64::UserCallbacks::MemoryCompareExchange64, u64>(ctx, inst);
+}
+
+void A64EmitX64::EmitA64AtomicMemory8(A64EmitContext& ctx, IR::Inst* inst) {
+    EmitCompareExchangeMemory<8, &A64::UserCallbacks::MemoryCompareExchange8, u8, true>(ctx, inst);
+}
+
+void A64EmitX64::EmitA64AtomicMemory16(A64EmitContext& ctx, IR::Inst* inst) {
+    EmitCompareExchangeMemory<16, &A64::UserCallbacks::MemoryCompareExchange16, u16, true>(ctx, inst);
+}
+
+void A64EmitX64::EmitA64AtomicMemory32(A64EmitContext& ctx, IR::Inst* inst) {
+    EmitCompareExchangeMemory<32, &A64::UserCallbacks::MemoryCompareExchange32, u32, true>(ctx, inst);
+}
+
+void A64EmitX64::EmitA64AtomicMemory64(A64EmitContext& ctx, IR::Inst* inst) {
+    EmitCompareExchangeMemory<64, &A64::UserCallbacks::MemoryCompareExchange64, u64, true>(ctx, inst);
+}
+
 void A64EmitX64::EmitA64ReadMemory8(A64EmitContext& ctx, IR::Inst* inst) {
     EmitMemoryRead<8, &A64::UserCallbacks::MemoryRead>(ctx, inst);
 }
@@ -409,8 +456,8 @@ void A64EmitX64::EmitA64ExclusiveWriteMemory128(A64EmitContext& ctx, IR::Inst* i
     }
 }
 
-void A64EmitX64::EmitCheckMemoryAbort(A64EmitContext&, IR::Inst* inst, Xbyak::Label* end) {
-    if (!conf.check_halt_on_memory_access) {
+void A64EmitX64::EmitCheckMemoryAbort(A64EmitContext&, IR::Inst* inst, Xbyak::Label* end, bool force) {
+    if (!conf.check_halt_on_memory_access && !force) {
         return;
     }
 

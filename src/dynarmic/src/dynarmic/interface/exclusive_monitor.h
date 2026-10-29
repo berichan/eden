@@ -64,6 +64,20 @@ public:
         return result;
     }
 
+    /// Serialize an atomic operation with exclusive accesses. Reservations may fail
+    /// spuriously, so conservatively invalidate all reservations, including on a
+    /// failed comparison.
+    template<typename Function>
+    auto DoAtomicOperation(Function op) {
+        Lock();
+        for (auto& address : exclusive_addresses) {
+            address = INVALID_EXCLUSIVE_ADDRESS;
+        }
+        const auto value = op();
+        Unlock();
+        return value;
+    }
+
     /// Unmark everything.
     void Clear();
     /// Unmark processor id

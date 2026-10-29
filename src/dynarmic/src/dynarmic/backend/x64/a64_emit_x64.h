@@ -93,7 +93,9 @@ public:
     FakeCall FastmemCallback(u64 rip);
 
     // Memory access helpers
-    void EmitCheckMemoryAbort(A64EmitContext& ctx, IR::Inst* inst, Xbyak::Label* end = nullptr);
+    void EmitCheckMemoryAbort(A64EmitContext& ctx, IR::Inst* inst, Xbyak::Label* end = nullptr, bool force = false);
+    template<std::size_t bitsize, auto callback, typename T, bool atomic = false>
+    void EmitCompareExchangeMemory(A64EmitContext& ctx, IR::Inst* inst);
     template<std::size_t bitsize, auto callback>
     void EmitMemoryRead(A64EmitContext& ctx, IR::Inst* inst);
     template<std::size_t bitsize, auto callback>
