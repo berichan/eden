@@ -1110,6 +1110,7 @@ add_library(core STATIC
     hle/service/vi/display_list.h
     hle/service/vi/layer.h
     hle/service/vi/layer_list.h
+    hle/service/vi/native_layer_pool.h
     hle/service/vi/manager_display_service.cpp
     hle/service/vi/manager_display_service.h
     hle/service/vi/manager_root_service.cpp

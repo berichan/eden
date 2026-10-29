@@ -19,6 +19,7 @@
 #include "core/hle/service/gsv/user_session.h"
 #include "core/hle/service/hle_ipc.h"
 #include "core/hle/service/ipc_helpers.h"
+#include "core/hle/service/vi/native_layer_pool.h"
 
 namespace {
 
@@ -524,4 +525,82 @@ TEST_CASE("Copied guest objects remain referenced until the IPC reply is release
         REQUIRE(caller.process.GetReferenceCount() == references + 1);
     }
     REQUIRE(caller.process.GetReferenceCount() == references);
+}
+
+TEST_CASE("Native display layers share a bounded pool with owner-checked release",
+          "[core][ipc][gsv]") {
+    Service::VI::NativeLayerPool pool;
+    std::array<u64, Service::VI::NativeLayerPool::Capacity> ids{};
+    for (size_t i = 0; i < ids.size(); ++i) {
+        REQUIRE(pool.Create(&ids[i], i % 2).IsSuccess());
+        REQUIRE(ids[i] != 0);
+    }
+    u64 extra_id = 0xfeed;
+    REQUIRE(pool.Create(&extra_id, 2) == Result{ErrorModule::VI, 1});
+    REQUIRE(extra_id == 0xfeed);
+    REQUIRE(pool.Destroy(ids[0], 1) == Result{ErrorModule::VI, 7});
+    REQUIRE(pool.Create(&extra_id, 2) == Result{ErrorModule::VI, 1});
+    REQUIRE(pool.Destroy(ids[0], 0).IsSuccess());
+    REQUIRE(pool.Create(&extra_id, 2).IsSuccess());
+    REQUIRE(extra_id != ids[0]);
+    REQUIRE(pool.Destroy(ids[0], 0) == Result{ErrorModule::VI, 7});
+    REQUIRE(pool.Destroy(extra_id, 2).IsSuccess());
+    REQUIRE(pool.Destroy(extra_id, 2) == Result{ErrorModule::VI, 7});
+    pool.Clear();
+    REQUIRE(pool.Destroy(ids[1], 1) == Result{ErrorModule::VI, 7});
+    for (auto& id : ids) {
+        REQUIRE(pool.Create(&id, 3).IsSuccess());
+        REQUIRE(id > extra_id);
+    }
+}
+
+TEST_CASE("Native display layer creation validates tokens and both notification slots",
+          "[core][ipc][gsv]") {
+    Caller caller;
+    Service::GSV::DisplaySession service{caller.system, &caller.process};
+    REQUIRE(RequestWords(caller, service, 201, {}).first == Kernel::ResultInvalidSize);
+    const std::array<u32, 4> zero_token{0, 0, 1, 2};
+    REQUIRE(RequestWords(caller, service, 201, zero_token).first == Result{ErrorModule::VI, 4});
+    const std::array<u32, 4> zero_state{1, 0, 0, 2};
+    REQUIRE(RequestWords(caller, service, 201, zero_state).first == Result{ErrorModule::VI, 4});
+    const std::array<u32, 4> invalid_buffer{1, 0, 1, 1024};
+    REQUIRE(RequestWords(caller, service, 201, invalid_buffer).first == Result{ErrorModule::VI, 4});
+    REQUIRE(RequestWords(caller, service, 202, {}).first == Kernel::ResultInvalidSize);
+    const std::array<u32, 2> absent_token{1, 0};
+    REQUIRE(RequestWords(caller, service, 202, absent_token).first.IsSuccess());
+    REQUIRE(RequestWords(caller, service, 202, absent_token).first.IsSuccess());
+    REQUIRE(RequestWords(caller, service, 212, {}, 3).first == Kernel::ResultInvalidSize);
+    const auto [state_result, state] = RequestWords(caller, service, 212, absent_token, 3);
+    REQUIRE(state_result == Result{ErrorModule::VI, 7});
+    REQUIRE(state == 0);
+    REQUIRE(RequestWords(caller, service, 251, {}).first == Kernel::ResultInvalidSize);
+    const std::array<u32, 4> missing_layer{1, 0, 0x61666564, 0x00746c75};
+    REQUIRE(RequestWords(caller, service, 251, missing_layer).first == Result{ErrorModule::VI, 7});
+    REQUIRE(RequestWords(caller, service, 252, {}).first == Kernel::ResultInvalidSize);
+    REQUIRE(RequestWords(caller, service, 252, absent_token).first.IsSuccess());
+}
+
+TEST_CASE("Empty native layers retain their buffer state across display binding",
+          "[core][ipc][gsv]") {
+    Service::VI::NativeLayerPool pool;
+    u64 id{};
+    REQUIRE(pool.Create(&id, 4).IsSuccess());
+    u64 state = 0xfeed;
+    REQUIRE(pool.QueryBufferState(&state, id, 5) == Result{ErrorModule::VI, 7});
+    REQUIRE(state == 0xfeed);
+    REQUIRE(pool.QueryBufferState(&state, id, 4).IsSuccess());
+    REQUIRE(state == 0);
+    REQUIRE(pool.Bind(id, 5, 0) == Result{ErrorModule::VI, 7});
+    REQUIRE(pool.Bind(id, 4, 0).IsSuccess());
+    REQUIRE(pool.Bind(id, 4, 0) == Result{ErrorModule::VI, 1});
+    REQUIRE(pool.Unbind(id, 5) == Result{ErrorModule::VI, 7});
+    REQUIRE(pool.Bind(id, 4, 1) == Result{ErrorModule::VI, 1});
+    REQUIRE(pool.Unbind(id, 4).IsSuccess());
+    REQUIRE(pool.Unbind(id, 4).IsSuccess());
+    REQUIRE(pool.Bind(id, 4, 1).IsSuccess());
+    REQUIRE(pool.QueryBufferState(&state, id, 4).IsSuccess());
+    REQUIRE(state == 0);
+    REQUIRE(pool.Destroy(id, 4).IsSuccess());
+    REQUIRE(pool.Bind(id, 4, 1) == Result{ErrorModule::VI, 7});
+    REQUIRE(pool.Unbind(id, 4) == Result{ErrorModule::VI, 7});
 }

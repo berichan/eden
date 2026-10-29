@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <cstring>
 
 #include "core/core.h"
@@ -51,6 +52,11 @@ DisplaySession::DisplaySession(Core::System& system, Kernel::KProcess* process)
         {32, &DisplaySession::DuplicateSemaphoreHandle, "DuplicateSemaphoreHandle"},
         {101, &DisplaySession::RegisterDisplay, "RegisterDisplay"},
         {102, &DisplaySession::UnregisterDisplay, "UnregisterDisplay"},
+        {201, &DisplaySession::CreateLayer, "CreateLayer"},
+        {202, &DisplaySession::DestroyLayer, "DestroyLayer"},
+        {212, &DisplaySession::QueryLayerBufferState, "QueryLayerBufferState"},
+        {251, &DisplaySession::BindLayer, "BindLayer"},
+        {252, &DisplaySession::UnbindLayer, "UnbindLayer"},
         {261, &DisplaySession::LinkVsyncSemaphore, "LinkVsyncSemaphore"},
         {262, &DisplaySession::UnlinkVsyncSemaphore, "UnlinkVsyncSemaphore"},
     };
@@ -59,6 +65,11 @@ DisplaySession::DisplaySession(Core::System& system, Kernel::KProcess* process)
 
 DisplaySession::~DisplaySession() {
     ReleaseDisplay();
+    for (const auto& layer : m_layers) {
+        if (layer) {
+            m_container->DestroyNativeLayer(layer->layer_id, m_process->GetProcessId());
+        }
+    }
     m_service_context.CloseEvent(m_notification_event);
     for (auto* event : m_semaphores) {
         m_service_context.CloseEvent(event);
@@ -178,12 +189,7 @@ void DisplaySession::RegisterDisplay(HLERequestContext& ctx) {
                  ResultInvalidArgument);
         R_UNLESS(name == DefaultDisplayName, ResultNotFound);
         R_UNLESS(!m_display, ResultAlreadyRegistered);
-        if (!m_container) {
-            const auto root =
-                system.ServiceManager().GetService<VI::IManagerRootService>("vi:m", true);
-            R_UNLESS(root != nullptr, Kernel::ResultInvalidState);
-            m_container = root->GetContainer();
-        }
+        R_TRY(EnsureContainer());
         u64 display_id{};
         R_TRY(m_container->OpenDisplay(&display_id, VI::DisplayName{"Default"}));
         m_display = DisplayRegistration{display_id, notification_id};
@@ -208,6 +214,11 @@ void DisplaySession::UnregisterDisplay(HLERequestContext& ctx) {
 
 void DisplaySession::ReleaseDisplay() {
     if (m_display) {
+        for (const auto& layer : m_layers) {
+            if (layer) {
+                m_container->UnbindNativeLayer(layer->layer_id, m_process->GetProcessId());
+            }
+        }
         for (size_t id = 0; id < m_vsync_displays.size(); ++id) {
             if (m_vsync_displays[id] == m_display->display_id) {
                 m_container->UnlinkVsyncEvent(m_display->display_id,
@@ -253,6 +264,111 @@ void DisplaySession::UnlinkVsyncSemaphore(HLERequestContext& ctx) {
         m_vsync_displays[id] == m_display->display_id) {
         m_container->UnlinkVsyncEvent(m_display->display_id, &m_semaphores[id]->GetReadableEvent());
         m_vsync_displays[id].reset();
+    }
+    Reply(ctx, ResultSuccess);
+}
+
+Result DisplaySession::EnsureContainer() {
+    if (!m_container) {
+        const auto root = system.ServiceManager().GetService<VI::IManagerRootService>("vi:m", true);
+        R_UNLESS(root != nullptr, Kernel::ResultInvalidState);
+        m_container = root->GetContainer();
+    }
+    R_SUCCEED();
+}
+
+void DisplaySession::CreateLayer(HLERequestContext& ctx) {
+    const auto result = [&]() -> Result {
+        R_UNLESS(HasInputWords(ctx, 4), Kernel::ResultInvalidSize);
+        IPC::RequestParser rp{ctx};
+        const auto token = rp.Pop<u64>();
+        const auto state_notification_id = rp.Pop<u32>();
+        const auto buffer_notification_id = rp.Pop<u32>();
+        R_UNLESS(token != 0 && state_notification_id != 0 && buffer_notification_id != 0 &&
+                     state_notification_id <= DisplayEventQueue::MaxEventId &&
+                     buffer_notification_id <= DisplayEventQueue::MaxEventId,
+                 ResultInvalidArgument);
+        R_UNLESS(std::ranges::none_of(
+                     m_layers, [=](const auto& layer) { return layer && layer->token == token; }),
+                 ResultAlreadyRegistered);
+        const auto slot = std::ranges::find_if(m_layers, [](const auto& layer) { return !layer; });
+        R_UNLESS(slot != m_layers.end(), (Result{ErrorModule::VI, 1}));
+        R_TRY(EnsureContainer());
+        u64 layer_id{};
+        R_TRY(m_container->CreateNativeLayer(&layer_id, m_process->GetProcessId()));
+        *slot = LayerRegistration{token, layer_id, state_notification_id, buffer_notification_id};
+        LOG_DEBUG(Service, "Native display layer allocated: id={}, state_event={}, buffer_event={}",
+                  layer_id, state_notification_id, buffer_notification_id);
+        R_SUCCEED();
+    }();
+    Reply(ctx, result);
+}
+
+void DisplaySession::DestroyLayer(HLERequestContext& ctx) {
+    if (!HasInputWords(ctx, 2)) {
+        Reply(ctx, Kernel::ResultInvalidSize);
+        return;
+    }
+    IPC::RequestParser rp{ctx};
+    const auto token = rp.Pop<u64>();
+    const auto slot = std::ranges::find_if(
+        m_layers, [=](const auto& layer) { return layer && layer->token == token; });
+    if (slot != m_layers.end()) {
+        m_container->DestroyNativeLayer((*slot)->layer_id, m_process->GetProcessId());
+        slot->reset();
+    }
+    Reply(ctx, ResultSuccess);
+}
+
+void DisplaySession::QueryLayerBufferState(HLERequestContext& ctx) {
+    u64 state{};
+    const auto result = [&]() -> Result {
+        R_UNLESS(HasInputWords(ctx, 2), Kernel::ResultInvalidSize);
+        IPC::RequestParser rp{ctx};
+        const auto token = rp.Pop<u64>();
+        R_UNLESS(token != 0, ResultInvalidArgument);
+        const auto layer = std::ranges::find_if(
+            m_layers, [=](const auto& entry) { return entry && entry->token == token; });
+        R_UNLESS(layer != m_layers.end(), ResultNotFound);
+        R_RETURN(m_container->QueryNativeLayerBufferState(&state, (*layer)->layer_id,
+                                                          m_process->GetProcessId()));
+    }();
+    IPC::ResponseBuilder rb{ctx, 4};
+    rb.Push(result);
+    rb.Push(state);
+}
+
+void DisplaySession::BindLayer(HLERequestContext& ctx) {
+    const auto result = [&]() -> Result {
+        R_UNLESS(HasInputWords(ctx, 4), Kernel::ResultInvalidSize);
+        IPC::RequestParser rp{ctx};
+        const auto token = rp.Pop<u64>();
+        const auto name = rp.PopRaw<std::array<char, 8>>();
+        R_UNLESS(token != 0 && (name != std::array<char, 8>{}), ResultInvalidArgument);
+        const auto layer = std::ranges::find_if(
+            m_layers, [=](const auto& entry) { return entry && entry->token == token; });
+        R_UNLESS(layer != m_layers.end() && name == DefaultDisplayName && m_display,
+                 ResultNotFound);
+        R_TRY(m_container->BindNativeLayer((*layer)->layer_id, m_process->GetProcessId(),
+                                           m_display->display_id));
+        LOG_DEBUG(Service, "Native display layer bound: layer_id={}, display_id={}",
+                  (*layer)->layer_id, m_display->display_id);
+        R_SUCCEED();
+    }();
+    Reply(ctx, result);
+}
+
+void DisplaySession::UnbindLayer(HLERequestContext& ctx) {
+    if (!HasInputWords(ctx, 2)) {
+        Reply(ctx, Kernel::ResultInvalidSize);
+        return;
+    }
+    IPC::RequestParser rp{ctx};
+    const auto token = rp.Pop<u64>();
+    const auto layer = std::ranges::find_if(
+        m_layers, [=](const auto& entry) { return entry && entry->token == token; });
+    if (layer != m_layers.end()) {
+        m_container->UnbindNativeLayer((*layer)->layer_id, m_process->GetProcessId());
     }
     Reply(ctx, ResultSuccess);
 }

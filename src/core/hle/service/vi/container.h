@@ -13,6 +13,7 @@
 #include "core/hle/service/vi/conductor.h"
 #include "core/hle/service/vi/display_list.h"
 #include "core/hle/service/vi/layer_list.h"
+#include "core/hle/service/vi/native_layer_pool.h"
 #include "core/hle/service/vi/shared_buffer_manager.h"
 
 union Result;
@@ -53,6 +54,11 @@ public:
 
     Result OpenDisplay(u64* out_display_id, const DisplayName& display_name);
     Result CloseDisplay(u64 display_id);
+    Result CreateNativeLayer(u64* out_layer_id, u64 owner_process_id);
+    Result DestroyNativeLayer(u64 layer_id, u64 owner_process_id);
+    Result QueryNativeLayerBufferState(u64* out_state, u64 layer_id, u64 owner_process_id);
+    Result BindNativeLayer(u64 layer_id, u64 owner_process_id, u64 display_id);
+    Result UnbindNativeLayer(u64 layer_id, u64 owner_process_id);
 
     // Managed layers are created by the interaction between am and ommdisp
     // on behalf of an applet. Their lifetime ends with the lifetime of the
@@ -92,6 +98,7 @@ private:
     std::mutex m_lock{};
     DisplayList m_displays{};
     LayerList m_layers{};
+    NativeLayerPool m_native_layers{};
     std::shared_ptr<Nvnflinger::IHOSBinderDriver> m_binder_driver{};
     std::shared_ptr<Nvnflinger::SurfaceFlinger> m_surface_flinger{};
     std::optional<SharedBufferManager> m_shared_buffer_manager{};

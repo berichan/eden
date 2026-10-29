@@ -38,10 +38,23 @@ private:
     void LinkVsyncSemaphore(HLERequestContext& ctx);
     void UnlinkVsyncSemaphore(HLERequestContext& ctx);
     void ReleaseDisplay();
+    void CreateLayer(HLERequestContext& ctx);
+    void DestroyLayer(HLERequestContext& ctx);
+    void QueryLayerBufferState(HLERequestContext& ctx);
+    void BindLayer(HLERequestContext& ctx);
+    void UnbindLayer(HLERequestContext& ctx);
+    Result EnsureContainer();
 
     struct DisplayRegistration {
         u64 display_id;
         u32 notification_id;
+    };
+
+    struct LayerRegistration {
+        u64 token;
+        u64 layer_id;
+        u32 state_notification_id;
+        u32 buffer_notification_id;
     };
 
     Kernel::KScopedAutoObject<Kernel::KProcess> m_process;
@@ -52,6 +65,7 @@ private:
     std::shared_ptr<VI::Container> m_container;
     std::optional<DisplayRegistration> m_display;
     std::array<std::optional<u64>, 8> m_vsync_displays{};
+    std::array<std::optional<LayerRegistration>, 16> m_layers{};
 };
 
 } // namespace Service::GSV

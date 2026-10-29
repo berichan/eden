@@ -46,6 +46,7 @@ void Container::OnTerminate() {
     std::scoped_lock lk{m_lock};
 
     m_is_shut_down = true;
+    m_native_layers.Clear();
 
     m_layers.ForEachLayer([&](auto& layer) { this->DestroyLayerLocked(layer.GetId()); });
 
@@ -87,6 +88,33 @@ Result Container::OpenDisplay(u64* out_display_id, const DisplayName& display_na
 
 Result Container::CloseDisplay(u64 display_id) {
     R_SUCCEED();
+}
+
+Result Container::CreateNativeLayer(u64* out_layer_id, u64 owner_process_id) {
+    std::scoped_lock lk{m_lock};
+    R_UNLESS(!m_is_shut_down, VI::ResultOperationFailed);
+    R_RETURN(m_native_layers.Create(out_layer_id, owner_process_id));
+}
+
+Result Container::DestroyNativeLayer(u64 layer_id, u64 owner_process_id) {
+    std::scoped_lock lk{m_lock};
+    R_RETURN(m_native_layers.Destroy(layer_id, owner_process_id));
+}
+
+Result Container::QueryNativeLayerBufferState(u64* out_state, u64 layer_id, u64 owner_process_id) {
+    std::scoped_lock lk{m_lock};
+    R_RETURN(m_native_layers.QueryBufferState(out_state, layer_id, owner_process_id));
+}
+
+Result Container::BindNativeLayer(u64 layer_id, u64 owner_process_id, u64 display_id) {
+    std::scoped_lock lk{m_lock};
+    R_UNLESS(m_displays.GetDisplayById(display_id) != nullptr, VI::ResultNotFound);
+    R_RETURN(m_native_layers.Bind(layer_id, owner_process_id, display_id));
+}
+
+Result Container::UnbindNativeLayer(u64 layer_id, u64 owner_process_id) {
+    std::scoped_lock lk{m_lock};
+    R_RETURN(m_native_layers.Unbind(layer_id, owner_process_id));
 }
 
 Result Container::CreateManagedLayer(u64* out_layer_id, u64 display_id, u64 owner_aruid) {
