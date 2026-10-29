@@ -25,7 +25,13 @@ SyncpointManager::SyncpointManager(Tegra::Host1x::Host1x& host1x_) : host1x{host
     }
 }
 
-SyncpointManager::~SyncpointManager() = default;
+SyncpointManager::~SyncpointManager() {
+    for (u32 id = 0; id < syncpoints.size(); ++id) {
+        if (syncpoints[id].reserved && !Tegra::Host1x::SyncpointManager::IsFixedSyncpoint(id)) {
+            host1x.GetSyncpointManager().ReleaseSyncpoint(id);
+        }
+    }
+}
 
 u32 SyncpointManager::ReserveSyncpoint(u32 id, bool client_managed) {
     auto& syncpoint = syncpoints.at(id);
@@ -37,13 +43,16 @@ u32 SyncpointManager::ReserveSyncpoint(u32 id, bool client_managed) {
 
     syncpoint.reserved = true;
     syncpoint.interface_managed = client_managed;
+    const u32 value = host1x.GetSyncpointManager().GetHostSyncpointValue(id);
+    syncpoint.counter_min = value;
+    syncpoint.counter_max = value;
 
     return id;
 }
 
 u32 SyncpointManager::FindFreeSyncpoint() {
     for (u32 i{1}; i < syncpoints.size(); i++) {
-        if (!syncpoints[i].reserved) {
+        if (!syncpoints[i].reserved && host1x.GetSyncpointManager().TryReserveSyncpoint(i)) {
             return i;
         }
     }
@@ -61,6 +70,9 @@ void SyncpointManager::FreeSyncpoint(u32 id) {
     auto& syncpoint = syncpoints.at(id);
     ASSERT(syncpoint.reserved);
     syncpoint.reserved = false;
+    if (!Tegra::Host1x::SyncpointManager::IsFixedSyncpoint(id)) {
+        host1x.GetSyncpointManager().ReleaseSyncpoint(id);
+    }
 }
 
 bool SyncpointManager::IsSyncpointAllocated(u32 id) const {

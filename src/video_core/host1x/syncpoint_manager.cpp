@@ -4,11 +4,73 @@
 // SPDX-FileCopyrightText: 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <bitset>
+#include <utility>
+#include "common/assert.h"
 #include "video_core/host1x/syncpoint_manager.h"
 
 namespace Tegra {
 
 namespace Host1x {
+
+struct SyncpointManager::Allocations {
+    std::mutex mutex;
+    std::bitset<NativeSyncpointCount> reserved;
+};
+
+SyncpointManager::SyncpointManager() : allocations{std::make_shared<Allocations>()} {}
+
+bool SyncpointManager::IsFixedSyncpoint(u32 id) {
+    // The null counter, VIC, display vblanks, NVDEC and NVJPG are not dynamically allocated.
+    return id == 0 || id == 12 || id == 26 || id == 27 || id == 54 || id == 55;
+}
+
+bool SyncpointManager::TryReserveSyncpoint(u32 id) {
+    if (id >= NativeSyncpointCount || IsFixedSyncpoint(id)) {
+        return false;
+    }
+    std::scoped_lock lock{allocations->mutex};
+    if (allocations->reserved.test(id)) {
+        return false;
+    }
+    allocations->reserved.set(id);
+    return true;
+}
+
+void SyncpointManager::ReleaseSyncpoint(u32 id) {
+    std::scoped_lock lock{allocations->mutex};
+    ASSERT(id < NativeSyncpointCount && !IsFixedSyncpoint(id) && allocations->reserved.test(id));
+    allocations->reserved.reset(id);
+}
+
+SyncpointManager::Reservation::Reservation(std::shared_ptr<Allocations> allocations_, u32 id_)
+    : allocations{std::move(allocations_)}, id{id_} {}
+
+SyncpointManager::Reservation::Reservation(Reservation&& other) noexcept
+    : allocations{std::move(other.allocations)}, id{other.id} {}
+
+SyncpointManager::Reservation::~Reservation() {
+    if (allocations) {
+        std::scoped_lock lock{allocations->mutex};
+        ASSERT(allocations->reserved.test(id));
+        allocations->reserved.reset(id);
+    }
+}
+
+u32 SyncpointManager::Reservation::GetId() const {
+    return id;
+}
+
+std::optional<SyncpointManager::Reservation> SyncpointManager::AllocateNativeChannelSyncpoint() {
+    std::scoped_lock lock{allocations->mutex};
+    for (u32 id = NativeChannelSyncpointBase; id < NativeSyncpointCount; ++id) {
+        if (!IsFixedSyncpoint(id) && !allocations->reserved.test(id)) {
+            allocations->reserved.set(id);
+            return Reservation{allocations, id};
+        }
+    }
+    return std::nullopt;
+}
 
 SyncpointManager::ActionHandle SyncpointManager::RegisterAction(
     std::atomic<u32>& syncpoint, std::list<RegisteredAction>& action_storage, u32 expected_value,

@@ -8,7 +8,9 @@
 #include <condition_variable>
 #include <functional>
 #include <list>
+#include <memory>
 #include <mutex>
+#include <optional>
 
 #include "common/common_types.h"
 
@@ -17,8 +19,31 @@ namespace Tegra {
 namespace Host1x {
 
 class SyncpointManager {
+    struct Allocations;
+
 public:
     static constexpr size_t NativeSyncpointCount = 448;
+    static constexpr u32 NativeChannelSyncpointBase = 17;
+
+    class Reservation {
+    public:
+        Reservation(Reservation&& other) noexcept;
+        Reservation& operator=(Reservation&&) = delete;
+        ~Reservation();
+        u32 GetId() const;
+
+    private:
+        friend class SyncpointManager;
+        Reservation(std::shared_ptr<Allocations> allocations, u32 id);
+        std::shared_ptr<Allocations> allocations;
+        u32 id;
+    };
+
+    SyncpointManager();
+    static bool IsFixedSyncpoint(u32 id);
+    bool TryReserveSyncpoint(u32 id);
+    void ReleaseSyncpoint(u32 id);
+    std::optional<Reservation> AllocateNativeChannelSyncpoint();
     u32 GetGuestSyncpointValue(u32 id) const {
         return syncpoints_guest[id].load(std::memory_order_acquire);
     }
@@ -68,6 +93,7 @@ public:
     }
 
 private:
+    std::shared_ptr<Allocations> allocations;
     void Increment(std::atomic<u32>& syncpoint, std::condition_variable& wait_cv,
                    std::list<RegisteredAction>& action_storage);
 

@@ -18,7 +18,8 @@ TEST_CASE("Native channel allocation creates owned runlist resources after a val
           "[core][ipc]") {
     using namespace Service::Nvidia;
     Core::System system;
-    NvCore::NativeGpuChannels channels;
+    Tegra::Host1x::SyncpointManager syncpoints;
+    NvCore::NativeGpuChannels channels{syncpoints};
     Devices::nvhost_native_gpu device{system, channels};
     const NvCore::SessionId owner{7};
     const NvCore::SessionId foreign{8};
@@ -37,7 +38,7 @@ TEST_CASE("Native channel allocation creates owned runlist resources after a val
         REQUIRE(device.Ioctl1(4, Ioctl{.raw = raw}, input, output) == NvResult::InvalidSize);
     }
     REQUIRE(device.Ioctl1(4, allocate, std::span{input}.first(3), output) == NvResult::InvalidSize);
-    REQUIRE(device.Ioctl1(4, Ioctl{.raw = 0xc020481a}, input, output) == NvResult::NotSupported);
+    REQUIRE(device.Ioctl1(4, Ioctl{.raw = 0xc020481a}, input, output) == NvResult::InvalidSize);
     REQUIRE(channels.Get(4, owner) == nullptr);
     REQUIRE(device.Ioctl1(4, allocate, input, output) == NvResult::Success);
     auto channel = channels.Get(4, owner);
@@ -75,6 +76,177 @@ TEST_CASE("Native channel allocation creates owned runlist resources after a val
     REQUIRE(channels.Allocate(7, foreign, 1) == NvResult::InvalidState);
 }
 
+TEST_CASE("Native command rings own backing and report an allocated live syncpoint",
+          "[core][ipc]") {
+    using namespace Service::Nvidia;
+    Core::System system;
+    Core::DeviceMemory memory;
+    Tegra::MaxwellDeviceMemoryManager backing{memory};
+    auto space = std::make_shared<Tegra::MemoryManager>(system, backing, 32, 1ULL << 32, 16, 12);
+    const NvCore::SessionId owner{7};
+    Tegra::Host1x::SyncpointManager syncpoints;
+    NvCore::NativeGpuChannels channels{syncpoints};
+    Devices::nvhost_native_gpu device{system, channels};
+    device.OnOpen(owner, 4);
+    std::array<u8, 32> input{};
+    std::array<u8, 40> output{};
+    output.fill(0xcc);
+    const auto set_word = [&](size_t offset, u32 value) {
+        const u32_le wire{value};
+        std::memcpy(input.data() + offset, &wire, sizeof(wire));
+    };
+    const auto get_word = [&](size_t offset) {
+        u32_le wire;
+        std::memcpy(&wire, output.data() + offset, sizeof(wire));
+        return static_cast<u32>(wire);
+    };
+    REQUIRE(channels.Allocate(4, owner, 0) == NvResult::Success);
+    const auto channel = channels.Get(4, owner);
+    REQUIRE(channel->GetChannelIndex() == 0);
+    NvFence fence{-1, 123};
+    REQUIRE(channels.AllocateCommandRing(&fence, 3, owner, 8, 0, 0) == NvResult::BadParameter);
+    REQUIRE(channels.AllocateCommandRing(&fence, 4, NvCore::SessionId{8}, 8, 0, 0) ==
+            NvResult::BadParameter);
+    REQUIRE(channels.AllocateCommandRing(&fence, 4, owner, 8, 0, 0) == NvResult::InvalidState);
+    u64 syncpoint_address{123};
+    REQUIRE(channels.QuerySyncpoint(&syncpoint_address, &fence, 4, owner) ==
+            NvResult::InvalidState);
+    REQUIRE(syncpoint_address == 123);
+    REQUIRE(fence.id == -1);
+    REQUIRE(fence.value == 123);
+    REQUIRE(channel->BindAddressSpace(space) == NvResult::Success);
+    REQUIRE(channels.QuerySyncpoint(&syncpoint_address, &fence, 4, owner) ==
+            NvResult::NotInitialized);
+    REQUIRE(syncpoint_address == 123);
+    auto group = std::make_shared<NvCore::NativeGpuSchedulingGroup>(owner);
+    REQUIRE(channel->BindGroup(group, 0) == NvResult::Success);
+    for (u32 entries : {0U, 1U, 3U, 0x20000000U, 0xffffffffU}) {
+        REQUIRE(channels.AllocateCommandRing(&fence, 4, owner, entries, 0, 0) ==
+                NvResult::BadParameter);
+        REQUIRE(channel->GetCommandRing() == nullptr);
+    }
+    REQUIRE(channels.AllocateCommandRing(&fence, 4, owner, 8, 0xffffffff, 0) ==
+            NvResult::BadParameter);
+    const Ioctl allocate{.raw = 0xc020481a};
+    set_word(0, 8);
+    for (u32 raw : {0x4020481aU, 0x8020481aU, 0x0020481aU}) {
+        REQUIRE(device.Ioctl1(4, Ioctl{.raw = raw}, input, output) == NvResult::BadParameter);
+    }
+    REQUIRE(device.Ioctl1(4, Ioctl{.raw = 0xc01c481a}, input, output) == NvResult::InvalidSize);
+    REQUIRE(device.Ioctl1(4, allocate, std::span{input}.first(31), output) ==
+            NvResult::InvalidSize);
+    REQUIRE(device.Ioctl1(4, allocate, input, std::span{output}.first(31)) ==
+            NvResult::InvalidSize);
+    REQUIRE(channel->GetCommandRing() == nullptr);
+    REQUIRE(output[0] == 0xcc);
+    syncpoints.IncrementHost(17);
+    syncpoints.IncrementHost(17);
+    syncpoints.IncrementGuest(17);
+    REQUIRE(syncpoints.GetGuestSyncpointValue(17) == 1);
+    set_word(8, 0x83);
+    set_word(20, 0xaabbccdd);
+    SECTION("default job count") {
+        REQUIRE(device.Ioctl1(4, allocate, input, output) == NvResult::Success);
+        REQUIRE(channel->GetCommandRing()->jobs.size() == 3);
+    }
+    SECTION("explicit job count") {
+        set_word(4, 5);
+        REQUIRE(device.Ioctl1(4, allocate, input, output) == NvResult::Success);
+        REQUIRE(channel->GetCommandRing()->jobs.size() == 5);
+    }
+    REQUIRE(get_word(0) == 8);
+    REQUIRE(get_word(8) == 0x83);
+    REQUIRE(get_word(12) == 17);
+    REQUIRE(get_word(16) == 2);
+    REQUIRE(get_word(20) == 0xaabbccdd);
+    REQUIRE(output[32] == 0xcc);
+    auto ring = channel->GetCommandRing();
+    REQUIRE(ring != nullptr);
+    REQUIRE(ring->entries.size() == 8);
+    REQUIRE(ring->entries.front() == 0);
+    REQUIRE(ring->entries.back() == 0);
+    REQUIRE(ring->jobs.front().num_entries == 0);
+    REQUIRE(ring->flags == 3);
+    REQUIRE(ring->address_space == space);
+    REQUIRE(ring->group == group);
+    REQUIRE(syncpoints.GetHostSyncpointValue(17) == 2);
+    const Ioctl query{.raw = 0xc010481e};
+    output.fill(0xcc);
+    REQUIRE(device.Ioctl1(4, query, input, output) == NvResult::NotInitialized);
+    REQUIRE(output[0] == 0xcc);
+    REQUIRE(space->MapSyncpointShim(0x8000000, syncpoints));
+    for (u32 raw : {0x4010481eU, 0x8010481eU, 0x0010481eU}) {
+        REQUIRE(device.Ioctl1(4, Ioctl{.raw = raw}, input, output) == NvResult::BadParameter);
+    }
+    REQUIRE(device.Ioctl1(4, query, std::span{input}.first(15), output) == NvResult::InvalidSize);
+    REQUIRE(device.Ioctl1(4, query, input, std::span{output}.first(15)) == NvResult::InvalidSize);
+    REQUIRE(device.Ioctl1(4, query, input, output) == NvResult::Success);
+    u64_le wire_address;
+    std::memcpy(&wire_address, output.data(), sizeof(wire_address));
+    REQUIRE(wire_address == 0x8110000);
+    REQUIRE(get_word(8) == 17);
+    REQUIRE(get_word(12) == 2);
+    REQUIRE(output[16] == 0xcc);
+    REQUIRE(space->GetPointer(wire_address) == nullptr);
+    REQUIRE(space->Read<u32>(wire_address) == 2);
+    syncpoints.IncrementHost(17);
+    REQUIRE(device.Ioctl1(4, query, input, output) == NvResult::Success);
+    REQUIRE(get_word(12) == 3);
+    REQUIRE(space->Read<u32>(wire_address) == 3);
+    REQUIRE(device.Ioctl1(4, allocate, input, output) == NvResult::AlreadyAllocated);
+    REQUIRE(device.Ioctl1(4, Ioctl{.raw = 0xc018481b}, input, output) == NvResult::NotSupported);
+    REQUIRE(channel->UnbindGroup(group) == NvResult::Success);
+    const std::weak_ptr weak_space{space};
+    const std::weak_ptr weak_group{group};
+    space.reset();
+    group.reset();
+    device.OnClose(4);
+    REQUIRE_FALSE(syncpoints.TryReserveSyncpoint(17));
+    REQUIRE_FALSE(weak_space.expired());
+    REQUIRE_FALSE(weak_group.expired());
+    REQUIRE(ring->entries.size() == 8);
+}
+
+TEST_CASE("Native channel syncpoints remain globally reserved through final ring consumers",
+          "[core][ipc]") {
+    using namespace Service::Nvidia;
+    Core::System system;
+    Core::DeviceMemory memory;
+    Tegra::MaxwellDeviceMemoryManager backing{memory};
+    auto space = std::make_shared<Tegra::MemoryManager>(system, backing, 32, 1ULL << 32, 16, 12);
+    Tegra::Host1x::SyncpointManager syncpoints;
+    const NvCore::SessionId owner{7};
+    NvCore::NativeGpuChannels first{syncpoints};
+    NvCore::NativeGpuChannels second{syncpoints};
+    REQUIRE(first.Allocate(4, owner, 0) == NvResult::Success);
+    REQUIRE(second.Allocate(4, owner, 0) == NvResult::Success);
+    auto channel = first.Get(4, owner);
+    REQUIRE(channel->GetChannelIndex() == 0);
+    REQUIRE(second.Get(4, owner)->GetChannelIndex() == 1);
+    REQUIRE(channel->BindAddressSpace(space) == NvResult::Success);
+    auto group = std::make_shared<NvCore::NativeGpuSchedulingGroup>(owner);
+    REQUIRE(channel->BindGroup(group, 0) == NvResult::Success);
+    NvFence fence;
+    REQUIRE(first.AllocateCommandRing(&fence, 4, owner, 2, 1, 0) == NvResult::Success);
+    auto ring = channel->GetCommandRing();
+    first.Close(4, owner);
+    channel.reset();
+    REQUIRE_FALSE(syncpoints.TryReserveSyncpoint(17));
+    REQUIRE(ring->entries.size() == 2);
+    ring.reset();
+    REQUIRE(syncpoints.TryReserveSyncpoint(17));
+    syncpoints.ReleaseSyncpoint(17);
+    std::vector<Tegra::Host1x::SyncpointManager::Reservation> leases;
+    while (auto lease = syncpoints.AllocateNativeChannelSyncpoint()) {
+        leases.push_back(std::move(*lease));
+    }
+    REQUIRE(first.Allocate(5, owner, 0) == NvResult::InsufficientMemory);
+    REQUIRE(first.Get(5, owner) == nullptr);
+    leases.clear();
+    REQUIRE(first.Allocate(5, owner, 0) == NvResult::Success);
+    REQUIRE(first.Get(5, owner)->GetChannelIndex() == 0);
+}
+
 TEST_CASE("Native channel groups enforce runlist and per-subcontext address-space identity",
           "[core][ipc]") {
     using namespace Service::Nvidia;
@@ -86,7 +258,8 @@ TEST_CASE("Native channel groups enforce runlist and per-subcontext address-spac
     auto second_space =
         std::make_shared<Tegra::MemoryManager>(system, backing, 32, 1ULL << 32, 16, 12);
     const NvCore::SessionId owner{7};
-    NvCore::NativeGpuChannels channels;
+    Tegra::Host1x::SyncpointManager syncpoints;
+    NvCore::NativeGpuChannels channels{syncpoints};
     auto group = std::make_shared<NvCore::NativeGpuSchedulingGroup>(owner);
     auto foreign_group = std::make_shared<NvCore::NativeGpuSchedulingGroup>(NvCore::SessionId{8});
     REQUIRE(Devices::NativeGpuCharacteristics{}.unknown_b4 ==
@@ -148,7 +321,8 @@ TEST_CASE("Native TSG bind ioctls retain group and address space beyond descript
     auto space = std::make_shared<Tegra::MemoryManager>(system, backing, 32, 1ULL << 32, 16, 12);
     const std::weak_ptr weak_space{space};
     const NvCore::SessionId owner{7};
-    auto channels = std::make_unique<NvCore::NativeGpuChannels>();
+    Tegra::Host1x::SyncpointManager syncpoints;
+    auto channels = std::make_unique<NvCore::NativeGpuChannels>(syncpoints);
     std::shared_ptr<NvCore::NativeGpuChannel> retained;
     std::weak_ptr<NvCore::NativeGpuSchedulingGroup> weak_group;
     {

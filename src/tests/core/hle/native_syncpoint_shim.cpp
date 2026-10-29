@@ -4,15 +4,67 @@
 #include <array>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <thread>
+#include <vector>
 #include <catch2/catch_test_macros.hpp>
 #include "core/core.h"
 #include "core/device_memory.h"
+#include "core/hle/service/nvdrv/core/syncpoint_manager.h"
 #include "video_core/gpu.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
+#include "video_core/host1x/host1x.h"
 #include "video_core/host1x/syncpoint_shim.h"
 #include "video_core/memory_manager.h"
 #include "video_core/renderer_null/null_rasterizer.h"
+
+TEST_CASE("Native and legacy syncpoint reservations share a global collision-free allocator",
+          "[core][ipc]") {
+    using Manager = Tegra::Host1x::SyncpointManager;
+    Manager manager;
+    for (u32 id : {0U, 12U, 26U, 27U, 54U, 55U, 448U, 0xffffffffU}) {
+        REQUIRE_FALSE(manager.TryReserveSyncpoint(id));
+    }
+    REQUIRE(manager.TryReserveSyncpoint(17));
+    REQUIRE_FALSE(manager.TryReserveSyncpoint(17));
+    auto first = manager.AllocateNativeChannelSyncpoint();
+    REQUIRE(first.has_value());
+    REQUIRE(first->GetId() == 18);
+    manager.ReleaseSyncpoint(17);
+    auto second = manager.AllocateNativeChannelSyncpoint();
+    REQUIRE(second->GetId() == 17);
+    REQUIRE_FALSE(manager.TryReserveSyncpoint(second->GetId()));
+    manager.IncrementHost(17);
+    manager.IncrementHost(17);
+    second.reset();
+    REQUIRE(manager.TryReserveSyncpoint(17));
+    REQUIRE(manager.GetHostSyncpointValue(17) == 2);
+    manager.ReleaseSyncpoint(17);
+    first.reset();
+    std::vector<Manager::Reservation> leases;
+    std::array<bool, Manager::NativeSyncpointCount> seen{};
+    while (auto lease = manager.AllocateNativeChannelSyncpoint()) {
+        const u32 id = lease->GetId();
+        REQUIRE(id >= Manager::NativeChannelSyncpointBase);
+        REQUIRE(id < Manager::NativeSyncpointCount);
+        REQUIRE_FALSE(Manager::IsFixedSyncpoint(id));
+        REQUIRE_FALSE(seen[id]);
+        seen[id] = true;
+        leases.push_back(std::move(*lease));
+    }
+    REQUIRE(leases.size() ==
+            Manager::NativeSyncpointCount - Manager::NativeChannelSyncpointBase - 4);
+    REQUIRE_FALSE(manager.AllocateNativeChannelSyncpoint());
+    leases.clear();
+    auto reused = manager.AllocateNativeChannelSyncpoint();
+    REQUIRE(reused->GetId() == 17);
+    REQUIRE(manager.GetHostSyncpointValue(17) == 2);
+    auto closing = std::make_unique<Manager>();
+    auto final_lease = closing->AllocateNativeChannelSyncpoint();
+    REQUIRE(final_lease.has_value());
+    closing.reset();
+    final_lease.reset();
+}
 
 TEST_CASE("Native syncpoint shim reads completed counters without exposing other registers",
           "[core][ipc]") {
@@ -47,6 +99,45 @@ TEST_CASE("Native syncpoint shim reads completed counters without exposing other
     REQUIRE_FALSE(shim.Read(shim.Size, output));
     REQUIRE_FALSE(shim.Read((std::numeric_limits<u64>::max)(), output));
     REQUIRE(output == std::array<u8, 4>{0xaa, 0xaa, 0xaa, 0xaa});
+}
+
+TEST_CASE("Legacy driver clients reserve global counters and import their current values",
+          "[core][ipc]") {
+    using Service::Nvidia::NvCore::SyncpointManager;
+    Core::System system;
+    system.Initialize();
+    auto host = std::make_unique<Tegra::Host1x::Host1x>(system);
+    auto& counters = host->GetSyncpointManager();
+    counters.IncrementHost(1);
+    counters.IncrementHost(1);
+    auto native = counters.AllocateNativeChannelSyncpoint();
+    REQUIRE(native->GetId() == 17);
+    std::vector<u32> allocated;
+    {
+        SyncpointManager first{*host};
+        SyncpointManager second{*host};
+        const u32 id = first.AllocateSyncpoint(false);
+        REQUIRE(id == 1);
+        REQUIRE(first.GetSyncpointFence(id).value == 2);
+        REQUIRE_FALSE(counters.TryReserveSyncpoint(id));
+        REQUIRE(second.AllocateSyncpoint(false) == 2);
+        first.FreeSyncpoint(id);
+        REQUIRE(counters.TryReserveSyncpoint(id));
+        counters.ReleaseSyncpoint(id);
+        for (size_t index = 0; index < 20; ++index) {
+            const u32 next = first.AllocateSyncpoint(false);
+            REQUIRE(next != 17);
+            REQUIRE_FALSE(Tegra::Host1x::SyncpointManager::IsFixedSyncpoint(next));
+            allocated.push_back(next);
+        }
+    }
+    for (u32 id : allocated) {
+        REQUIRE(counters.TryReserveSyncpoint(id));
+        counters.ReleaseSyncpoint(id);
+    }
+    REQUIRE(counters.TryReserveSyncpoint(2));
+    counters.ReleaseSyncpoint(2);
+    REQUIRE_FALSE(counters.TryReserveSyncpoint(17));
 }
 
 TEST_CASE("GPU syncpoint mappings reserve a read-only aperture backed by live counters",

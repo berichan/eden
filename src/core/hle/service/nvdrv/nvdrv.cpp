@@ -33,6 +33,7 @@
 #include "core/hle/service/server_manager.h"
 #include "frontend_common/firmware_manager.h"
 #include "video_core/gpu.h"
+#include "video_core/host1x/host1x.h"
 
 namespace Service::Nvidia {
 
@@ -129,6 +130,7 @@ void LoopProcess(Core::System& system) {
 Module::Module(Core::System& system,
                 std::shared_ptr<GSV::GpuAddressSpacePool> native_address_spaces_)
     : container{system.Host1x()}, native_address_spaces{std::move(native_address_spaces_)},
+      native_channels{system.Host1x().GetSyncpointManager()},
       service_context{system, "nvdrv"}, events_interface{*this} {
     if (native_address_spaces) {
         builders["/dev/nvhost-tsg-gpu"] = [this, &system](DeviceFD fd) {

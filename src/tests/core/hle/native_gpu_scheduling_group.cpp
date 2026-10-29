@@ -12,7 +12,8 @@ TEST_CASE("Native GPU scheduling groups validate configuration and close indepen
           "[core][ipc]") {
     using namespace Service::Nvidia;
     Core::System system;
-    NvCore::NativeGpuChannels channels;
+    Tegra::Host1x::SyncpointManager syncpoints;
+    NvCore::NativeGpuChannels channels{syncpoints};
     Devices::nvhost_tsg_gpu first{system, channels};
     Devices::nvhost_tsg_gpu second{system, channels};
     constexpr DeviceFD FirstFd = 3;

@@ -7,8 +7,10 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <vector>
 #include "common/container/unordered_map.h"
 #include "core/hle/service/nvdrv/core/container.h"
+#include "video_core/host1x/syncpoint_manager.h"
 
 namespace Tegra {
 class MemoryManager;
@@ -53,7 +55,22 @@ private:
 
 class NativeGpuChannel {
 public:
-    NativeGpuChannel(SessionId owner, u32 runlist);
+    struct CommandRing {
+        struct Job {
+            u32 first_entry{};
+            u32 num_entries{};
+            u32 fence_value{};
+        };
+        std::vector<u64> entries;
+        std::vector<Job> jobs;
+        std::shared_ptr<Tegra::Host1x::SyncpointManager::Reservation> syncpoint;
+        std::shared_ptr<Tegra::MemoryManager> address_space;
+        std::shared_ptr<NativeGpuSchedulingGroup> group;
+        u32 flags{};
+    };
+
+    NativeGpuChannel(SessionId owner, u32 runlist,
+                     std::shared_ptr<Tegra::Host1x::SyncpointManager::Reservation> syncpoint);
     ~NativeGpuChannel();
     NvResult BindAddressSpace(std::shared_ptr<Tegra::MemoryManager> address_space);
     NvResult BindGroup(std::shared_ptr<NativeGpuSchedulingGroup> group, u32 subcontext);
@@ -61,33 +78,47 @@ public:
     std::shared_ptr<Tegra::MemoryManager> GetAddressSpace() const;
     std::shared_ptr<NativeGpuSchedulingGroup> GetGroup() const;
     std::optional<u32> GetSubcontext() const;
+    std::shared_ptr<const CommandRing> GetCommandRing() const;
+    u32 GetChannelIndex() const;
     u32 GetRunlist() const;
     bool IsOpen() const;
 
 private:
     friend class NativeGpuChannels;
     void Close();
+    NvResult AllocateCommandRing(NvFence* out_fence, u32 entries, u32 jobs, u32 flags,
+                                 Tegra::Host1x::SyncpointManager& manager);
+    NvResult QuerySyncpoint(u64* out_address, NvFence* out_fence,
+                            const Tegra::Host1x::SyncpointManager& manager) const;
 
     const SessionId owner;
     const u32 runlist;
+    const std::shared_ptr<Tegra::Host1x::SyncpointManager::Reservation> syncpoint;
     mutable std::mutex mutex;
     bool open{true};
     std::shared_ptr<Tegra::MemoryManager> address_space;
     std::shared_ptr<NativeGpuSchedulingGroup> group;
     u32 subcontext{};
+    std::shared_ptr<CommandRing> command_ring;
 };
 
 // Each native nvdrv context owns this typed descriptor table. Entries only appear after
 // runlist allocation; unrelated device descriptors can never be cast to GPU channels.
 class NativeGpuChannels {
 public:
+    explicit NativeGpuChannels(Tegra::Host1x::SyncpointManager& manager);
     ~NativeGpuChannels();
     NvResult Allocate(DeviceFD fd, SessionId owner, u32 requested_runlist);
     std::shared_ptr<NativeGpuChannel> Get(DeviceFD fd, SessionId owner) const;
+    NvResult AllocateCommandRing(NvFence* out_fence, DeviceFD fd, SessionId owner, u32 entries,
+                                 u32 jobs, u32 flags);
+    NvResult QuerySyncpoint(u64* out_address, NvFence* out_fence, DeviceFD fd,
+                            SessionId owner) const;
     void Close(DeviceFD fd, SessionId owner);
 
 private:
     mutable std::mutex mutex;
+    Tegra::Host1x::SyncpointManager& manager;
     ::Common::unordered_map<DeviceFD, std::shared_ptr<NativeGpuChannel>> channels;
 };
 
