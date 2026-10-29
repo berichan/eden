@@ -235,6 +235,15 @@ Result KProcess::Initialize(KernelCore& kernel, const Svc::CreateProcessParamete
         UNREACHABLE();
     }
 
+    if (kernel.GetCpuProfile() == Core::Hardware::CpuProfile::Ounce &&
+        (params.flags & Svc::CreateProcessFlag::AddressSpaceMask) ==
+            Svc::CreateProcessFlag::AddressSpace64Bit) {
+        // Physical allocations also live outside the heap VA region, for example in the alias
+        // region. A native process's physical budget is its resource limit, not the heap VA size.
+        m_max_process_memory = static_cast<size_t>(
+            res_limit->GetLimitValue(Svc::LimitableResource::PhysicalMemoryMax));
+    }
+
     // Generate random entropy.
     GenerateRandom(m_entropy);
 
