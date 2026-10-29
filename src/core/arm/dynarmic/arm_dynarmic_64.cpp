@@ -124,13 +124,8 @@ void DynarmicCallbacks64::ExceptionRaised(u64 pc, Dynarmic::A64::Exception excep
 }
 
 bool DynarmicCallbacks64::CheckAtomicAccess(u64 address, size_t size) {
-    Kernel::KMemoryInfo info{};
-    Kernel::Svc::PageInfo page{};
-    const auto query = m_process->GetPageTable().QueryInfo(&info, &page, address);
-    const auto permission = info.GetSvcMemoryInfo().permission;
-    const auto rw = Kernel::Svc::MemoryPermission::ReadWrite;
-    if ((address & (size - 1)) != 0 || query.IsError() || (permission & rw) != rw ||
-        !m_memory.IsValidVirtualAddressRange(address, size)) {
+    // QueryInfo takes a guest lock and can reschedule this core while its JIT is executing.
+    if ((address & (size - 1)) != 0 || !m_memory.IsReadWriteVirtualAddressRange(address, size)) {
         LOG_CRITICAL(Core_ARM, "Invalid atomic access at {:#x}, size={}", address, size);
         m_parent.m_jit->HaltExecution(DataAbort | PrefetchAbort);
         return false;

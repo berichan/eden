@@ -137,6 +137,9 @@ public:
      */
     [[nodiscard]] bool IsValidVirtualAddressRange(Common::ProcessAddress base, u64 size) const;
 
+    /// Checks mapped user read/write permissions without taking guest kernel locks.
+    [[nodiscard]] bool IsReadWriteVirtualAddressRange(Common::ProcessAddress base, u64 size) const;
+
     /**
      * Gets a pointer to the given address.
      *

@@ -91,7 +91,7 @@ public:
     const T& GetOrDefault(std::size_t index) const {
 #ifdef _WIN32
         if (!IsCommittedPage(index)) {
-            return *reinterpret_cast<const T*>(&default_val);
+            return default_val;
         }
 #endif
         // On non-Windows, OS page table should optimize this by pointing to a zero page if unallocated.
@@ -207,7 +207,7 @@ private:
 
     std::vector<std::atomic<u64>> committed_pages{};
 #ifdef _WIN32
-    const std::array<u8, sizeof(T)> default_val{};
+    const T default_val{};
 #endif
 };
 

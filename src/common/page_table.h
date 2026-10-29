@@ -150,6 +150,10 @@ struct PageTable {
     SparseLargeVector<PageEntryData> entries;
     static_assert(sizeof(PageEntryData) == 8);
 
+    // User access permissions remain readable from JIT callbacks without taking guest locks.
+    // Keep them separate from the pointer tags used for rasterizer and debugger protection.
+    SparseLargeVector<std::atomic<u8>> permissions;
+
     u8* fastmem_arena{};
     std::size_t current_address_space_width_in_bits{};
     std::size_t current_page_bits{};

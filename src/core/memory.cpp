@@ -77,12 +77,14 @@ struct Memory::Impl {
         if (current_page_table->fastmem_arena) {
             host_buffer->Map(GetInteger(base), GetInteger(target) - DramMemoryMap::Base, size, perms, separate_heap);
         }
+        SetPermissions(page_table, GetInteger(base), size, perms);
     }
 
     void UnmapRegion(Common::PageTable& page_table, Common::ProcessAddress base, u64 size,
                      bool separate_heap) {
         ASSERT_MSG((size & YUZU_PAGEMASK) == 0, "non-page aligned size: {:016X}", size);
         ASSERT_MSG((base & YUZU_PAGEMASK) == 0, "non-page aligned base: {:016X}", GetInteger(base));
+        SetPermissions(page_table, GetInteger(base), size, Common::MemoryPermission{});
         MapPages(page_table, base / YUZU_PAGESIZE, size / YUZU_PAGESIZE, 0,
                  Common::PageType::Unmapped);
 
@@ -95,6 +97,8 @@ struct Memory::Impl {
                        Common::MemoryPermission perms) {
         ASSERT_MSG((size & YUZU_PAGEMASK) == 0, "non-page aligned size: {:016X}", size);
         ASSERT_MSG((vaddr & YUZU_PAGEMASK) == 0, "non-page aligned base: {:016X}", vaddr);
+
+        SetPermissions(page_table, vaddr, size, perms);
 
         if (!current_page_table->fastmem_arena) {
             return;
@@ -121,6 +125,18 @@ struct Memory::Impl {
 
         if (protect_bytes > 0) {
             host_buffer->Protect(protect_begin, protect_bytes, perms);
+        }
+    }
+
+    static void SetPermissions(Common::PageTable& page_table, u64 base, u64 size,
+                               Common::MemoryPermission perms) {
+        ASSERT(AddressSpaceContains(page_table, base, size));
+        const u64 first_page = base >> YUZU_PAGEBITS;
+        const u64 end_page = (base + size) >> YUZU_PAGEBITS;
+        page_table.permissions.CommitRegion(first_page, end_page);
+        for (u64 page = first_page; page < end_page; ++page) {
+            page_table.permissions.GetUnchecked(page).store(static_cast<u8>(perms),
+                                                            std::memory_order_release);
         }
     }
 
@@ -866,6 +882,24 @@ bool Memory::IsValidVirtualAddressRange(Common::ProcessAddress base, u64 size) c
         }
     }
 
+    return true;
+}
+
+bool Memory::IsReadWriteVirtualAddressRange(Common::ProcessAddress base, u64 size) const {
+    const auto& page_table = *impl->current_page_table;
+    if (size == 0 || !AddressSpaceContains(page_table, base, size)) {
+        return false;
+    }
+
+    const u64 first_page = GetInteger(base) >> YUZU_PAGEBITS;
+    const u64 last_page = (GetInteger(base) + size - 1) >> YUZU_PAGEBITS;
+    constexpr auto rw = static_cast<u8>(Common::MemoryPermission::ReadWrite);
+    for (u64 page = first_page; page <= last_page; ++page) {
+        if ((page_table.permissions[page].load(std::memory_order_acquire) & rw) != rw ||
+            !IsValidVirtualAddress(page << YUZU_PAGEBITS)) {
+            return false;
+        }
+    }
     return true;
 }
 
