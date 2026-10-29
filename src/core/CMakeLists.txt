@@ -472,6 +472,8 @@ add_library(core STATIC
     hle/service/am/service/display_controller.h
     hle/service/am/service/global_state_controller.cpp
     hle/service/am/service/global_state_controller.h
+    hle/service/am/service/graphics_scaling_parameters_functions.cpp
+    hle/service/am/service/graphics_scaling_parameters_functions.h
     hle/service/am/service/home_menu_functions.cpp
     hle/service/am/service/home_menu_functions.h
     hle/service/am/service/library_applet_accessor.cpp
@@ -488,6 +490,8 @@ add_library(core STATIC
     hle/service/am/service/overlay_functions.h
     hle/service/am/service/overlay_applet_proxy.cpp
     hle/service/am/service/overlay_applet_proxy.h
+    hle/service/am/service/performance_functions.cpp
+    hle/service/am/service/performance_functions.h
     hle/service/am/service/process_winding_controller.cpp
     hle/service/am/service/process_winding_controller.h
     hle/service/am/service/self_controller.cpp
