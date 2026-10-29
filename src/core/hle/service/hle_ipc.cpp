@@ -19,10 +19,12 @@
 #include "core/hle/kernel/k_auto_object.h"
 #include "core/hle/kernel/k_handle_table.h"
 #include "core/hle/kernel/k_process.h"
+#include "core/hle/kernel/k_scoped_resource_reservation.h"
 #include "core/hle/kernel/k_server_port.h"
 #include "core/hle/kernel/k_server_session.h"
 #include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/kernel.h"
+#include "core/hle/kernel/svc_results.h"
 #include "core/hle/service/hle_ipc.h"
 #include "core/hle/service/ipc_helpers.h"
 #include "core/memory.h"
@@ -137,7 +139,11 @@ HLERequestContext::HLERequestContext(Kernel::KernelCore& kernel_, Core::Memory::
     cmd_buf[0] = 0;
 }
 
-HLERequestContext::~HLERequestContext() = default;
+HLERequestContext::~HLERequestContext() {
+    for (auto* session : outgoing_copy_interface_refs) {
+        session->Close(kernel);
+    }
+}
 
 void HLERequestContext::ParseCommandBuffer(u32_le* src_cmdbuf, bool incoming) {
     IPC::RequestParser rp(src_cmdbuf);
@@ -186,7 +192,9 @@ void HLERequestContext::ParseCommandBuffer(u32_le* src_cmdbuf, bool incoming) {
 
     const auto buffer_c_offset = rp.GetCurrentOffset() + command_header->data_size;
 
-    if (!command_header->IsTipc()) {
+    if (command_header->IsTipc()) {
+        data_payload_offset = rp.GetCurrentOffset();
+    } else {
         // Padding to align to 16 bytes
         rp.AlignWithPadding();
 
@@ -248,8 +256,12 @@ void HLERequestContext::ParseCommandBuffer(u32_le* src_cmdbuf, bool incoming) {
 
     rp.SetCurrentOffset(data_payload_offset);
 
-    command = rp.Pop<u32_le>();
-    rp.Skip(1, false); // The command is actually an u64, but we don't use the high part.
+    if (command_header->IsTipc()) {
+        command = GetTipcCommand();
+    } else {
+        command = rp.Pop<u32_le>();
+        rp.Skip(1, false); // The command is actually an u64, but we don't use the high part.
+    }
 }
 
 Result HLERequestContext::PopulateFromIncomingCommandBuffer(u32_le* src_cmdbuf) {
@@ -503,18 +515,50 @@ bool HLERequestContext::CanWriteBuffer(std::size_t buffer_index) const {
 }
 
 void HLERequestContext::AddMoveInterface(SessionRequestHandlerPtr s) {
-    ASSERT(Kernel::GetCurrentProcess(kernel).GetResourceLimit()->Reserve(kernel, Kernel::LimitableResource::SessionCountMax, 1));
+    const auto result = TryAddMoveInterface(std::move(s));
+    ASSERT(result.IsSuccess());
+}
+
+Result HLERequestContext::TryAddMoveInterface(SessionRequestHandlerPtr s) {
+    Kernel::KClientSession* session{};
+    R_TRY(CreateInterfaceSession(&session, std::move(s)));
+    AddMoveObject(session);
+    R_SUCCEED();
+}
+
+Result HLERequestContext::TryAddCopyInterface(SessionRequestHandlerPtr s) {
+    Kernel::KClientSession* session{};
+    R_TRY(CreateInterfaceSession(&session, std::move(s)));
+    // Keep the new client alive until its handle has been copied to the reply, including on error.
+    outgoing_copy_interface_refs.push_back(session);
+    AddCopyObject(session);
+    R_SUCCEED();
+}
+
+Result HLERequestContext::CreateInterfaceSession(Kernel::KClientSession** out_session,
+                                                 SessionRequestHandlerPtr s) {
+    Kernel::KScopedResourceReservation reservation(kernel, Kernel::GetCurrentProcessPointer(kernel),
+                                                   Kernel::LimitableResource::SessionCountMax);
+    R_UNLESS(reservation.Succeeded(), Kernel::ResultLimitReached);
 
     auto* session = Kernel::KSession::Create(kernel);
+    R_UNLESS(session != nullptr, Kernel::ResultOutOfResource);
     session->Initialize(kernel, nullptr, 0);
+    reservation.Commit();
     Kernel::KSession::Register(kernel, session);
 
     auto& server = manager.lock()->GetServerManager();
     auto next_manager = std::make_shared<Service::SessionRequestManager>(kernel, server);
     next_manager->SetSessionHandler(std::move(s));
-    server.RegisterSession(&session->GetServerSession(), next_manager);
+    const auto result = server.RegisterSession(&session->GetServerSession(), next_manager);
+    if (result.IsError()) {
+        session->GetServerSession().Close(kernel);
+        session->GetClientSession().Close(kernel);
+        return result;
+    }
 
-    AddMoveObject(&session->GetClientSession());
+    *out_session = &session->GetClientSession();
+    R_SUCCEED();
 }
 
 std::string HLERequestContext::Description() const {

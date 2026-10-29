@@ -11,6 +11,8 @@
 #include "core/hle/service/am/service/self_controller.h"
 #include "core/hle/service/caps/caps_su.h"
 #include "core/hle/service/cmif_serialization.h"
+#include "core/hle/service/gsv/user_session.h"
+#include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/nvnflinger/nvnflinger.h"
 #include "core/hle/service/sm/sm.h"
 #include "core/hle/service/vi/vi_results.h"
@@ -73,6 +75,7 @@ ISelfController::ISelfController(Core::System& system_, std::shared_ptr<Applet> 
         {230, D<&ISelfController::Unknown230>, "Unknown230"},
         {240, D<&ISelfController::Unknown240>, "Unknown240"},
         {1000, nullptr, "GetDebugStorageChannel"},
+        {2000, &ISelfController::GetGraphicsSupervisor, "GetGraphicsSupervisor"},
     };
     // clang-format on
 
@@ -86,6 +89,15 @@ ISelfController::ISelfController(Core::System& system_, std::shared_ptr<Applet> 
 ISelfController::~ISelfController() {
     std::scoped_lock lk{m_applet->lock};
     m_applet->display_layer_manager.Finalize();
+}
+
+void ISelfController::GetGraphicsSupervisor(HLERequestContext& ctx) {
+    LOG_DEBUG(Service_AM, "called");
+    const auto result = ctx.TryAddCopyInterface(
+        std::make_shared<GSV::UserSession>(system, m_process, m_applet->aruid.pid));
+    IPC::ResponseBuilder rb{ctx, 2, result.IsSuccess() ? 1U : 0U, 0,
+                            IPC::ResponseBuilder::Flags::AlwaysMoveHandles};
+    rb.Push(result);
 }
 
 Result ISelfController::Exit() {

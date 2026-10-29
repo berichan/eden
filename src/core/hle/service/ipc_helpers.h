@@ -34,16 +34,17 @@ struct ResponseBuilder {
         AlwaysMoveHandles = 1,
     };
 
-    inline explicit ResponseBuilder(Service::HLERequestContext& ctx, u32 normal_params_size_, u32 num_handles_to_copy_ = 0, u32 num_objects_to_move_ = 0, Flags flags = Flags::None)
-        : cmdbuf(ctx.CommandBuffer())
-        , normal_params_size(normal_params_size_)
-        , num_handles_to_copy(num_handles_to_copy_)
-        , num_objects_to_move(num_objects_to_move_)
-    {
+    inline explicit ResponseBuilder(Service::HLERequestContext& ctx, u32 normal_params_size_,
+                                    u32 num_handles_to_copy_ = 0, u32 num_objects_to_move_ = 0,
+                                    Flags flags = Flags::None)
+        : cmdbuf(ctx.CommandBuffer()), normal_params_size(normal_params_size_),
+          num_handles_to_copy(num_handles_to_copy_), num_objects_to_move(num_objects_to_move_),
+          is_tipc(ctx.IsTipc()) {
         std::memset(cmdbuf, 0, sizeof(u32) * IPC::COMMAND_BUFFER_LENGTH);
 
         IPC::CommandHeader header{};
         auto const mgr = ctx.GetManager().get();
+        const bool is_domain = mgr && mgr->IsDomain();
 
         // The entire size of the raw data section in u32 units, including the 16 bytes of mandatory
         // padding.
@@ -51,13 +52,13 @@ struct ResponseBuilder {
         u32 num_handles_to_move{};
         u32 num_domain_objects{};
         const bool always_move_handles = (u32(flags) & u32(Flags::AlwaysMoveHandles)) != 0;
-        if (!mgr->IsDomain() || always_move_handles) {
+        if (!is_domain || always_move_handles) {
             num_handles_to_move = num_objects_to_move;
         } else {
             num_domain_objects = num_objects_to_move;
         }
 
-        if (mgr->IsDomain()) {
+        if (is_domain) {
             raw_data_size += u32(sizeof(DomainMessageHeader) / sizeof(u32) + num_domain_objects);
             ctx.write_size += num_domain_objects;
         }
@@ -86,7 +87,7 @@ struct ResponseBuilder {
         if (!ctx.IsTipc()) {
             AlignWithPadding();
 
-            if (mgr->IsDomain() && ctx.HasDomainMessageHeader()) {
+            if (is_domain && ctx.HasDomainMessageHeader()) {
                 IPC::DomainMessageHeader domain_header{};
                 domain_header.num_objects = num_domain_objects;
                 PushRaw(domain_header);
@@ -180,6 +181,7 @@ struct ResponseBuilder {
     u32 num_handles_to_copy{};
     u32 num_objects_to_move{}; ///< Domain objects or move handles, context dependent
     u32 data_payload_index{};
+    bool is_tipc{};
 };
 
 /// Push ///
@@ -200,9 +202,11 @@ void ResponseBuilder::PushRaw(const T& value) {
 }
 
 inline void ResponseBuilder::PushImpl(Result value) {
-    // Result codes are actually 64-bit in the IPC buffer, but only the high part is discarded.
     Push(value.raw);
-    Push<u32>(0);
+    if (!is_tipc) {
+        // CMIF pads the result to eight bytes; TIPC has a four-byte result before its outputs.
+        Push<u32>(0);
+    }
 }
 
 inline void ResponseBuilder::PushImpl(s8 value) {
@@ -290,14 +294,13 @@ struct RequestParser {
     inline explicit RequestParser(Service::HLERequestContext& ctx)
         : cmdbuf(ctx.CommandBuffer())
     {
-        // TIPC does not have data payload offset
+        ASSERT_MSG(ctx.GetDataPayloadOffset(), "context is incomplete");
+        Skip(ctx.GetDataPayloadOffset(), false);
+        // TIPC encodes the command in the header and starts arguments after the descriptors.
+        // CMIF has an additional u64 command id at the payload offset.
         if (!ctx.IsTipc()) {
-            ASSERT_MSG(ctx.GetDataPayloadOffset(), "context is incomplete");
-            Skip(ctx.GetDataPayloadOffset(), false);
+            Skip(2, false);
         }
-        // Skip the u64 command id, it's already stored in the context
-        static constexpr u32 CommandIdSize = 2;
-        Skip(CommandIdSize, false);
     }
 
     inline void Skip(u32 size_in_words, bool set_to_null) {

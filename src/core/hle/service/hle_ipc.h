@@ -41,6 +41,7 @@ class ServerManager;
 
 namespace Kernel {
 class KAutoObject;
+class KClientSession;
 class KernelCore;
 class KHandleTable;
 class KProcess;
@@ -187,6 +188,8 @@ class HLERequestContext {
 public:
     explicit HLERequestContext(Kernel::KernelCore& kernel, Core::Memory::Memory& memory, Kernel::KServerSession* session, Kernel::KThread* thread);
     ~HLERequestContext();
+    HLERequestContext(const HLERequestContext&) = delete;
+    HLERequestContext& operator=(const HLERequestContext&) = delete;
 
     /// Returns a pointer to the IPC command buffer for this request.
     [[nodiscard]] u32* CommandBuffer() {
@@ -343,6 +346,8 @@ public:
     }
 
     void AddMoveInterface(SessionRequestHandlerPtr s);
+    Result TryAddMoveInterface(SessionRequestHandlerPtr s);
+    Result TryAddCopyInterface(SessionRequestHandlerPtr s);
 
     void AddCopyObject(Kernel::KAutoObject* object) {
         outgoing_copy_objects.emplace_back(object);
@@ -393,6 +398,7 @@ public:
 
 private:
     friend struct IPC::ResponseBuilder;
+    Result CreateInterfaceSession(Kernel::KClientSession** out_session, SessionRequestHandlerPtr s);
 
     void ParseCommandBuffer(u32_le* src_cmdbuf, bool incoming);
 
@@ -410,6 +416,8 @@ private:
     boost::container::static_vector<Handle, IPC::MAX_INCOMING_COPY_HANDLERS> incoming_copy_handles;
     boost::container::static_vector<Kernel::KAutoObject*, IPC::MAX_OUTGOING_MOVE_OBJECTS> outgoing_move_objects;
     boost::container::static_vector<Kernel::KAutoObject*, IPC::MAX_OUTGOING_COPY_OBJECTS> outgoing_copy_objects;
+    boost::container::static_vector<Kernel::KClientSession*, IPC::MAX_OUTGOING_COPY_OBJECTS>
+        outgoing_copy_interface_refs;
     boost::container::static_vector<SessionRequestHandlerPtr, IPC::MAX_OUTGOING_DOMAIN_OBJECTS> outgoing_domain_objects;
 
     mutable std::array<Common::ScratchBuffer<u8>, 3> read_buffer_data_a{};
