@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <limits>
@@ -245,4 +246,64 @@ TEST_CASE("Syncpoint apertures do not replace RAM or sparse reservations", "[cor
     REQUIRE(manager.GetSyncpointShimAddress() == base);
     syncpoints.IncrementHost(0);
     REQUIRE(manager.Read<u32>(base) == 1);
+}
+
+TEST_CASE("Checked GPU transfers distinguish sparse holes from faults and read-only registers",
+          "[core][ipc]") {
+    Core::System system;
+    Core::DeviceMemory memory;
+    Tegra::MaxwellDeviceMemoryManager backing{memory};
+    Tegra::GPU gpu{system, false, false};
+    Null::RasterizerNull rasterizer{gpu};
+    Tegra::MemoryManager manager{system, backing, 32, 1ULL << 32, 16, 12};
+    manager.BindRasterizer(&rasterizer);
+    std::array<u8, 32> bytes;
+    for (bool big : {false, true}) {
+        constexpr GPUVAddr base = 0x8000000;
+        REQUIRE(manager.MapSparse(base, 0x10000, big) == base);
+        bytes.fill(0xcc);
+        REQUIRE(manager.ReadBlockChecked(base + 7, bytes));
+        REQUIRE(std::all_of(bytes.begin(), bytes.end(), [](u8 value) { return value == 0; }));
+        bytes.fill(0x75);
+        REQUIRE(manager.WriteBlockChecked(base + 7, bytes));
+        bytes.fill(0xcc);
+        REQUIRE_FALSE(manager.ReadBlockChecked(base + 0xfff0, bytes));
+        REQUIRE(std::all_of(bytes.begin(), bytes.end(), [](u8 value) { return value == 0xcc; }));
+        REQUIRE_FALSE(manager.WriteBlockChecked(base + 0xfff0, bytes));
+        manager.Unmap(base, 0x10000);
+        REQUIRE_FALSE(manager.ReadBlockChecked(base, bytes));
+    }
+    REQUIRE(manager.ReadBlockChecked(1ULL << 32, {}));
+    REQUIRE(manager.WriteBlockChecked(1ULL << 32, {}));
+    REQUIRE_FALSE(manager.ReadBlockChecked((1ULL << 32) + 1, {}));
+    REQUIRE_FALSE(manager.ReadBlockChecked((std::numeric_limits<u64>::max)() - 1, bytes));
+    REQUIRE_FALSE(manager.WriteBlockChecked((1ULL << 32) - 16, bytes));
+    // A GPU PTE alone does not make an absent device backing page accessible.
+    REQUIRE(manager.Map(0x8000000, 0x1000, 0x1000, Tegra::PTEKind::PITCH, false) == 0x8000000);
+    REQUIRE_FALSE(manager.ReadBlockChecked(0x8000000, bytes));
+    manager.Unmap(0x8000000, 0x1000);
+    Tegra::Host1x::SyncpointManager syncpoints;
+    constexpr GPUVAddr shim = 0x10000000;
+    REQUIRE(manager.MapSyncpointShim(shim, syncpoints));
+    syncpoints.IncrementHost(0);
+    const auto word = std::span{bytes}.first(4);
+    REQUIRE(manager.ReadBlockChecked(shim, word));
+    u32 value{};
+    std::memcpy(&value, bytes.data(), sizeof(value));
+    REQUIRE(value == 1);
+    syncpoints.IncrementHost(0);
+    REQUIRE(manager.ReadBlockChecked(shim, word));
+    std::memcpy(&value, bytes.data(), sizeof(value));
+    REQUIRE(value == 2);
+    REQUIRE_FALSE(manager.WriteBlockChecked(shim, word));
+    bytes.fill(0xcc);
+    REQUIRE_FALSE(manager.ReadBlockChecked(shim, bytes));
+    REQUIRE(bytes.front() == 0xcc);
+    REQUIRE_FALSE(manager.ReadBlockChecked(shim + 4, word));
+    REQUIRE(manager.MapSparse(shim - 0x1000, 0x1000, false) == shim - 0x1000);
+    REQUIRE(manager.ReadBlockChecked(shim - 4, std::span{bytes}.first(8)));
+    std::memcpy(&value, bytes.data() + 4, sizeof(value));
+    REQUIRE(value == 2);
+    REQUIRE(bytes.front() == 0);
+    REQUIRE_FALSE(manager.WriteBlockChecked(shim - 4, std::span{bytes}.first(8)));
 }

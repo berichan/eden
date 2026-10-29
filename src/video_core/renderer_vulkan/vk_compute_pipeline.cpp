@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstring>
 #include <vector>
 
 #include <boost/container/small_vector.hpp>
@@ -151,6 +152,26 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
 bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
                                 Tegra::MemoryManager& gpu_memory, Scheduler& scheduler,
                                 BufferCache& buffer_cache, TextureCache& texture_cache) {
+    if (kepler_compute.IsNativeMode()) {
+        if ((info.constant_buffer_mask & ~0xffU) || !info.texture_buffer_descriptors.empty() ||
+            !info.image_buffer_descriptors.empty() || !info.texture_descriptors.empty() ||
+            !info.image_descriptors.empty()) {
+            return false;
+        }
+        for (const auto& desc : info.storage_buffers_descriptors) {
+            std::array<u8, 16> descriptor;
+            if (!kepler_compute.ReadNativeConstantBuffer(desc.cbuf_index, desc.cbuf_offset,
+                                                         descriptor)) {
+                return false;
+            }
+            u64 address{};
+            std::memcpy(&address, descriptor.data(), sizeof(address));
+            if (address != 0 &&
+                (!gpu_memory.IsReadableRange(address, 1) || !gpu_memory.GpuToCpuAddress(address))) {
+                return false;
+            }
+        }
+    }
     guest_descriptor_queue.Acquire(scheduler, num_descriptor_entries, uses_descriptor_buffer);
 
     buffer_cache.SetComputeUniformBufferState(info.constant_buffer_mask, &uniform_buffer_sizes);

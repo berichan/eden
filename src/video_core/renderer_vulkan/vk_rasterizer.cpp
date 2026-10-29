@@ -583,17 +583,31 @@ void RasterizerVulkan::Clear(u32 layer_count) {
 }
 
 void RasterizerVulkan::DispatchCompute() {
+    DispatchComputeImpl(false);
+}
+
+bool RasterizerVulkan::DispatchNativeCompute() {
+    return DispatchComputeImpl(true);
+}
+
+bool RasterizerVulkan::DispatchComputeImpl(bool require_bound_pipeline) {
+    if (require_bound_pipeline &&
+        !kepler_compute->IsNativeLaunchSupported(
+            device.GetMaxComputeWorkGroupCount(), device.GetMaxComputeWorkGroupSize(),
+            device.GetMaxComputeWorkGroupInvocations(), device.GetMaxComputeSharedMemorySize())) {
+        return false;
+    }
     FlushWork();
     gpu_memory->FlushCaching();
 
     ComputePipeline* const pipeline{pipeline_cache.CurrentComputePipeline()};
-    if (!pipeline) {
-        return;
+    if (!pipeline || (require_bound_pipeline && !pipeline->IsBound())) {
+        return false;
     }
     std::scoped_lock lock{texture_cache.mutex, buffer_cache.mutex};
     if (!pipeline->Configure(*kepler_compute, *gpu_memory, scheduler, buffer_cache,
                              texture_cache)) {
-        return;
+        return false;
     }
 
     const auto& qmd{kepler_compute->launch_description};
@@ -612,12 +626,12 @@ void RasterizerVulkan::DispatchCompute() {
             }
             cmdbuf.DispatchIndirect(indirect_buffer, indirect_offset);
         });
-        return;
+        return true;
     }
     const std::array<u32, 3> dim{qmd.grid_dim_x, qmd.grid_dim_y, qmd.grid_dim_z};
     const std::array<u32, 3> max_dim{device.GetMaxComputeWorkGroupCount()};
     if (dim[0] > max_dim[0] || dim[1] > max_dim[1] || dim[2] > max_dim[2]) {
-        return;
+        return false;
     }
     scheduler.RequestOutsideRenderPassOperationContext();
     static constexpr VkMemoryBarrier READ_BARRIER{
@@ -643,6 +657,7 @@ void RasterizerVulkan::DispatchCompute() {
         GPU::Logging::GPULogger::GetInstance().LogVulkanCall(
             "vkCmdDispatch", params, VK_SUCCESS);
     }
+    return true;
 }
 
 void RasterizerVulkan::ResetCounter(VideoCommon::QueryType type) {

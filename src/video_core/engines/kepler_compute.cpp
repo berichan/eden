@@ -8,6 +8,7 @@
 #include "common/assert.h"
 #include "common/logging.h"
 #include "core/core.h"
+#include "shader_recompiler/exception.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/memory_manager.h"
@@ -101,10 +102,115 @@ void KeplerCompute::CallMultiMethod(Core::System& system, u32 method, const u32*
 }
 
 void KeplerCompute::ProcessLaunch() {
+    native_mode = false;
     const GPUVAddr launch_desc_loc = regs.launch_desc_loc.Address();
     memory_manager.ReadBlockUnsafe(launch_desc_loc, &launch_description,
                                    LaunchParams::NUM_LAUNCH_PARAMETERS * sizeof(u32));
     rasterizer->DispatchCompute();
+}
+
+bool KeplerCompute::ConfigureNativeLaunch(std::span<const u32, 64> descriptor) {
+    const auto& qmd = descriptor;
+    const GPUVAddr program = (GPUVAddr{qmd[49] & 0x1ffff} << 32) | qmd[48];
+    const u32 block_x = qmd[18] >> 16;
+    const u32 block_y = qmd[19] & 0xffff;
+    const u32 block_z = qmd[19] >> 16;
+    const bool nonempty = qmd[12] && (qmd[13] & 0xffff) && (qmd[14] & 0xffff);
+    if ((qmd[18] & 0xff) != 0x30 || (qmd[4] & 0x100) || (qmd[12] & 0x80000000) ||
+        !memory_manager.IsWithinGPUAddressRange(program) || (qmd[23] & 0xffffff) > 0xfffff ||
+        (qmd[50] & 0xffffff) > 0xfffff ||
+        (nonempty &&
+         (!block_x || !block_y || !block_z || u64{block_x} * block_y * block_z > 1024))) {
+        return false;
+    }
+    LaunchParams launch{};
+    launch.grid_dim_x.Assign(qmd[12]);
+    launch.grid_dim_y.Assign(qmd[13] & 0xffff);
+    launch.grid_dim_z.Assign(qmd[14] & 0xffff);
+    launch.shared_alloc.Assign(qmd[17] & 0x3ffff);
+    launch.block_dim_x.Assign(block_x);
+    launch.block_dim_y.Assign(block_y);
+    launch.block_dim_z.Assign(block_z);
+    launch.const_buffer_enable_mask.Assign(qmd[20] & 0xff);
+    launch.local_pos_alloc.Assign(qmd[23] & 0xffffff);
+    launch.local_crs_alloc.Assign(qmd[50] & 0xffffff);
+    for (u32 slot = 0; slot < NumConstBuffers; ++slot) {
+        if (!(launch.const_buffer_enable_mask.Value() & (1U << slot))) {
+            continue;
+        }
+        const u32 high = qmd[33 + slot * 2];
+        const GPUVAddr address = (GPUVAddr{high & 0x1ffff} << 32) | qmd[32 + slot * 2];
+        const u32 size = ((high >> 19) & 0x1fff) << 4;
+        if ((high & 0x1ff00) || !memory_manager.IsWithinGPUAddressRange(address) ||
+            (size != 0 && !memory_manager.IsWithinGPUAddressRange(address + size - 1))) {
+            return false;
+        }
+        auto& buffer = launch.const_buffer_config[slot];
+        buffer.address_low = qmd[32 + slot * 2];
+        buffer.address_high.Assign(high & 0xff);
+        buffer.size.Assign(size);
+    }
+    launch_description = launch;
+    regs.code_loc.address_low = qmd[48];
+    regs.code_loc.address_high = qmd[49] & 0x1ffff;
+    indirect_compute.reset();
+    native_mode = true;
+    return true;
+}
+
+bool KeplerCompute::DispatchNativeCompute(std::span<const u32, 64> descriptor) {
+    if (!ConfigureNativeLaunch(descriptor)) {
+        return false;
+    }
+    if (!launch_description.grid_dim_x || !launch_description.grid_dim_y ||
+        !launch_description.grid_dim_z) {
+        return true;
+    }
+    if (!rasterizer) {
+        return false;
+    }
+    for (u32 slot = 0; slot < NumConstBuffers; ++slot) {
+        if ((launch_description.const_buffer_enable_mask.Value() & (1U << slot)) &&
+            !memory_manager.IsReadableRange(launch_description.const_buffer_config[slot].Address(),
+                                            launch_description.const_buffer_config[slot].size)) {
+            return false;
+        }
+    }
+    try {
+        return rasterizer->DispatchNativeCompute();
+    } catch (const Shader::Exception& error) {
+        LOG_ERROR(HW_GPU, "Native compute shader rejected: {}", error.what());
+        return false;
+    }
+}
+
+bool KeplerCompute::ReadNativeConstantBuffer(u32 index, u32 offset, std::span<u8> output) const {
+    if (!native_mode || index >= NumConstBuffers ||
+        !(launch_description.const_buffer_enable_mask.Value() & (1U << index))) {
+        return false;
+    }
+    const auto& buffer = launch_description.const_buffer_config[index];
+    if (offset > buffer.size || output.size() > buffer.size.Value() - offset) {
+        return false;
+    }
+    return memory_manager.ReadBlockChecked(buffer.Address() + offset, output);
+}
+
+bool KeplerCompute::IsNativeLaunchSupported(std::array<u32, 3> max_grid,
+                                            std::array<u32, 3> max_block, u32 max_invocations,
+                                            u32 max_shared_memory) const {
+    if (!native_mode || launch_description.shared_alloc > max_shared_memory) {
+        return false;
+    }
+    const auto& launch = launch_description;
+    const std::array<u32, 3> grid{launch.grid_dim_x, launch.grid_dim_y, launch.grid_dim_z};
+    const std::array<u32, 3> block{launch.block_dim_x, launch.block_dim_y, launch.block_dim_z};
+    for (u32 axis = 0; axis < 3; ++axis) {
+        if (grid[axis] > max_grid[axis] || block[axis] > max_block[axis]) {
+            return false;
+        }
+    }
+    return u64{block[0]} * block[1] * block[2] <= max_invocations;
 }
 
 Texture::TICEntry KeplerCompute::GetTICEntry(u32 tic_index) const {

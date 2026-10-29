@@ -144,6 +144,7 @@ private:
     const ShaderInfo* MakeShaderInfo(GenericEnvironment& env, VAddr cpu_addr);
 
     Tegra::MaxwellDeviceMemoryManager& device_memory;
+    ShaderInfo native_compute_shader;
 
     mutable std::mutex lookup_mutex;
     std::mutex invalidation_mutex;

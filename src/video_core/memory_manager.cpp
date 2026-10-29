@@ -541,6 +541,70 @@ void MemoryManager::ReadBlockUnsafe(GPUVAddr gpu_src_addr, void* dest_buffer, co
     ReadBlockImpl(gpu_src_addr, dest_buffer, size, VideoCommon::CacheType::None, true);
 }
 
+bool MemoryManager::IsValidAccessRange(GPUVAddr address, size_t size, bool write) const {
+    if (address > address_space_size || size > address_space_size - address) {
+        return false;
+    }
+    const u64 granule = (std::min)(page_size, u64{1} << cpu_page_bits);
+    while (size != 0) {
+        if (syncpoint_shim_ready.load(std::memory_order_acquire) &&
+            address >= syncpoint_shim_address &&
+            address < syncpoint_shim_address + Host1x::SyncpointShim::Size) {
+            const auto amount = (std::min)(u64{size}, syncpoint_shim_address +
+                                                          Host1x::SyncpointShim::Size - address);
+            if (write ||
+                !Host1x::SyncpointShim::IsValidRead(address - syncpoint_shim_address, amount)) {
+                return false;
+            }
+            address += amount;
+            size -= amount;
+            continue;
+        }
+        const size_t amount = (std::min)(u64{size}, granule - (address & (granule - 1)));
+        auto entry = GetEntry(address, true);
+        if (entry == EntryType::Free) {
+            entry = GetEntry(address, false);
+        }
+        if (entry == EntryType::Free) {
+            return false;
+        }
+        if (entry == EntryType::Mapped) {
+            const auto device = GpuToCpuAddress(address);
+            if (!device || *device >= (u64{1} << MaxwellDeviceMemoryManager::AS_BITS) ||
+                amount > (u64{1} << MaxwellDeviceMemoryManager::AS_BITS) - *device ||
+                !memory.GetPointer<u8>(*device) || !memory.GetPointer<u8>(*device + amount - 1)) {
+                return false;
+            }
+        }
+        address += amount;
+        size -= amount;
+    }
+    return true;
+}
+
+bool MemoryManager::ReadBlockChecked(GPUVAddr address, std::span<u8> output) const {
+    std::scoped_lock lock{mapping_guard};
+    if (!IsValidAccessRange(address, output.size(), false)) {
+        return false;
+    }
+    ReadBlock(address, output.data(), output.size());
+    return true;
+}
+
+bool MemoryManager::IsReadableRange(GPUVAddr address, size_t size) const {
+    std::scoped_lock lock{mapping_guard};
+    return IsValidAccessRange(address, size, false);
+}
+
+bool MemoryManager::WriteBlockChecked(GPUVAddr address, std::span<const u8> input) {
+    std::scoped_lock lock{mapping_guard};
+    if (!IsValidAccessRange(address, input.size(), true)) {
+        return false;
+    }
+    WriteBlock(address, input.data(), input.size());
+    return true;
+}
+
 void MemoryManager::WriteBlockImpl(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size, [[maybe_unused]] VideoCommon::CacheType which, bool unsafe) {
     if (OverlapsSyncpointShim(gpu_dest_addr, size)) {
         LOG_ERROR(HW_GPU, "Write to read-only syncpoint mapping at {:#x}, size={:#x}",

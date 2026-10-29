@@ -86,6 +86,13 @@ bool ShaderCache::RefreshStages(std::array<u64, 6>& unique_hashes) {
 const ShaderInfo* ShaderCache::ComputeShader() {
     const GPUVAddr program_base{kepler_compute->regs.code_loc.Address()};
     const auto& qmd{kepler_compute->launch_description};
+    if (kepler_compute->IsNativeMode()) {
+        // Native source pages may have unrelated device addresses. Recapture before looking
+        // up compiled pipelines until shader invalidation can watch all translated segments.
+        ComputeEnvironment env{*kepler_compute, *gpu_memory, program_base, qmd.program_start};
+        native_compute_shader = {env.CalculateHash(), env.CachedSizeBytes()};
+        return &native_compute_shader;
+    }
     const GPUVAddr shader_addr{program_base + qmd.program_start};
     const std::optional<VAddr> cpu_shader_addr{gpu_memory->GpuToCpuAddress(shader_addr)};
     if (!cpu_shader_addr) {

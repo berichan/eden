@@ -599,7 +599,12 @@ ComputePipeline* PipelineCache::CurrentComputePipeline() {
     if (!is_new) {
         return pipeline.get();
     }
-    pipeline = CreateComputePipeline(key, shader);
+    try {
+        pipeline = CreateComputePipeline(key, shader);
+    } catch (...) {
+        compute_cache.erase(key);
+        throw;
+    }
     return pipeline.get();
 }
 
@@ -961,8 +966,13 @@ std::unique_ptr<ComputePipeline> PipelineCache::CreateComputePipeline(
     ComputeEnvironment env{*kepler_compute, *gpu_memory, program_base, qmd.program_start};
     env.SetCachedSize(shader->size_bytes);
 
+    if (kepler_compute->IsNativeMode() && env.CalculateHash() != key.unique_hash) {
+        throw Shader::RuntimeError("Native compute shader changed during pipeline construction");
+    }
+
     main_pools.ReleaseContents();
-    auto pipeline{CreateComputePipeline(main_pools, key, env, nullptr, true)};
+    auto pipeline{
+        CreateComputePipeline(main_pools, key, env, nullptr, !kepler_compute->IsNativeMode())};
     if (!pipeline || pipeline_cache_filename.empty()) {
         return pipeline;
     }

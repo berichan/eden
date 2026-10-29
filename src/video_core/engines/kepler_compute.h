@@ -9,6 +9,7 @@
 #include <array>
 #include <cstddef>
 #include <optional>
+#include <span>
 #include <vector>
 #include "common/bit_field.h"
 #include "common/common_funcs.h"
@@ -211,6 +212,15 @@ public:
         return indirect_compute;
     }
 
+    bool ConfigureNativeLaunch(std::span<const u32, 64> descriptor);
+    bool DispatchNativeCompute(std::span<const u32, 64> descriptor);
+    bool ReadNativeConstantBuffer(u32 index, u32 offset, std::span<u8> output) const;
+    bool IsNativeLaunchSupported(std::array<u32, 3> max_grid, std::array<u32, 3> max_block,
+                                 u32 max_invocations, u32 max_shared_memory) const;
+    bool IsNativeMode() const {
+        return native_mode;
+    }
+
 private:
     void ProcessLaunch();
 
@@ -236,6 +246,7 @@ private:
     };
     std::vector<UploadInfo> uploads;
     std::optional<GPUVAddr> indirect_compute{};
+    bool native_mode{};
 };
 
 #define ASSERT_REG_POSITION(field_name, position)                                                  \

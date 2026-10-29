@@ -356,6 +356,15 @@ public:
         return {count[0], count[1], count[2]};
     }
 
+    std::array<u32, 3> GetMaxComputeWorkGroupSize() const {
+        const auto& size = properties.properties.limits.maxComputeWorkGroupSize;
+        return {size[0], size[1], size[2]};
+    }
+
+    u32 GetMaxComputeWorkGroupInvocations() const {
+        return properties.properties.limits.maxComputeWorkGroupInvocations;
+    }
+
     /// Returns the maximum size for push constants.
     VkDeviceSize GetMaxPushConstantsSize() const {
         return properties.properties.limits.maxPushConstantsSize;

@@ -109,6 +109,12 @@ public:
     void WriteBlockUnsafe(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size);
     void WriteBlockCached(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size);
 
+    // Validate the complete range before touching either buffer. Sparse holes read as zero
+    // and discard writes; unmapped pages and unsupported register I/O fail without a prefix.
+    bool ReadBlockChecked(GPUVAddr address, std::span<u8> output) const;
+    bool WriteBlockChecked(GPUVAddr address, std::span<const u8> input);
+    bool IsReadableRange(GPUVAddr address, size_t size) const;
+
     /**
      * Checks if a gpu region can be simply read with a pointer.
      */
@@ -173,6 +179,7 @@ private:
     bool MapChecked(GPUVAddr gpu_addr, DAddr dev_addr, size_t size, PTEKind kind, bool sparse);
     bool OverlapsSyncpointShim(GPUVAddr address, size_t size) const;
     bool ReadSyncpointShim(GPUVAddr address, std::span<u8> output) const;
+    bool IsValidAccessRange(GPUVAddr address, size_t size, bool write) const;
 
     template <typename FuncMapped, typename FuncReserved, typename FuncUnmapped>
     inline void MemoryOperation(GPUVAddr gpu_src_addr, std::size_t size, bool is_big_page, FuncMapped&& func_mapped, FuncReserved&& func_reserved, FuncUnmapped&& func_unmapped) const;
@@ -242,7 +249,7 @@ private:
     boost::container::small_vector<std::pair<DAddr, std::size_t>, 32> page_stash2{};
 
     mutable std::mutex guard;
-    std::mutex mapping_guard;
+    mutable std::mutex mapping_guard;
 
     static constexpr size_t continuous_bits = 64;
 

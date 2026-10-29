@@ -47,6 +47,8 @@ public:
 
     [[nodiscard]] u64 ReadInstruction(u32 address) final;
 
+    [[nodiscard]] u32 TranslateProgramAddress(u32 address) const override;
+
     [[nodiscard]] std::optional<u64> Analyze();
 
     void SetCachedSize(size_t size_bytes);
@@ -57,13 +59,17 @@ public:
 
     [[nodiscard]] size_t ReadSizeBytes() const noexcept;
 
+    [[nodiscard]] size_t SourceSizeBytes() const noexcept {
+        return native_source_size;
+    }
+
     [[nodiscard]] bool CanBeSerialized() const noexcept;
 
     [[nodiscard]] u64 CalculateHash() const;
 
     void Dump(u64 pipeline_hash, u64 shader_hash) override;
 
-    void Serialize(std::ofstream& file) const;
+    void Serialize(std::ostream& file) const;
 
     bool HasHLEMacroState() const override {
         return has_hle_engine_state;
@@ -71,6 +77,10 @@ public:
 
 protected:
     std::optional<u64> TryFindSize();
+
+    void InitializeNativeCode(u32 source_header_size);
+    size_t native_source_size{};
+    u64 native_specialization_hash{};
 
     Tegra::Texture::TICEntry ReadTextureInfo(GPUVAddr tic_addr, u32 tic_limit,
                                              bool via_header_index, u32 raw);
@@ -155,6 +165,7 @@ public:
 
 private:
     Tegra::Engines::KeplerCompute* kepler_compute{};
+    std::vector<u8> native_driver_constants;
 };
 
 class FileEnvironment final : public Shader::Environment {
@@ -168,7 +179,9 @@ public:
     FileEnvironment& operator=(const FileEnvironment&) = delete;
     FileEnvironment(const FileEnvironment&) = delete;
 
-    void Deserialize(std::ifstream& file);
+    void Deserialize(std::istream& file);
+
+    [[nodiscard]] u32 TranslateProgramAddress(u32 address) const override;
 
     [[nodiscard]] u64 ReadInstruction(u32 address) override;
 

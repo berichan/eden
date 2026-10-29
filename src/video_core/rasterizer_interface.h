@@ -57,6 +57,11 @@ public:
     /// Dispatches a compute shader invocation
     virtual void DispatchCompute() = 0;
 
+    // Return success only when the backend records the native dispatch.
+    virtual bool DispatchNativeCompute() {
+        return false;
+    }
+
     /// Resets the counter of a query
     virtual void ResetCounter(VideoCommon::QueryType type) = 0;
 

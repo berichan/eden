@@ -19,18 +19,26 @@ public:
 
     explicit SyncpointShim(SyncpointManager& manager) : m_manager{manager} {}
 
+    static bool IsValidRead(u64 offset, size_t size) {
+        if (offset >= Size || size > Size - offset) {
+            return false;
+        }
+        if (size == 0) {
+            return true;
+        }
+        const auto register_offset = offset % Stride;
+        // Only the counter register is implemented. Other registers in each slot are not RAM.
+        return register_offset < sizeof(u32) && size <= sizeof(u32) - register_offset;
+    }
+
     bool Read(u64 offset, std::span<u8> output) const {
-        if (offset >= Size || output.size() > Size - offset) {
+        if (!IsValidRead(offset, output.size())) {
             return false;
         }
         if (output.empty()) {
             return true;
         }
         const auto register_offset = offset % Stride;
-        // Only the counter register is implemented. Other registers in each slot are not RAM.
-        if (register_offset >= sizeof(u32) || output.size() > sizeof(u32) - register_offset) {
-            return false;
-        }
         const u32_le value{m_manager.GetHostSyncpointValue(static_cast<u32>(offset / Stride))};
         std::memcpy(output.data(), reinterpret_cast<const u8*>(&value) + register_offset,
                     output.size());

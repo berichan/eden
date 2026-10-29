@@ -91,6 +91,8 @@ public:
     void DrawTexture() override;
     void Clear(u32 layer_count) override;
     void DispatchCompute() override;
+
+    bool DispatchNativeCompute() override;
     void ResetCounter(VideoCommon::QueryType type) override;
     void Query(GPUVAddr gpu_addr, VideoCommon::QueryType type,
                VideoCommon::QueryPropertiesFlags flags, u32 payload, u32 subreport) override;
@@ -159,6 +161,8 @@ private:
     void PrepareDraw(bool is_indexed, Func&&);
 
     void FlushWork();
+
+    bool DispatchComputeImpl(bool require_bound_pipeline);
 
     void UpdateDynamicStates();
 

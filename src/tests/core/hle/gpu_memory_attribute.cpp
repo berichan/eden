@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <sstream>
 #include <catch2/catch_test_macros.hpp>
 #include "common/scope_exit.h"
 #include "common/settings.h"
@@ -23,9 +24,15 @@
 #include "core/hle/service/gsv/native_image_pool.h"
 #include "core/hle/service/gsv/native_memory_descriptions.h"
 #include "core/memory.h"
+#include "shader_recompiler/exception.h"
+#include "shader_recompiler/frontend/ampere/lower_to_maxwell.h"
+#include "shader_recompiler/frontend/maxwell/translate_program.h"
+#include "shader_recompiler/host_translate_info.h"
+#include "video_core/engines/kepler_compute.h"
 #include "video_core/gpu.h"
 #include "video_core/memory_manager.h"
 #include "video_core/renderer_null/null_rasterizer.h"
+#include "video_core/shader_environment.h"
 
 TEST_CASE("GPU sharable attributes survive memory block splitting and independent cache changes",
           "[core][ipc]") {
@@ -526,6 +533,163 @@ TEST_CASE("GPU pins retain real heap pages until partial unlock or process table
                     .IsSuccess());
         REQUIRE(alias_view->GpuToCpuAddress(va) == view->GpuToCpuAddress(va));
         REQUIRE(alias_view->Read<u32>(va + PageSize) == 0xabcdef01);
+
+        {
+            std::array<u8, 8> transfer;
+            transfer.fill(0xcc);
+            REQUIRE_FALSE(view->ReadBlockChecked(va + size - 4, transfer));
+            REQUIRE(transfer.front() == 0xcc);
+            const auto original = view->Read<u32>(va + size - 4);
+            REQUIRE_FALSE(view->WriteBlockChecked(va + size - 4, transfer));
+            REQUIRE(view->Read<u32>(va + size - 4) == original);
+            using Instruction = Shader::Ampere::Instruction;
+            const std::array native{
+                Instruction{{0x00077802, 13, 0x00000f00, 0}},
+                Instruction{{0xff007388, 7, 0x00000800, 0}},
+                Instruction{{0xff007984, 0, 0x00000800, 0}},
+                Instruction{{0xff007388, 0x400, 0x00000800, 0}},
+                Instruction{{0x0000794d, 0, 0x03800000, 0}},
+            };
+            constexpr u32 code_offset = 0x200;
+            REQUIRE(view->WriteBlockChecked(
+                va + code_offset, {reinterpret_cast<const u8*>(native.data()), sizeof(native)}));
+            REQUIRE(process.GetMemory().Read32(address + PageSize + code_offset) ==
+                    native[0].words[0]);
+            constexpr u32 constant = 0x76543210;
+            REQUIRE(view->WriteBlockChecked(
+                va + 0x400, {reinterpret_cast<const u8*>(&constant), sizeof(constant)}));
+            std::array<u32, 64> descriptor{};
+            descriptor[12] = descriptor[13] = descriptor[14] = 1;
+            descriptor[17] = 128;
+            descriptor[18] = (32U << 16) | 0x30;
+            descriptor[19] = (1U << 16) | 1;
+            descriptor[20] = 1;
+            descriptor[23] = 32;
+            descriptor[50] = 16;
+            descriptor[48] = static_cast<u32>(va + code_offset);
+            descriptor[32] = static_cast<u32>(va + 0x400);
+            descriptor[33] = 1U << 19; // A sixteen-byte constant buffer.
+            Tegra::Engines::KeplerCompute compute{*view};
+            compute.BindRasterizer(&rasterizer);
+            REQUIRE_FALSE(compute.IsNativeMode());
+            REQUIRE(compute.ConfigureNativeLaunch(descriptor));
+            VideoCommon::ComputeEnvironment env{compute, *view, va + code_offset, 0};
+            REQUIRE(env.StartAddress() == 0x50);
+            REQUIRE(env.SourceSizeBytes() == sizeof(native));
+            REQUIRE(env.CachedSizeBytes() > env.SourceSizeBytes());
+            REQUIRE(env.WorkgroupSize() == std::array<u32, 3>{32, 1, 1});
+            REQUIRE(env.LocalMemorySize() == 48);
+            REQUIRE(env.ReadCbufValue(0, 0) == constant);
+            REQUIRE_THROWS_AS(env.ReadCbufValue(8, 0), Shader::RuntimeError);
+            REQUIRE_THROWS_AS(env.ReadCbufValue(1, 0), Shader::RuntimeError);
+            REQUIRE_THROWS_AS(env.ReadTextureType(0), Shader::RuntimeError);
+            REQUIRE(env.Analyze() == env.CalculateHash());
+            REQUIRE(env.ReadCbufValue(0, 12) == 0);
+            REQUIRE(env.ReadCbufValue(0, 16) == 0);
+            for (u32 tail : {13U, 14U, 15U}) {
+                REQUIRE_THROWS_AS(env.ReadCbufValue(0, tail), Shader::RuntimeError);
+            }
+            std::array<u8, 16> storage_descriptor;
+            REQUIRE(compute.ReadNativeConstantBuffer(0, 0, storage_descriptor));
+            REQUIRE_FALSE(compute.ReadNativeConstantBuffer(0, 1, storage_descriptor));
+            REQUIRE_FALSE(compute.ReadNativeConstantBuffer(0, 0xffffffff, storage_descriptor));
+            REQUIRE_FALSE(compute.ReadNativeConstantBuffer(8, 0, storage_descriptor));
+            auto specialization = descriptor;
+            specialization[23] += 16;
+            REQUIRE(compute.ConfigureNativeLaunch(specialization));
+            VideoCommon::ComputeEnvironment local_variant{compute, *view, va + code_offset, 0};
+            REQUIRE(local_variant.CalculateHash() != env.CalculateHash());
+            specialization = descriptor;
+            specialization[20] |= 2;
+            specialization[34] = static_cast<u32>(va + 0x480);
+            specialization[35] = 1U << 19;
+            REQUIRE(compute.ConfigureNativeLaunch(specialization));
+            process.GetMemory().Write32(address + PageSize + 0x480, 11);
+            VideoCommon::ComputeEnvironment constants_a{compute, *view, va + code_offset, 0};
+            process.GetMemory().Write32(address + PageSize + 0x480, 22);
+            VideoCommon::ComputeEnvironment constants_b{compute, *view, va + code_offset, 0};
+            REQUIRE(constants_a.CalculateHash() != constants_b.CalculateHash());
+            REQUIRE(constants_a.ReadCbufValue(1, 0) == 11);
+            REQUIRE(constants_b.ReadCbufValue(1, 0) == 22);
+            REQUIRE_THROWS_AS(constants_a.ReadCbufValue(1, 13), Shader::RuntimeError);
+            REQUIRE(compute.ConfigureNativeLaunch(descriptor));
+            env.SetCachedSize(env.CachedSizeBytes());
+            REQUIRE_THROWS_AS(env.SetCachedSize(env.CachedSizeBytes() + 8), Shader::RuntimeError);
+            REQUIRE_THROWS_AS(env.ReadInstruction(static_cast<u32>(env.CachedSizeBytes())),
+                              Shader::RuntimeError);
+            Shader::ObjectPool<Shader::Maxwell::Flow::Block> flow_pool;
+            Shader::ObjectPool<Shader::IR::Inst> inst_pool;
+            Shader::ObjectPool<Shader::IR::Block> block_pool;
+            Shader::Maxwell::Flow::CFG cfg{env, flow_pool, env.StartAddress()};
+            Shader::HostTranslateInfo host;
+            const auto program =
+                Shader::Maxwell::TranslateProgram(inst_pool, block_pool, env, cfg, host);
+            u32 shared_reads{}, shared_writes{};
+            for (const auto* ir_block : program.blocks) {
+                for (const auto& inst : ir_block->Instructions()) {
+                    shared_reads += inst.GetOpcode() == Shader::IR::Opcode::LoadSharedU32;
+                    shared_writes += inst.GetOpcode() == Shader::IR::Opcode::WriteSharedU32;
+                }
+            }
+            REQUIRE(shared_reads == 1);
+            REQUIRE(shared_writes == 2);
+            std::stringstream stream{std::ios::in | std::ios::out | std::ios::binary};
+            env.Serialize(stream);
+            stream.seekg(0);
+            VideoCommon::FileEnvironment cached;
+            cached.Deserialize(stream);
+            REQUIRE(stream.good());
+            REQUIRE(cached.StartAddress() == env.StartAddress());
+            REQUIRE(cached.WorkgroupSize() == env.WorkgroupSize());
+            REQUIRE(cached.ReadCbufValue(0, 0) == constant);
+            REQUIRE(cached.ReadInstruction(0x50) == env.ReadInstruction(0x50));
+            REQUIRE(cached.TranslateProgramAddress(16) == env.TranslateProgramAddress(16));
+            REQUIRE_THROWS_AS(cached.TranslateProgramAddress(1), Shader::RuntimeError);
+            Shader::ObjectPool<Shader::Maxwell::Flow::Block> cached_flow_pool;
+            Shader::Maxwell::Flow::CFG cached_cfg{cached, cached_flow_pool, cached.StartAddress()};
+            REQUIRE(cached_cfg.Functions().size() == cfg.Functions().size());
+            // A null backend must not report a nonempty native dispatch as completed work.
+            REQUIRE_FALSE(compute.DispatchNativeCompute(descriptor));
+            auto invalid = descriptor;
+            invalid[48] = static_cast<u32>(va + size - 8);
+            REQUIRE(compute.ConfigureNativeLaunch(invalid));
+            REQUIRE_THROWS_AS((VideoCommon::ComputeEnvironment{compute, *view, va + size - 8, 0}),
+                              Shader::RuntimeError);
+            invalid = descriptor;
+            invalid[32] = static_cast<u32>(va + size);
+            REQUIRE(compute.ConfigureNativeLaunch(invalid));
+            VideoCommon::ComputeEnvironment unmapped_constant{compute, *view, va + code_offset, 0};
+            REQUIRE_THROWS_AS(unmapped_constant.ReadCbufValue(0, 0), Shader::RuntimeError);
+            REQUIRE_FALSE(compute.DispatchNativeCompute(invalid));
+            Tegra::MemoryManager split{system, backing, 40, 1ULL << 40, 16, 12};
+            split.BindRasterizer(&rasterizer);
+            constexpr GPUVAddr split_va = 0x40000000;
+            REQUIRE(split.Map(split_va, *view->GpuToCpuAddress(va + PageSize), PageSize,
+                              Tegra::PTEKind::PITCH, false) == split_va);
+            REQUIRE(split.Map(split_va + PageSize, *view->GpuToCpuAddress(va), PageSize,
+                              Tegra::PTEKind::PITCH, false) == split_va + PageSize);
+            const GPUVAddr split_code = split_va + PageSize - 32;
+            REQUIRE_FALSE(split.IsContinuousRange(split_code, sizeof(native)));
+            std::array<u8, sizeof(native)> saved_source;
+            REQUIRE(split.ReadBlockChecked(split_code, saved_source));
+            REQUIRE(split.WriteBlockChecked(
+                split_code, {reinterpret_cast<const u8*>(native.data()), sizeof(native)}));
+            auto split_descriptor = descriptor;
+            split_descriptor[48] = static_cast<u32>(split_code);
+            split_descriptor[20] = 0;
+            Tegra::Engines::KeplerCompute split_compute{split};
+            REQUIRE(split_compute.ConfigureNativeLaunch(split_descriptor));
+            VideoCommon::ComputeEnvironment split_a{split_compute, split, split_code, 0};
+            REQUIRE(split_a.SourceSizeBytes() == sizeof(native));
+            REQUIRE(split_a.CalculateHash() != 0);
+            const u32 changed_offset = 0x800;
+            REQUIRE(split.WriteBlockChecked(
+                split_code + 3 * sizeof(Instruction) + sizeof(u32),
+                {reinterpret_cast<const u8*>(&changed_offset), sizeof(changed_offset)}));
+            VideoCommon::ComputeEnvironment split_b{split_compute, split, split_code, 0};
+            REQUIRE(split_b.CalculateHash() != split_a.CalculateHash());
+            REQUIRE(split.WriteBlockChecked(split_code, saved_source));
+        }
         selected = 0xfe;
         REQUIRE(pool.Map(&selected, spaces, backing, space, va + PageSize, va + 2 * PageSize - 1,
                          handle, 0, options)
