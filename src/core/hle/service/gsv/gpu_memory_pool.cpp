@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <limits>
 #include <new>
 #include "common/alignment.h"
 #include "common/scope_exit.h"
@@ -112,12 +113,42 @@ Result GpuMemoryPool::Unregister(u32 handle, Kernel::KEvent* completion) {
     const std::scoped_lock lock{m_mutex};
     const auto it = m_memory.find(handle);
     R_UNLESS(it != m_memory.end() && !it->second.release_pending, InvalidMemory);
-    if (it->second.mapping_count != 0) {
+    if (it->second.mapping_count != 0 || it->second.reference_count != 0) {
         it->second.release_pending = true;
         it->second.release_event.SetObject(completion);
         R_SUCCEED();
     }
     R_RETURN(ReleaseMemory(it, completion));
+}
+
+Result GpuMemoryPool::RetainReference(u32 handle, u64 address, u64 size, u64 offset) {
+    const std::scoped_lock lock{m_mutex};
+    const auto it = m_memory.find(handle);
+    R_UNLESS(it != m_memory.end() && !it->second.release_pending, InvalidMemory);
+    auto& memory = it->second;
+    R_UNLESS(size != 0 && offset <= memory.pinned_size && size <= memory.pinned_size - offset &&
+                 address >= memory.address && address - memory.address == offset,
+             InvalidArgument);
+    R_UNLESS(memory.reference_count < std::numeric_limits<size_t>::max(), OutOfMemory);
+    ++memory.reference_count;
+    R_SUCCEED();
+}
+
+Result GpuMemoryPool::ReleaseReference(u32 handle) {
+    const std::scoped_lock lock{m_mutex};
+    const auto it = m_memory.find(handle);
+    R_UNLESS(it != m_memory.end() && it->second.reference_count != 0, InvalidMemory);
+    --it->second.reference_count;
+    if (it->second.release_pending && it->second.mapping_count == 0 &&
+        it->second.reference_count == 0) {
+        const auto result = ReleaseMemory(it);
+        if (result.IsError()) {
+            // Keep the caller's reference if releasing physical ownership could not finish.
+            ++it->second.reference_count;
+            R_RETURN(result);
+        }
+    }
+    R_SUCCEED();
 }
 
 Result GpuMemoryPool::ReleaseMemory(std::map<u32, Memory>::iterator it,
@@ -251,7 +282,8 @@ void GpuMemoryPool::RemoveMapping(std::map<std::pair<u32, u64>, Mapping>::iterat
     ASSERT(memory != m_memory.end() && memory->second.mapping_count != 0);
     --memory->second.mapping_count;
     m_mappings.erase(it);
-    if (memory->second.release_pending && memory->second.mapping_count == 0) {
+    if (memory->second.release_pending && memory->second.mapping_count == 0 &&
+        memory->second.reference_count == 0) {
         const auto result = ReleaseMemory(memory);
         if (result.IsError()) {
             LOG_ERROR(Service, "Deferred GPU memory release failed: {:#x}", result.raw);

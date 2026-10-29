@@ -14,6 +14,7 @@
 #include "core/hle/service/gsv/gpu_memory_pool.h"
 #include "core/hle/service/gsv/gpu_session.h"
 #include "core/hle/service/gsv/graphics_device_table.h"
+#include "core/hle/service/gsv/native_image_layout.h"
 #include "core/hle/service/ipc_helpers.h"
 #include "video_core/gpu.h"
 #include "video_core/host1x/host1x.h"
@@ -208,6 +209,28 @@ Result GpuSession::ExistsAddressSpace(u32 handle) {
     const auto guard = LockService();
     R_UNLESS(m_phase == Phase::Initialized, Kernel::ResultInvalidState);
     R_UNLESS(m_address_spaces->Get(handle) != nullptr, GpuAddressSpacePool::InvalidAddressSpace);
+    R_SUCCEED();
+}
+
+Result GpuSession::GetNativeMemoryPool(std::shared_ptr<GpuMemoryPool>* out) {
+    const auto lock = LockService();
+    R_UNLESS(m_phase == Phase::Initialized, Kernel::ResultInvalidState);
+    *out = m_memory;
+    R_SUCCEED();
+}
+
+Result GpuSession::CalculateNativeImageSize(u64* out_size, const NativeImagePreference& preference,
+                                            u32 layers) {
+    const auto guard = LockService();
+    R_UNLESS(m_phase == Phase::Initialized, Kernel::ResultInvalidState);
+    NativeImageLayout layout;
+    R_TRY(CalculateNativeImageLayout(&layout, preference, layers));
+    *out_size = layout.size;
+    LOG_DEBUG(Service,
+              "Native image size calculated: width={}, height={}, pitch={:#x}, block_height={}, "
+              "layers={}, size={:#x}",
+              layout.width, layout.height, layout.row_pitch, layout.block_height_log2, layers,
+              layout.size);
     R_SUCCEED();
 }
 

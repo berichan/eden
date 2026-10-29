@@ -16,6 +16,7 @@
 #include "core/hle/service/gsv/gpu_address_space_pool.h"
 #include "core/hle/service/gsv/gpu_memory_pool.h"
 #include "core/hle/service/gsv/graphics_device_table.h"
+#include "core/hle/service/gsv/native_memory_descriptions.h"
 #include "core/memory.h"
 #include "video_core/gpu.h"
 #include "video_core/memory_manager.h"
@@ -274,6 +275,77 @@ TEST_CASE("GPU pins retain real heap pages until partial unlock or process table
         REQUIRE(info.GetAttribute() == KMemoryAttribute::GpuSharable);
         REQUIRE(devices->Destroy(device_id).IsSuccess());
     }
+    SECTION("native descriptions retain registered slices until their final release") {
+        using namespace Service::GSV;
+        auto devices = std::make_shared<GraphicsDeviceTable>();
+        u8 device{};
+        REQUIRE(devices->Create(&device, 1, 0, 0).IsSuccess());
+        auto pool = std::make_shared<GpuMemoryPool>(kernel, &process, devices);
+        REQUIRE(table
+                    .SetGpuMemoryAttribute(address, 4 * PageSize, KMemoryAttribute::GpuSharable,
+                                           KMemoryAttribute::GpuSharable)
+                    .IsSuccess());
+        u32 memory{};
+        const u64 base = GetInteger(address);
+        REQUIRE(pool->Register(&memory, base, base + 4 * PageSize - 1, 0, device).IsSuccess());
+        REQUIRE(pool->RetainReference(0, base, PageSize, 0) == Result{0x280f3});
+        REQUIRE(pool->ReleaseReference(memory) == Result{0x280f3});
+        NativeMemoryDescriptions descriptions;
+        u32 description{}, other_type{};
+        REQUIRE(descriptions.Create(&description, 3, PageSize).IsSuccess());
+        REQUIRE(descriptions.Create(&other_type, 1, PageSize).IsSuccess());
+        REQUIRE(descriptions.Bind(0, pool, base, PageSize, memory, 0) == Result{0x280f3});
+        REQUIRE(descriptions.Bind(other_type, pool, base, PageSize, memory, 0) == Result{0x100f3});
+        REQUIRE(descriptions.Bind(description, pool, base, 0, memory, 0) == Result{0x100f3});
+        REQUIRE(descriptions.Bind(description, pool, base, 2 * PageSize, memory, 0) ==
+                Result{0x100f3});
+        REQUIRE(descriptions.Bind(description, pool, base, PageSize / 2, memory, 0) ==
+                ResultNotImplemented);
+        REQUIRE(descriptions.Bind(description, pool, base, PageSize, 0, 0) == Result{0x280f3});
+        REQUIRE(descriptions.Bind(description, pool, base + PageSize, PageSize, memory, 0) ==
+                Result{0x100f3});
+        REQUIRE(descriptions.Bind(description, pool, base, PageSize, memory, ~u64{0}) ==
+                Result{0x100f3});
+        REQUIRE(descriptions.Bind(description, pool, base + 4 * PageSize, PageSize, memory,
+                                  4 * PageSize) == Result{0x100f3});
+        REQUIRE_FALSE(descriptions.Get(description)->binding);
+        REQUIRE(descriptions.Bind(description, pool, base + PageSize, PageSize, memory, PageSize)
+                    .IsSuccess());
+        const auto binding = descriptions.Get(description)->binding;
+        REQUIRE(binding.has_value());
+        REQUIRE(binding->address == base + PageSize);
+        REQUIRE(binding->offset == PageSize);
+        REQUIRE(binding->memory_handle == memory);
+        REQUIRE(descriptions.Bind(description, pool, base, PageSize, memory, 0) == Result{0x280f3});
+        auto* event = KEvent::Create(kernel);
+        REQUIRE(event != nullptr);
+        event->Initialize(kernel, nullptr);
+        KEvent::Register(kernel, event);
+        SCOPE_EXIT {
+            event->GetReadableEvent().Close(kernel);
+            event->Close(kernel);
+        };
+        {
+            NativeMemoryDescriptions closing;
+            u32 second{};
+            REQUIRE(closing.Create(&second, 3, PageSize).IsSuccess());
+            REQUIRE(closing.Bind(second, pool, base + 2 * PageSize, PageSize, memory, 2 * PageSize)
+                        .IsSuccess());
+            REQUIRE(pool->Unregister(memory, event).IsSuccess());
+            REQUIRE(pool->RetainReference(memory, base, PageSize, 0) == Result{0x280f3});
+            REQUIRE_FALSE(event->GetReadableEvent().IsSignaled(kernel));
+            REQUIRE(descriptions.Destroy(description).IsSuccess());
+            REQUIRE_FALSE(event->GetReadableEvent().IsSignaled(kernel));
+            REQUIRE(devices->Destroy(device) == GraphicsDeviceTable::InvalidDevice);
+        }
+        REQUIRE(event->GetReadableEvent().IsSignaled(kernel));
+        REQUIRE(pool->ReleaseReference(memory) == Result{0x280f3});
+        KMemoryInfo info;
+        Svc::PageInfo page;
+        REQUIRE(table.QueryInfo(&info, &page, address).IsSuccess());
+        REQUIRE(info.GetAttribute() == KMemoryAttribute::GpuSharable);
+        REQUIRE(devices->Destroy(device).IsSuccess());
+    }
     SECTION("GPU mappings share the retained CPU pages and delay release completion") {
         using namespace Service::GSV;
         Tegra::GPU gpu{system, false, false};
@@ -365,6 +437,8 @@ TEST_CASE("GPU pins retain real heap pages until partial unlock or process table
             event->GetReadableEvent().Close(kernel);
             event->Close(kernel);
         };
+        REQUIRE(pool.RetainReference(handle, GetInteger(address) + PageSize, PageSize, PageSize)
+                    .IsSuccess());
         REQUIRE(pool.Unregister(handle, event).IsSuccess());
         REQUIRE_FALSE(event->GetReadableEvent().IsSignaled(kernel));
         REQUIRE(devices->Destroy(device) == GraphicsDeviceTable::InvalidDevice);
@@ -376,6 +450,9 @@ TEST_CASE("GPU pins retain real heap pages until partial unlock or process table
         REQUIRE(devices->Destroy(device) == GraphicsDeviceTable::InvalidDevice);
         REQUIRE(pool.Unmap(alias_space, va, va + size - 1).IsSuccess());
         REQUIRE_FALSE(alias_view->GpuToCpuAddress(va));
+        REQUIRE_FALSE(event->GetReadableEvent().IsSignaled(kernel));
+        REQUIRE(devices->Destroy(device) == GraphicsDeviceTable::InvalidDevice);
+        REQUIRE(pool.ReleaseReference(handle).IsSuccess());
         REQUIRE(event->GetReadableEvent().IsSignaled(kernel));
         REQUIRE(devices->Destroy(device).IsSuccess());
         REQUIRE(pool.Unregister(handle) == Result{0x280f3});

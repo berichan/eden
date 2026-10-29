@@ -4,6 +4,7 @@
 #pragma once
 
 #include "core/hle/kernel/k_auto_object.h"
+#include "core/hle/service/gsv/native_memory_descriptions.h"
 #include "core/hle/service/service.h"
 
 namespace Kernel {
@@ -40,12 +41,16 @@ private:
     void SetCurrentProcessHandle(HLERequestContext& ctx);
     void CreateContext(HLERequestContext& ctx);
     void BootNativeMemoryManagement(HLERequestContext& ctx);
+    void CreateNativeMemoryDescription(HLERequestContext& ctx);
+    void DestroyNativeMemoryDescription(HLERequestContext& ctx);
+    void BindNativeMemoryDescription(HLERequestContext& ctx);
     void CreateGraphicsFrameContext(HLERequestContext& ctx);
     void InitializeGraphicsFrameContext(HLERequestContext& ctx);
     void CreateGpuSessionWithRemoteMemory(HLERequestContext& ctx);
     void CreateGpuContext(HLERequestContext& ctx);
     void InitializeGpuContext(HLERequestContext& ctx);
     void ExistsAddressSpace(HLERequestContext& ctx);
+    void CalculateNativeImageSize(HLERequestContext& ctx);
     void CreateDisplayContext(HLERequestContext& ctx);
     void InitializeDisplayContext(HLERequestContext& ctx);
     void CreateSyncptContext(HLERequestContext& ctx);
@@ -59,6 +64,7 @@ private:
     u64 m_work_memory_size{};
     bool m_process_bound{};
     bool m_context_created{};
+    NativeMemoryDescriptions m_memory_descriptions;
     std::shared_ptr<GpuAddressSpacePool> m_address_spaces;
     std::shared_ptr<Nvidia::Module> m_nvdrv;
     std::weak_ptr<Nvidia::NVDRV> m_nvdrv_user;

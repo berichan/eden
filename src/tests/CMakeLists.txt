@@ -23,6 +23,7 @@ add_executable(tests
     core/hle/native_gpu_address_space.cpp
     core/hle/native_syncpoint_shim.cpp
     core/hle/gpu_memory_attribute.cpp
+    core/hle/native_image_layout.cpp
     core/internal_network/network.cpp
     core/loader/deconstructed_rom_directory.cpp
     video_core/memory_tracker.cpp

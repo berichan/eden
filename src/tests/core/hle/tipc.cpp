@@ -19,6 +19,8 @@
 #include "core/hle/service/gsv/gpu_address_space_pool.h"
 #include "core/hle/service/gsv/gpu_session.h"
 #include "core/hle/service/gsv/graphics_device_table.h"
+#include "core/hle/service/gsv/native_image_layout.h"
+#include "core/hle/service/gsv/native_memory_descriptions.h"
 #include "core/hle/service/gsv/syncpt_session.h"
 #include "core/hle/service/gsv/user_session.h"
 #include "core/hle/service/hle_ipc.h"
@@ -186,6 +188,122 @@ TEST_CASE("GPU memory attribute SVC validates native profile, ranges and its dis
     caller.system.Kernel().SetCpuProfile(Core::Hardware::CpuProfile::Nx);
     REQUIRE(Svc::LockGpuSharableMemory64(caller.system, &info, 0, 0x1000, 0x1000) == ResultNotImplemented);
     REQUIRE(Svc::UnlockGpuSharableMemory64(caller.system, 0, 0x1000, 0x1000) == ResultNotImplemented);
+}
+
+TEST_CASE("Native image size queries require GPU initialization and exact TIPC payloads",
+          "[core][ipc][gsv]") {
+    Caller caller;
+    Service::GSV::NativeImagePreference preference{};
+    preference.type = 1;
+    preference.packed_extent = (1439U << 16) | 2559U;
+    preference.row_alignment_log2 = 7;
+    preference.pitch_gobs = 160;
+    preference.format = 1;
+    preference.options = 1;
+    Service::GSV::GpuSession gpu{caller.system, &caller.process};
+    u64 size{0x1122334455667788};
+    REQUIRE(gpu.CalculateNativeImageSize(&size, preference, 1) == Kernel::ResultInvalidState);
+    REQUIRE(size == 0x1122334455667788);
+    REQUIRE(gpu.CreateContext().IsSuccess());
+    REQUIRE(gpu.CalculateNativeImageSize(&size, preference, 1) == Kernel::ResultInvalidState);
+    REQUIRE(gpu.InitializeContext().IsSuccess());
+    REQUIRE(gpu.CalculateNativeImageSize(&size, preference, 1).IsSuccess());
+    REQUIRE(size == 0xf00000);
+    Service::GSV::UserSession root{caller.system, &caller.process, 0x55};
+    std::array<u32, 18> words{};
+    std::memcpy(words.data(), &preference, sizeof(preference));
+    words[16] = 1;
+    for (const auto count : {16U, 18U}) {
+        const auto [result, output] = RequestWords(caller, root, 435, std::span{words}.first(count), 3);
+        REQUIRE(result == Kernel::ResultInvalidSize);
+        REQUIRE(output == 0);
+    }
+    const auto [result, output] = RequestWords(caller, root, 435, std::span{words}.first(17), 3);
+    REQUIRE(result == Kernel::ResultInvalidState);
+    REQUIRE(output == 0);
+}
+
+TEST_CASE("Native memory descriptions retain sizes without allocating guest backing",
+          "[core][ipc][gsv]") {
+    using Descriptions = Service::GSV::NativeMemoryDescriptions;
+    Descriptions descriptions;
+    REQUIRE_FALSE(descriptions.Get(0));
+    REQUIRE(descriptions.Destroy(0) == Descriptions::InvalidHandle);
+    u32 handle{0xfeed};
+    REQUIRE(descriptions.Create(&handle, 4, 1) == Descriptions::InvalidArgument);
+    REQUIRE(handle == 0xfeed);
+    REQUIRE(descriptions.Create(&handle, 3, 0) == Descriptions::InvalidArgument);
+    REQUIRE(handle == 0xfeed);
+    std::array<u32, 4> handles{};
+    for (u8 type = 0; type < handles.size(); ++type) {
+        const u64 size = type == 3 ? ~u64{0} : (u64{1} << 32) + type;
+        REQUIRE(descriptions.Create(&handles[type], type, size).IsSuccess());
+        REQUIRE(handles[type] == type + 1U);
+        const auto description = descriptions.Get(handles[type]);
+        REQUIRE(description.has_value());
+        REQUIRE(description->size == size);
+        REQUIRE(description->type == type);
+        REQUIRE_FALSE(description->binding);
+    }
+    Descriptions other;
+    REQUIRE(other.Destroy(handles[0]) == Descriptions::InvalidHandle);
+    REQUIRE_FALSE(other.Get(handles[0]));
+    REQUIRE(descriptions.Destroy(handles[0]).IsSuccess());
+    REQUIRE_FALSE(descriptions.Get(handles[0]));
+    REQUIRE(descriptions.Destroy(handles[0]) == Descriptions::InvalidHandle);
+    REQUIRE(descriptions.Get(handles[1])->size == (u64{1} << 32) + 1);
+    REQUIRE(descriptions.Create(&handle, 3, 1).IsSuccess());
+    REQUIRE(handle == 5);
+}
+
+TEST_CASE("Native memory description TIPC validates context, byte type, size and lifetime",
+          "[core][ipc][gsv]") {
+    Caller caller;
+    Service::GSV::UserSession root{caller.system, &caller.process, 0x55};
+    const std::array<u32, 4> words{0xaabbcc03, 0x11223345, 0x55667788, 0};
+    for (const size_t count : {0U, 2U, 4U}) {
+        const auto [result, output] =
+            RequestWords(caller, root, 111, std::span{words}.first(count), 2);
+        REQUIRE(result == Kernel::ResultInvalidSize);
+        REQUIRE(static_cast<u32>(output) == 0);
+    }
+    const auto create = [&] {
+        return RequestWords(caller, root, 111, std::span{words}.first(3), 2);
+    };
+    REQUIRE(create().first == Kernel::ResultInvalidState);
+    const std::array<u32, 1> first_handle{1};
+    REQUIRE(RequestWords(caller, root, 112, first_handle).first == Kernel::ResultInvalidState);
+    const std::array<u64, 6> boot{0x55, 0x8000000000000001ULL, 0, 0, 0, 0};
+    REQUIRE(Request(caller, root, 4, boot).IsSuccess());
+    REQUIRE(Request(caller, root, 11, {}).IsSuccess());
+    REQUIRE(create().first == Kernel::ResultInvalidState);
+    REQUIRE(Request(caller, root, 101, {}).IsSuccess());
+    const std::array<u32, 3> zero_size{3, 0, 0};
+    const std::array<u32, 3> invalid_type{4, 1, 0};
+    for (const auto& invalid : {zero_size, invalid_type}) {
+        const auto [result, output] = RequestWords(caller, root, 111, invalid, 2);
+        REQUIRE(result == Service::GSV::NativeMemoryDescriptions::InvalidArgument);
+        REQUIRE(static_cast<u32>(output) == 0);
+    }
+    const auto [result, output] = create();
+    REQUIRE(result.IsSuccess());
+    REQUIRE(static_cast<u32>(output) == first_handle[0]);
+    REQUIRE(RequestWords(caller, root, 112, {}).first == Kernel::ResultInvalidSize);
+    const std::array<u32, 2> oversized{1, 0};
+    REQUIRE(RequestWords(caller, root, 112, oversized).first == Kernel::ResultInvalidSize);
+    REQUIRE(RequestWords(caller, root, 112, std::array<u32, 1>{0}).first ==
+            Service::GSV::NativeMemoryDescriptions::InvalidHandle);
+    REQUIRE(RequestWords(caller, root, 112, first_handle).first.IsSuccess());
+    REQUIRE(RequestWords(caller, root, 112, first_handle).first ==
+            Service::GSV::NativeMemoryDescriptions::InvalidHandle);
+    REQUIRE(static_cast<u32>(create().second) == 2);
+    std::array<u32, 13> binding{};
+    for (const size_t count : {0U, 11U, 13U}) {
+        REQUIRE(RequestWords(caller, root, 423, std::span{binding}.first(count)).first ==
+                Kernel::ResultInvalidSize);
+    }
+    REQUIRE(RequestWords(caller, root, 423, std::span{binding}.first(12)).first ==
+            Kernel::ResultInvalidState);
 }
 
 TEST_CASE("Native graphics device commands enforce initialization, packet sizes and lifetime",

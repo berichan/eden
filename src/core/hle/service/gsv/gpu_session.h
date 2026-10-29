@@ -20,6 +20,7 @@ class GraphicsDeviceTable;
 class GpuAddressSpacePool;
 class GpuMemoryPool;
 class GpuUserEvents;
+struct NativeImagePreference;
 
 class GpuSession final : public ServiceFramework<GpuSession> {
 public:
@@ -30,6 +31,9 @@ public:
     Result CreateContext();
     Result InitializeContext();
     Result ExistsAddressSpace(u32 handle);
+    Result CalculateNativeImageSize(u64* out_size, const NativeImagePreference& preference,
+                                    u32 layers);
+    Result GetNativeMemoryPool(std::shared_ptr<GpuMemoryPool>* out);
 
 private:
     enum class Phase {

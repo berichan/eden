@@ -14,6 +14,7 @@
 #include "core/hle/service/gsv/display_session.h"
 #include "core/hle/service/gsv/gpu_address_space_pool.h"
 #include "core/hle/service/gsv/gpu_session.h"
+#include "core/hle/service/gsv/native_image_layout.h"
 #include "core/hle/service/gsv/syncpt_session.h"
 #include "core/hle/service/gsv/user_session.h"
 #include "core/hle/service/ipc_helpers.h"
@@ -50,6 +51,8 @@ UserSession::UserSession(Core::System& system, Kernel::KProcess* process, u64 ar
         {4, &UserSession::BootWithRemoteMemory, "BootWithRemoteMemory"},
         {11, &UserSession::SetCurrentProcessHandle, "SetCurrentProcessHandle"},
         {101, &UserSession::CreateContext, "CreateContext"},
+        {111, &UserSession::CreateNativeMemoryDescription, "CreateNativeMemoryDescription"},
+        {112, &UserSession::DestroyNativeMemoryDescription, "DestroyNativeMemoryDescription"},
         {115, &UserSession::BootNativeMemoryManagement, "BootNativeMemoryManagement"},
         {201, &UserSession::CreateSyncptContext, "CreateSyncptContext"},
         {202, &UserSession::InitializeSyncptContext, "InitializeSyncptContext"},
@@ -57,7 +60,9 @@ UserSession::UserSession(Core::System& system, Kernel::KProcess* process, u64 ar
         {305, &UserSession::InitializeDisplayContext, "InitializeDisplayContext"},
         {401, &UserSession::CreateGpuContext, "CreateGpuContext"},
         {402, &UserSession::InitializeGpuContext, "InitializeGpuContext"},
+        {423, &UserSession::BindNativeMemoryDescription, "BindNativeMemoryDescription"},
         {434, &UserSession::ExistsAddressSpace, "ExistsAddressSpace"},
+        {435, &UserSession::CalculateNativeImageSize, "CalculateNativeImageSize"},
         {497, &UserSession::CreateGpuSessionWithRemoteMemory, "CreateGpuSessionWithRemoteMemory"},
         {1101, &UserSession::CreateGraphicsFrameContext, "CreateGraphicsFrameContext"},
         {1102, &UserSession::InitializeGraphicsFrameContext, "InitializeGraphicsFrameContext"},
@@ -164,6 +169,61 @@ void UserSession::BootNativeMemoryManagement(HLERequestContext& ctx) {
     rb.Push(modes);
 }
 
+void UserSession::CreateNativeMemoryDescription(HLERequestContext& ctx) {
+    u32 handle{};
+    const auto result = [&]() -> Result {
+        R_UNLESS(HasInputData(ctx, sizeof(u32) + sizeof(u64)), Kernel::ResultInvalidSize);
+        R_UNLESS(m_context_created, Kernel::ResultInvalidState);
+        IPC::RequestParser rp{ctx};
+        const auto type = static_cast<u8>(rp.Pop<u32>());
+        const auto size = rp.Pop<u64>();
+        R_TRY(m_memory_descriptions.Create(&handle, type, size));
+        LOG_DEBUG(Service, "Native memory description created: handle={:#x}, type={}, size={:#x}",
+                  handle, type, size);
+        R_SUCCEED();
+    }();
+    IPC::ResponseBuilder rb{ctx, 3};
+    rb.Push(result);
+    rb.Push(handle);
+}
+
+void UserSession::DestroyNativeMemoryDescription(HLERequestContext& ctx) {
+    const auto result = [&]() -> Result {
+        R_UNLESS(HasInputData(ctx, sizeof(u32)), Kernel::ResultInvalidSize);
+        R_UNLESS(m_context_created, Kernel::ResultInvalidState);
+        IPC::RequestParser rp{ctx};
+        R_RETURN(m_memory_descriptions.Destroy(rp.Pop<u32>()));
+    }();
+    Reply(ctx, result);
+}
+
+void UserSession::BindNativeMemoryDescription(HLERequestContext& ctx) {
+    const auto result = [&]() -> Result {
+        R_UNLESS(HasInputData(ctx, 12 * sizeof(u32)), Kernel::ResultInvalidSize);
+        R_UNLESS(m_context_created && m_gpu_session, Kernel::ResultInvalidState);
+        IPC::RequestParser rp{ctx};
+        const auto handle = rp.Pop<u32>();
+        const auto address = rp.Pop<u64>();
+        const auto size = rp.Pop<u64>();
+        const auto memory_handle = rp.Pop<u32>();
+        const auto offset = rp.Pop<u64>();
+        const auto flags = rp.Pop<u64>();
+        const auto reserved = rp.Pop<u64>();
+        R_UNLESS(reserved == 0, Result{0x100f3});
+        R_UNLESS(flags == 0, Kernel::ResultNotImplemented);
+        std::shared_ptr<GpuMemoryPool> pool;
+        R_TRY(m_gpu_session->GetNativeMemoryPool(&pool));
+        R_TRY(m_memory_descriptions.Bind(handle, std::move(pool), address, size, memory_handle,
+                                         offset));
+        LOG_DEBUG(Service,
+                  "Native memory description bound: handle={:#x}, address={:#x}, size={:#x}, "
+                  "memory={:#x}, offset={:#x}",
+                  handle, address, size, memory_handle, offset);
+        R_SUCCEED();
+    }();
+    Reply(ctx, result);
+}
+
 void UserSession::CreateGraphicsFrameContext(HLERequestContext& ctx) {
     if (!HasInputData(ctx, 0)) {
         Reply(ctx, Kernel::ResultInvalidSize);
@@ -240,6 +300,22 @@ void UserSession::ExistsAddressSpace(HLERequestContext& ctx) {
         R_SUCCEED();
     }();
     Reply(ctx, result);
+}
+
+void UserSession::CalculateNativeImageSize(HLERequestContext& ctx) {
+    u64 size{};
+    const auto result = [&]() -> Result {
+        R_UNLESS(HasInputData(ctx, sizeof(NativeImagePreference) + sizeof(u32)),
+                 Kernel::ResultInvalidSize);
+        R_UNLESS(m_gpu_session, Kernel::ResultInvalidState);
+        IPC::RequestParser rp{ctx};
+        const auto preference = rp.PopRaw<NativeImagePreference>();
+        const auto layers = rp.Pop<u32>();
+        R_RETURN(m_gpu_session->CalculateNativeImageSize(&size, preference, layers));
+    }();
+    IPC::ResponseBuilder rb{ctx, 4};
+    rb.Push(result);
+    rb.Push<u64>(size);
 }
 
 void UserSession::CreateDisplayContext(HLERequestContext& ctx) {

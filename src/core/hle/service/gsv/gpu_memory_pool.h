@@ -35,6 +35,8 @@ public:
 
     Result Register(u32* out_handle, u64 address, u64 last_address, u8 flags, u8 device_id);
     Result Unregister(u32 handle, Kernel::KEvent* completion = nullptr);
+    Result RetainReference(u32 handle, u64 address, u64 size, u64 offset);
+    Result ReleaseReference(u32 handle);
 
     struct MapOptions {
         u8 permission;
@@ -58,6 +60,7 @@ private:
         u8 device_id{};
         DAddr device_address{};
         size_t mapping_count{};
+        size_t reference_count{};
         bool release_pending{};
         Kernel::KScopedAutoObject<Kernel::KEvent> release_event;
         std::vector<Kernel::Svc::lp64::PhysicalMemoryInfo> chunks;
