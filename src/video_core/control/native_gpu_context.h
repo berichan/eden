@@ -8,6 +8,7 @@
 #include <mutex>
 #include <optional>
 #include "common/common_types.h"
+#include "video_core/turing_macro.h"
 
 namespace Tegra {
 class MemoryManager;
@@ -31,6 +32,7 @@ struct AmpereGraphicsState {
     std::mutex mutex;
     std::array<u32, MethodCount> registers{};
     std::array<u32, MethodCount> shadow_registers{};
+    TuringMacroEngine macro_engine;
     std::optional<ZCullBinding> zcull_binding;
 };
 

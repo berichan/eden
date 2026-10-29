@@ -147,6 +147,13 @@ TEST_CASE("Native graphics state follows scheduling groups and retains address s
         retained->GetState()->registers[0x202] = 2560;
         REQUIRE(alternate->GetState()->registers[0x202] == 2560);
         REQUIRE(channels.Get(7, owner)->GetGraphicsContext()->GetState()->registers[0x202] == 0);
+        REQUIRE(retained->GetState()->macro_engine.WriteData(0x123, 0x76543210));
+        u32 macro_data{};
+        REQUIRE(alternate->GetState()->macro_engine.ReadData(0x123, macro_data));
+        REQUIRE(macro_data == 0x76543210);
+        REQUIRE(channels.Get(7, owner)->GetGraphicsContext()->GetState()->macro_engine.ReadData(
+            0x123, macro_data));
+        REQUIRE(macro_data == 0);
         REQUIRE(channels.Allocate(8, owner, 1) == NvResult::Success);
         const auto copy = channels.Get(8, owner);
         auto copy_group = std::make_shared<NvCore::NativeGpuSchedulingGroup>(owner);

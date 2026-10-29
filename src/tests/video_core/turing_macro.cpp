@@ -1,0 +1,441 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#include <array>
+#include <span>
+#include <utility>
+#include <vector>
+#include <catch2/catch_test_macros.hpp>
+#include "video_core/control/native_gpu_context.h"
+#include "video_core/turing_macro.h"
+
+namespace {
+using Engine = Tegra::TuringMacroEngine;
+using Inst = Engine::Instruction;
+using Op = Engine::Operation;
+constexpr auto Z = Engine::Zero;
+constexpr auto I = Engine::Immediate;
+constexpr auto L0 = Engine::Load0;
+constexpr auto L1 = Engine::Load1;
+
+Engine::EncodedInstruction Encode(const Inst& inst) {
+    std::array<u32, 3> bits{};
+    const auto put = [&](u32 first, u32 count, u32 value) {
+        for (u32 bit = 0; bit < count; ++bit) {
+            bits[(first + bit) / 32] |= ((value >> bit) & 1) << ((first + bit) % 32);
+        }
+    };
+    put(0, 1, inst.end_next);
+    put(1, 4, inst.predicate_mode);
+    put(5, 5, inst.predicate);
+    for (u32 slot = 0; slot < 2; ++slot) {
+        const u32 first = slot == 0 ? 10 : 46;
+        put(first, 5, static_cast<u8>(inst.alu[slot].operation));
+        put(first + 5, 5, inst.alu[slot].destination);
+        put(first + 10, 5, inst.alu[slot].source_a);
+        put(first + 15, 5, inst.alu[slot].source_b);
+        put(first + 20, 16, inst.immediate[slot]);
+        put(82 + slot * 7, 3, inst.output[slot].method);
+        put(85 + slot * 7, 4, inst.output[slot].emit);
+    }
+    return {bits[2], bits[1], bits[0]};
+}
+
+void Upload(Engine& engine, std::span<const Inst> program, u32 start = 0) {
+    REQUIRE(engine.SetInstructionPointer(start));
+    for (const auto& inst : program) {
+        for (const auto word : Encode(inst)) {
+            REQUIRE(engine.UploadInstruction(word));
+        }
+    }
+}
+
+Inst Method() {
+    Inst inst;
+    inst.immediate[0] = 0x1040;
+    inst.output[0].method = 5;
+    return inst;
+}
+
+struct Host {
+    std::vector<u32> parameters;
+    size_t cursor{};
+    std::vector<std::pair<u16, u32>> methods;
+    u32 state_value{0x12345678};
+    u16 state_address{};
+    u32 reads{};
+    u32 barriers{};
+    bool fail_read{};
+    size_t emit_limit{10000};
+    bool fail_barrier{};
+    bool cancelled{};
+    bool replace_parameters{};
+
+    Engine::Host Bind() {
+        return {
+            this,
+            [](void* context, u32& value) {
+                auto& self = *static_cast<Host*>(context);
+                if (self.cursor == self.parameters.size())
+                    return false;
+                value = self.parameters[self.cursor++];
+                return true;
+            },
+            [](void* context, u16 address, u32& value) {
+                auto& self = *static_cast<Host*>(context);
+                ++self.reads;
+                self.state_address = address;
+                value = self.state_value;
+                return !self.fail_read;
+            },
+            [](void* context, u16 address, u32 value) {
+                auto& self = *static_cast<Host*>(context);
+                if (self.methods.size() == self.emit_limit)
+                    return false;
+                self.methods.emplace_back(address, value);
+                return true;
+            },
+            [](void* context) {
+                auto& self = *static_cast<Host*>(context);
+                ++self.barriers;
+                if (self.replace_parameters) {
+                    self.parameters = {0x2222, 0x3333};
+                    self.cursor = 0;
+                }
+                return !self.fail_barrier;
+            },
+            [](void* context) { return static_cast<Host*>(context)->cancelled; },
+        };
+    }
+};
+} // namespace
+
+TEST_CASE("Turing MME decodes reversed instruction words and bounds its uploaded RAM",
+          "[video_core][ipc]") {
+    // An independently packed instruction exercises both immediate and source fields crossing
+    // word boundaries, plus the high-word output selectors.
+    const auto decoded = Engine::Decode({0xa742af34, 0x59a367f9, 0xbbe3876b});
+    REQUIRE(decoded.end_next);
+    REQUIRE(decoded.predicate_mode == 5);
+    REQUIRE(decoded.predicate == 27);
+    REQUIRE(static_cast<u8>(decoded.alu[0].operation) == 1);
+    REQUIRE(decoded.alu[0].destination == 7);
+    REQUIRE(decoded.alu[0].source_a == 30);
+    REQUIRE(decoded.alu[0].source_b == 29);
+    REQUIRE(decoded.immediate[0] == 0x9fe6);
+    REQUIRE(static_cast<u8>(decoded.alu[1].operation) == 13);
+    REQUIRE(decoded.alu[1].destination == 20);
+    REQUIRE(decoded.alu[1].source_a == 25);
+    REQUIRE(decoded.alu[1].source_b == 2);
+    REQUIRE(decoded.immediate[1] == 0xabcd);
+    REQUIRE(decoded.output[0].method == 0);
+    REQUIRE(decoded.output[0].emit == 10);
+    REQUIRE(decoded.output[1].method == 3);
+    REQUIRE(decoded.output[1].emit == 10);
+
+    Engine engine;
+    Inst stop;
+    stop.alu[0].operation = Op::BranchEqual;
+    stop.immediate[0] = 0x9000;
+    const auto words = Encode(stop);
+    REQUIRE(engine.Execute(0, {}, 10).error == Engine::Error::IncompleteInstruction);
+    REQUIRE(engine.SetInstructionPointer(Engine::InstructionCount - 1));
+    REQUIRE(engine.UploadInstruction(words[0]));
+    REQUIRE(engine.UploadInstruction(words[1]));
+    REQUIRE(engine.Execute(Engine::InstructionCount - 1, {}, 10).error ==
+            Engine::Error::IncompleteInstruction);
+    REQUIRE(engine.UploadInstruction(words[2]));
+    REQUIRE_FALSE(engine.UploadInstruction(0xffffffff));
+    REQUIRE_FALSE(engine.SetInstructionPointer(Engine::InstructionCount));
+    const auto result = engine.Execute(Engine::InstructionCount - 1, {}, 10);
+    REQUIRE(result.Succeeded());
+    REQUIRE(result.instructions == 1);
+    REQUIRE(engine.Execute(Engine::InstructionCount, {}, 10).error ==
+            Engine::Error::InvalidProgramCounter);
+    Upload(engine, std::array{stop}, 7);
+    REQUIRE(engine.Execute(7, {}, 10).Succeeded());
+}
+
+TEST_CASE("Turing MME executes dual ALUs with forwarding and signed arithmetic",
+          "[video_core][ipc]") {
+    struct Case {
+        Op op;
+        u32 x;
+        u32 y;
+        u32 expected;
+        u16 immediate{};
+    };
+    const std::array cases{
+        Case{Op::Add, 0xffffffff, 1, 0},
+        Case{Op::Subtract, 0, 1, 0xffffffff},
+        Case{Op::Multiply, 0xfffffffe, 3, 0xfffffffa},
+        Case{Op::MultiplyUnsigned, 0xfffffffe, 3, 0xfffffffa},
+        Case{Op::CountLeadingZeros, 0, 0, 32},
+        Case{Op::CountLeadingZeros, 0x8000, 0, 16},
+        Case{Op::ShiftLeft, 3, 35, 24},
+        Case{Op::ShiftRight, 0x80000000, 33, 0x40000000},
+        Case{Op::ShiftRightSigned, 0x80000000, 33, 0xc0000000},
+        Case{Op::And, 0xff00, 0x1234, 0x1200},
+        Case{Op::Nand, 0xff00, 0x1234, 0xffffedff},
+        Case{Op::Or, 0xff00, 0x1234, 0xff34},
+        Case{Op::Xor, 0xff00, 0x1234, 0xed34},
+        Case{Op::Merge, 0xffff0000, 0xabcdef12, 0xfffff100, (8 << 10) | (8 << 5) | 4},
+        Case{Op::Less, 0xffffffff, 0, 0xffffffff},
+        Case{Op::LessUnsigned, 0xffffffff, 0, 0},
+        Case{Op::LessEqual, 0xffffffff, 0, 0xffffffff},
+        Case{Op::LessEqualUnsigned, 0xffffffff, 0, 0},
+        Case{Op::Equal, 7, 7, 0xffffffff},
+    };
+    Engine engine;
+    for (const auto& test : cases) {
+        Inst work;
+        work.alu[0] = {test.op, 23, L0, L1};
+        work.alu[1] = {Op::Add, Z, 23, Z};
+        work.immediate[0] = test.immediate;
+        work.output = {Engine::Output{0, 1}, Engine::Output{0, 2}};
+        work.end_next = true;
+        Upload(engine, std::array{Method(), work, Inst{}});
+        Host host;
+        host.parameters = {test.x, test.y};
+        const auto result = engine.Execute(0, host.Bind(), 20);
+        REQUIRE(result.Succeeded());
+        REQUIRE(result.instructions == 3);
+        REQUIRE(result.parameters == 2);
+        REQUIRE(result.methods == 2);
+        REQUIRE(host.methods ==
+                std::vector<std::pair<u16, u32>>{{0x100, test.expected}, {0x104, test.expected}});
+    }
+    for (const auto op : {Op::AddCarry, Op::SubtractBorrow, Op::MultiplyHigh}) {
+        Inst work;
+        work.alu[0] = {op == Op::AddCarry         ? Op::Add
+                       : op == Op::SubtractBorrow ? Op::Subtract
+                                                  : Op::Multiply,
+                       Z, L0, L1};
+        work.alu[1] = {op, Z, op == Op::MultiplyHigh ? Z : I, Z};
+        work.immediate[1] = 10;
+        work.end_next = true;
+        work.output = {Engine::Output{0, 1}, Engine::Output{0, 2}};
+        Upload(engine, std::array{Method(), work, Inst{}});
+        Host host;
+        host.parameters = op == Op::SubtractBorrow ? std::vector<u32>{0, 1}
+                          : op == Op::MultiplyHigh ? std::vector<u32>{0xfffffffe, 3}
+                                                   : std::vector<u32>{0xffffffff, 1};
+        REQUIRE(engine.Execute(0, host.Bind(), 20).Succeeded());
+        REQUIRE(host.methods[1].second == (op == Op::AddCarry         ? 11U
+                                           : op == Op::SubtractBorrow ? 9U
+                                                                      : 0xffffffffU));
+    }
+}
+
+TEST_CASE("Turing MME keeps register 23 separate from its ALU result latches",
+          "[video_core][ipc]") {
+    Engine engine;
+    Inst save, forward;
+    save.alu[0] = {Op::Add, 23, L0, Z};
+    forward.alu[0] = {Op::Add, Z, I, Z};
+    forward.immediate[0] = 0x33;
+    forward.alu[1] = {Op::Add, Z, 23, Z};
+    forward.output[0].emit = 2;
+    forward.end_next = true;
+    Upload(engine, std::array{Method(), save, forward, Inst{}});
+    Host host;
+    host.parameters = {0x11112222};
+    REQUIRE(engine.Execute(0, host.Bind(), 20).Succeeded());
+    REQUIRE(host.methods.back().second == 0x11112222);
+}
+
+TEST_CASE("Turing MME predication consumes loads before enabling individual execution slots",
+          "[video_core][ipc]") {
+    constexpr std::array<u8, 16> when_false{15, 15, 0,  15, 12, 13, 15, 14,
+                                            15, 7,  15, 11, 3,  11, 15, 7};
+    constexpr std::array<u8, 16> when_true{15, 0,  15, 12, 15, 14, 14, 15,
+                                           3,  11, 11, 7,  15, 15, 7,  15};
+    Engine engine;
+    for (u8 mode = 0; mode < 16; ++mode) {
+        for (u32 predicate = 0; predicate < 2; ++predicate) {
+            auto setup = Method();
+            setup.alu[0] = {Op::Add, 0, L0, Z};
+            Inst work;
+            work.predicate_mode = mode;
+            work.predicate = 0;
+            work.alu[0] = {Op::State, Z, L0, Z};
+            work.alu[1] = {Op::DataWrite, Z, L0, L1};
+            work.output = {Engine::Output{0, 3}, Engine::Output{0, 4}};
+            work.end_next = true;
+            Upload(engine, std::array{setup, work, Inst{}});
+            REQUIRE(engine.WriteData(7, 0x7777));
+            Host host;
+            host.parameters = {predicate, 7, 0x9876};
+            const auto result = engine.Execute(0, host.Bind(), 20);
+            REQUIRE(result.Succeeded());
+            REQUIRE(result.parameters == 3);
+            REQUIRE(host.cursor == 3);
+            const u8 mask = predicate ? when_true[mode] : when_false[mode];
+            REQUIRE(host.reads == ((mask & 1) != 0 ? 1U : 0U));
+            u32 data{};
+            REQUIRE(engine.ReadData(7, data));
+            REQUIRE(data == ((mask & 2) != 0 ? 0x9876U : 0x7777U));
+            std::vector<std::pair<u16, u32>> expected;
+            if ((mask & 4) != 0)
+                expected.emplace_back(0x100, 7);
+            if ((mask & 8) != 0)
+                expected.emplace_back(expected.empty() ? 0x100 : 0x104, 0x9876);
+            REQUIRE(host.methods == expected);
+        }
+    }
+}
+
+TEST_CASE("Turing MME follows counted loops, signed branches and exit delay slots",
+          "[video_core][ipc]") {
+    Engine engine;
+    Inst initialize, decrement, branch, output, delay;
+    initialize.alu[0] = {Op::Add, 0, I, Z};
+    initialize.immediate[0] = 3;
+    decrement.alu[0] = {Op::Subtract, 0, 0, I};
+    decrement.immediate[0] = 1;
+    branch.alu[0] = {Op::BranchEqual, Z, 0, Z};
+    branch.immediate[0] = 0x1fff;
+    output.alu[0] = {Op::Add, Z, 0, Z};
+    output.output[0].emit = 1;
+    output.end_next = true;
+    delay.immediate[0] = 0xbeef;
+    delay.output[0].emit = 5;
+    Upload(engine, std::array{Method(), initialize, decrement, branch, output, delay});
+    Host host;
+    const auto result = engine.Execute(0, host.Bind(), 100);
+    REQUIRE(result.Succeeded());
+    REQUIRE(result.instructions == 10);
+    REQUIRE(host.methods == std::vector<std::pair<u16, u32>>{{0x100, 0}, {0x104, 0xbeef}});
+
+    Inst loop, body0, body1, finish;
+    loop.alu[0] = {Op::Loop, Z, L0, Z};
+    loop.immediate[0] = 3;
+    body0.immediate[0] = 7;
+    body0.output[0].emit = 5;
+    body1.immediate[0] = 8;
+    body1.output[0].emit = 5;
+    finish.end_next = true;
+    Upload(engine, std::array{Method(), loop, body0, body1, finish, Inst{}});
+    for (const u32 count : {0U, 1U, 3U}) {
+        Host counted;
+        counted.parameters = {count};
+        const auto completed = engine.Execute(0, counted.Bind(), 100);
+        REQUIRE(completed.Succeeded());
+        const u32 iterations = count;
+        REQUIRE(completed.instructions == iterations * 2 + 4);
+        REQUIRE(counted.methods.size() == iterations * 2);
+        if (count != 0) {
+            REQUIRE(counted.methods.front().second == 7);
+            REQUIRE(counted.methods.back().second == 8);
+        }
+    }
+    Inst consume;
+    consume.alu[0] = {Op::Add, Z, L0, L1};
+    consume.output[0].emit = 1;
+    loop.immediate[0] = 2;
+    Upload(engine, std::array{Method(), loop, consume, finish, Inst{}});
+    Host empty;
+    empty.parameters = {0};
+    const auto skipped = engine.Execute(0, empty.Bind(), 20);
+    REQUIRE(skipped.Succeeded());
+    REQUIRE(skipped.parameters == 1);
+    REQUIRE(skipped.instructions == 4);
+    REQUIRE(empty.methods.empty());
+    Host loaded;
+    loaded.parameters = {2, 11, 12, 13, 14};
+    const auto consumed = engine.Execute(0, loaded.Bind(), 20);
+    REQUIRE(consumed.Succeeded());
+    REQUIRE(consumed.parameters == 5);
+    REQUIRE(loaded.methods == std::vector<std::pair<u16, u32>>{{0x100, 23}, {0x104, 27}});
+    Inst jump, unreachable, exit;
+    jump.alu[0].operation = Op::Jump;
+    jump.immediate[0] = 0x8002;
+    unreachable.alu[0].source_a = L0;
+    exit.alu[0].operation = Op::BranchEqual;
+    exit.immediate[0] = 0x9000;
+    Upload(engine, std::array{Method(), jump, unreachable, exit});
+    Host jumped;
+    REQUIRE(engine.Execute(0, jumped.Bind(), 10).Succeeded());
+    jump.immediate[0] = 0x8000;
+    Upload(engine, std::array{jump});
+    REQUIRE(engine.Execute(0, {}, 17).error == Engine::Error::InstructionLimit);
+    branch.alu[0] = {Op::BranchEqual, Z, Z, Z};
+    branch.immediate[0] = 0x9fff;
+    Upload(engine, std::array{branch});
+    REQUIRE(engine.Execute(0, {}, 10).error == Engine::Error::InvalidBranch);
+}
+
+TEST_CASE("Turing MME retains data RAM and propagates host failures without later emissions",
+          "[video_core][ipc]") {
+    Engine engine;
+    Inst write, read;
+    write.alu[0] = {Op::DataWrite, Z, I, L0};
+    write.immediate[0] = Engine::DataCount - 1;
+    read.alu[0] = {Op::DataRead, 23, I, Z};
+    read.immediate[0] = Engine::DataCount - 1;
+    read.end_next = true;
+    read.output[0].emit = 1;
+    Upload(engine, std::array{Method(), write, read, Inst{}});
+    Host host;
+    host.parameters = {0x87654321};
+    REQUIRE(engine.Execute(0, host.Bind(), 20).Succeeded());
+    REQUIRE(host.methods.back().second == 0x87654321);
+    Host again;
+    REQUIRE(engine.Execute(2, again.Bind(), 20).Succeeded());
+    REQUIRE(again.methods.back().second == 0x87654321);
+    u32 untouched{0x99};
+    REQUIRE_FALSE(engine.ReadData(Engine::DataCount, untouched));
+    REQUIRE(untouched == 0x99);
+    REQUIRE_FALSE(engine.WriteData(Engine::DataCount, 1));
+    read.immediate[0] = Engine::DataCount;
+    Upload(engine, std::array{read, Inst{}});
+    REQUIRE(engine.Execute(0, {}, 20).error == Engine::Error::InvalidDataAddress);
+
+    Inst barrier, consume;
+    barrier.alu[0] = {Op::Extended, Z, I, Engine::PairedImmediate};
+    barrier.immediate = {0x1000, 1};
+    consume.alu[0] = {Op::Add, Z, L0, L1};
+    consume.end_next = true;
+    consume.output[0].emit = 1;
+    Upload(engine, std::array{Method(), barrier, consume, Inst{}});
+    Host fifo;
+    fifo.replace_parameters = true;
+    REQUIRE(engine.Execute(0, fifo.Bind(), 20).Succeeded());
+    REQUIRE(fifo.barriers == 1);
+    REQUIRE(fifo.methods.back().second == 0x5555);
+    Host failed_barrier;
+    failed_barrier.fail_barrier = true;
+    REQUIRE(engine.Execute(0, failed_barrier.Bind(), 20).error == Engine::Error::BarrierFailed);
+    REQUIRE(failed_barrier.methods.empty());
+    Host underflow;
+    REQUIRE(engine.Execute(2, underflow.Bind(), 20).error == Engine::Error::ParameterUnderflow);
+    REQUIRE(underflow.methods.empty());
+
+    Inst state;
+    state.alu[0] = {Op::State, Z, I, Z};
+    state.immediate[0] = 0x123;
+    state.output = {Engine::Output{0, 1}, Engine::Output{0, 1}};
+    state.end_next = true;
+    Upload(engine, std::array{Method(), state, Inst{}});
+    Host fault;
+    fault.fail_read = true;
+    REQUIRE(engine.Execute(0, fault.Bind(), 20).error == Engine::Error::StateReadFailed);
+    REQUIRE(fault.state_address == 0x48c);
+    REQUIRE(fault.methods.empty());
+    Host reject;
+    reject.emit_limit = 1;
+    const auto partial = engine.Execute(0, reject.Bind(), 20);
+    REQUIRE(partial.error == Engine::Error::MethodEmitFailed);
+    REQUIRE(partial.methods == 1);
+    REQUIRE(reject.methods.size() == 1);
+    Host cancelled;
+    cancelled.cancelled = true;
+    REQUIRE(engine.Execute(0, cancelled.Bind(), 20).error == Engine::Error::Cancelled);
+    Inst undefined;
+    undefined.alu[0].source_a = 23;
+    Upload(engine, std::array{undefined});
+    REQUIRE(engine.Execute(0, {}, 20).error == Engine::Error::UndefinedRegister);
+    undefined.alu[0].source_a = L1;
+    Upload(engine, std::array{undefined});
+    REQUIRE(engine.Execute(0, {}, 20).error == Engine::Error::InvalidInstruction);
+}
