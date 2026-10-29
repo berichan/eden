@@ -2100,7 +2100,8 @@ Result KPageTableBase::SetMemoryAttribute(KProcessAddress addr, size_t size, KMe
     KMemoryAttribute old_attr;
     size_t num_allocator_blocks;
     constexpr KMemoryAttribute AttributeTestMask =
-        ~(KMemoryAttribute::SetMask | KMemoryAttribute::DeviceShared);
+        ~(KMemoryAttribute::SetMask | KMemoryAttribute::DeviceShared |
+          KMemoryAttribute::GpuSharable);
     const KMemoryState state_test_mask =
         (True(mask & KMemoryAttribute::Uncached) ? KMemoryState::FlagCanChangeAttribute
                                                  : KMemoryState::None) |
@@ -2138,6 +2139,33 @@ Result KPageTableBase::SetMemoryAttribute(KProcessAddress addr, size_t size, KMe
     // Update the blocks.
     m_memory_block_manager.UpdateAttribute(std::addressof(allocator), addr, num_pages, mask, attr);
 
+    R_SUCCEED();
+}
+
+Result KPageTableBase::SetGpuMemoryAttribute(KProcessAddress addr, size_t size,
+                                             KMemoryAttribute mask, KMemoryAttribute attr) {
+    R_UNLESS(this->Contains(addr, size), ResultInvalidCurrentMemory);
+    const size_t num_pages = size / PageSize;
+    KScopedLightLock lk(m_general_lock);
+
+    // Eligibility is separate from pinning. Existing locks and active GPU sharing prevent an
+    // attribute change; marking memory sharable does not create a device mapping or complete work.
+    constexpr KMemoryState RequiredState = KMemoryState::FlagMapped |
+                                           KMemoryState::FlagReferenceCounted |
+                                           KMemoryState::FlagCanDeviceMap;
+    constexpr KMemoryAttribute BlockedAttributes =
+        KMemoryAttribute::Locked | KMemoryAttribute::IpcLocked | KMemoryAttribute::GpuShared;
+    size_t num_allocator_blocks{};
+    R_TRY(this->CheckMemoryStateContiguous(std::addressof(num_allocator_blocks), addr, size,
+                                           RequiredState, RequiredState, KMemoryPermission::None,
+                                           KMemoryPermission::None, BlockedAttributes,
+                                           KMemoryAttribute::None));
+
+    Result allocator_result;
+    KMemoryBlockManagerUpdateAllocator allocator(std::addressof(allocator_result),
+                                                 m_memory_block_slab_manager, num_allocator_blocks);
+    R_TRY(allocator_result);
+    m_memory_block_manager.UpdateAttribute(std::addressof(allocator), addr, num_pages, mask, attr);
     R_SUCCEED();
 }
 

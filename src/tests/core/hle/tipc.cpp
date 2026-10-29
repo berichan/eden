@@ -12,6 +12,7 @@
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/kernel.h"
+#include "core/hle/kernel/svc.h"
 #include "core/hle/kernel/svc_results.h"
 #include "core/hle/service/gsv/display_event_queue.h"
 #include "core/hle/service/gsv/display_session.h"
@@ -141,6 +142,34 @@ TEST_CASE("Native graphics device records retain metadata and enforce the eight-
     Service::GSV::GraphicsDeviceTable other;
     REQUIRE(other.Destroy(3) == Service::GSV::GraphicsDeviceTable::InvalidDevice);
     REQUIRE(devices.Get(3)->debug_label == 4);
+}
+
+TEST_CASE("GPU memory attribute SVC validates native profile, ranges and its distinct mask",
+          "[core][ipc]") {
+    Caller caller;
+    using namespace Kernel;
+    constexpr u32 share = static_cast<u32>(Svc::MemoryAttribute::GpuSharable);
+    REQUIRE(Svc::SetGpuMemoryAttribute64(caller.system, 0x1000, 0x1000, share, share) ==
+            ResultNotImplemented);
+    caller.system.Kernel().SetCpuProfile(Core::Hardware::CpuProfile::Ounce);
+    REQUIRE(Svc::SetGpuMemoryAttribute64(caller.system, 1, 0x1000, share, share) ==
+            ResultInvalidAddress);
+    for (const u64 size : {0ULL, 1ULL, 0x1001ULL}) {
+        REQUIRE(Svc::SetGpuMemoryAttribute64(caller.system, 0x1000, size, share, share) ==
+                ResultInvalidSize);
+    }
+    REQUIRE(Svc::SetGpuMemoryAttribute64(caller.system, ~u64{0xfff}, 0x2000, share, share) ==
+            ResultInvalidCurrentMemory);
+    for (const u32 mask : {8U, 16U, 64U, share | 8U}) {
+        REQUIRE(Svc::SetGpuMemoryAttribute64(caller.system, 0x1000, 0x1000, mask, 0) ==
+                ResultInvalidCombination);
+    }
+    REQUIRE(Svc::SetGpuMemoryAttribute64(caller.system, 0x1000, 0x1000, 0, share) ==
+            ResultInvalidCombination);
+    REQUIRE(Svc::SetMemoryAttribute64(caller.system, 0x1000, 0x1000, share, share) ==
+            ResultInvalidCombination);
+    REQUIRE(Svc::SetGpuMemoryAttribute64(caller.system, 0x100000000ULL, ~u64{0xfff}, share, 0) ==
+            ResultInvalidCurrentMemory);
 }
 
 TEST_CASE("Native graphics device commands enforce initialization, packet sizes and lifetime",

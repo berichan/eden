@@ -50,6 +50,8 @@ enum class MemoryAttribute : u32 {
     DeviceShared = (1 << 2),
     Uncached = (1 << 3),
     PermissionLocked = (1 << 4),
+    GpuSharable = (1 << 5),
+    GpuShared = (1 << 6),
 };
 DECLARE_ENUM_FLAG_OPERATORS(MemoryAttribute);
 

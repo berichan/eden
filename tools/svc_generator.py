@@ -135,6 +135,8 @@ SVCS = [
      [0x7E, "Result SetResourceLimitLimitValue(Handle resource_limit_handle, LimitableResource which, int64_t limit_value);"],
      [0x7F, "void CallSecureMonitor(SecureMonitorArguments args);"],
 
+     [0x80, "Result SetGpuMemoryAttribute(Address address, Size size, uint32_t mask, uint32_t attr);"],
+
      [0x90, "Result MapInsecureMemory(Address address, Size size);"],
      [0x91, "Result UnmapInsecureMemory(Address address, Size size);"],
 ]
@@ -212,7 +214,7 @@ def emit_size_check():
         if type != "void":
             lines.append(f"static_assert(sizeof({type}) == {size});")
 
-    return f"\n{lines}"
+    return "\n".join(lines)
 
 
 # Replaces a type with an arch-specific one, if it exists.
@@ -423,7 +425,7 @@ def emit_lines(lines, indent='    '):
             output_lines.append(line)
         first = False
 
-    return f"\n{output_lines}"
+    return "\n".join(output_lines)
 
 
 # Emit a C++ function to wrap a guest SVC.
@@ -467,7 +469,7 @@ def emit_wrapper(wrapped_fn, suffix, register_info, arguments, byte_size):
 
 
 COPYRIGHT = """\
-// SPDX-FileCopyrightText: Copyright 2025 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-late
@@ -569,15 +571,15 @@ void Call(Core::System& system, u32 imm) {
     auto& process = GetCurrentProcess(kernel);
     std::array<uint64_t, 8> args;
     kernel.CurrentPhysicalCore().SaveSvcArguments(process, args);
-    LOG_TRACE(Kernel_SVC, "#{:#x} [0]={:#x} [1]={:#x} [2]={:#x} [3]={:#x} [4]={:#x} [5]={:#x} [6]={:#x}",
-        imm,
-        GetArg32(args, 0), GetArg32(args, 1), GetArg32(args, 2),
-        GetArg32(args, 3), GetArg32(args, 4), GetArg32(args, 5), GetArg32(args, 6));
     //kernel.EnterSVCProfile();
-    if (process.Is64Bit())
+    LOG_TRACE(Kernel_SVC, "{} [0]={:#x} [1]={:#x} [2]={:#x} [3]={:#x} [4]={:#x} [5]={:#x} [6]={:#x}",
+        imm, GetArg64(args, 0), GetArg64(args, 1), GetArg64(args, 2),
+        GetArg64(args, 3), GetArg64(args, 4), GetArg64(args, 5), GetArg64(args, 6));
+    if (process.Is64Bit()) {
         Call64(system, imm, args);
-    else
+    } else {
         Call32(system, imm, args);
+    }
     //kernel.ExitSVCProfile();
     kernel.CurrentPhysicalCore().LoadSvcArguments(process, args);
 }
@@ -597,11 +599,11 @@ def emit_call(bitness, names, suffix):
     for _, name in names:
         lines.append(f"{indent}case SvcId::{name}: return SvcWrap_{name}{suffix}(system, args);")
 
-    lines.append(f"{indent}default: UNREACHABLE_MSG(\"Unhandled SVC {{:#x}}\", imm);")
+    lines.append(f"{indent}default: UNREACHABLE_MSG(\"Unhandled SVC {{:#x}}!\", imm);")
     lines.append(f"{indent}}}")
     lines.append("}")
 
-    return f"\n{lines}"
+    return "\n".join(lines)
 
 
 def build_fn_declaration(return_type, name, arguments):
@@ -623,7 +625,7 @@ def build_enum_declarations():
         lines.append(f"{indent}{name} = {hex(imm)},")
 
     lines.append("};")
-    return f"\n{lines}"
+    return "\n".join(lines)
 
 
 def main():
@@ -665,11 +667,11 @@ def main():
     with open("src/core/hle/kernel/svc.h", "w") as f:
         f.write(COPYRIGHT)
         f.write(PROLOGUE_H)
-        f.write(f"\n{svc_fw_declarations}")
+        f.write("\n".join(svc_fw_declarations))
         f.write("\n\n")
-        f.write(f"\n{arch_fw_declarations[BIT_32]}")
+        f.write("\n".join(arch_fw_declarations[BIT_32]))
         f.write("\n\n")
-        f.write(f"\n{arch_fw_declarations[BIT_64]}")
+        f.write("\n".join(arch_fw_declarations[BIT_64]))
         f.write("\n\n")
         f.write(enum_decls)
         f.write(EPILOGUE_H)
@@ -679,7 +681,7 @@ def main():
         f.write(PROLOGUE_CPP)
         f.write(emit_size_check())
         f.write("\n\n")
-        f.write(f"\n\n{wrapper_fns}")
+        f.write("\n\n".join(wrapper_fns))
         f.write("\n\n")
         f.write(call_32)
         f.write("\n\n")

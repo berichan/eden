@@ -508,6 +508,8 @@ public:
                                       Svc::MemoryPermission perm);
     Result SetMemoryAttribute(KProcessAddress addr, size_t size, KMemoryAttribute mask,
                               KMemoryAttribute attr);
+    Result SetGpuMemoryAttribute(KProcessAddress addr, size_t size, KMemoryAttribute mask,
+                                 KMemoryAttribute attr);
     Result SetHeapSize(KProcessAddress* out, size_t size);
     Result SetMaxHeapSize(size_t size);
     Result QueryInfo(KMemoryInfo* out_info, Svc::PageInfo* out_page_info,

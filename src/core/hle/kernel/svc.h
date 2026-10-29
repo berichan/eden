@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2025 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-late
@@ -137,6 +137,7 @@ Result TerminateProcess(Core::System& system, Handle process_handle);
 Result GetProcessInfo(Core::System& system, int64_t* out_info, Handle process_handle, ProcessInfoType info_type);
 Result CreateResourceLimit(Core::System& system, Handle* out_handle);
 Result SetResourceLimitLimitValue(Core::System& system, Handle resource_limit_handle, LimitableResource which, int64_t limit_value);
+Result SetGpuMemoryAttribute(Core::System& system, uint64_t address, uint64_t size, uint32_t mask, uint32_t attr);
 Result MapInsecureMemory(Core::System& system, uint64_t address, uint64_t size);
 Result UnmapInsecureMemory(Core::System& system, uint64_t address, uint64_t size);
 
@@ -258,6 +259,7 @@ Result TerminateProcess64From32(Core::System& system, Handle process_handle);
 Result GetProcessInfo64From32(Core::System& system, int64_t* out_info, Handle process_handle, ProcessInfoType info_type);
 Result CreateResourceLimit64From32(Core::System& system, Handle* out_handle);
 Result SetResourceLimitLimitValue64From32(Core::System& system, Handle resource_limit_handle, LimitableResource which, int64_t limit_value);
+Result SetGpuMemoryAttribute64From32(Core::System& system, uint32_t address, uint32_t size, uint32_t mask, uint32_t attr);
 Result MapInsecureMemory64From32(Core::System& system, uint32_t address, uint32_t size);
 Result UnmapInsecureMemory64From32(Core::System& system, uint32_t address, uint32_t size);
 
@@ -379,6 +381,7 @@ Result TerminateProcess64(Core::System& system, Handle process_handle);
 Result GetProcessInfo64(Core::System& system, int64_t* out_info, Handle process_handle, ProcessInfoType info_type);
 Result CreateResourceLimit64(Core::System& system, Handle* out_handle);
 Result SetResourceLimitLimitValue64(Core::System& system, Handle resource_limit_handle, LimitableResource which, int64_t limit_value);
+Result SetGpuMemoryAttribute64(Core::System& system, uint64_t address, uint64_t size, uint32_t mask, uint32_t attr);
 Result MapInsecureMemory64(Core::System& system, uint64_t address, uint64_t size);
 Result UnmapInsecureMemory64(Core::System& system, uint64_t address, uint64_t size);
 
@@ -504,6 +507,7 @@ enum class SvcId : u32 {
     CreateResourceLimit = 0x7d,
     SetResourceLimitLimitValue = 0x7e,
     CallSecureMonitor = 0x7f,
+    SetGpuMemoryAttribute = 0x80,
     MapInsecureMemory = 0x90,
     UnmapInsecureMemory = 0x91,
 };

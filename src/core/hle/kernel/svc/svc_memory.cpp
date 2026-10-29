@@ -6,6 +6,7 @@
 
 #include "core/core.h"
 #include "core/hle/kernel/k_process.h"
+#include "core/hle/kernel/kernel.h"
 #include "core/hle/kernel/svc.h"
 
 namespace Kernel::Svc {
@@ -130,6 +131,26 @@ Result SetMemoryAttribute(Core::System& system, u64 address, u64 size, u32 mask,
                                            static_cast<KMemoryAttribute>(attr)));
 }
 
+Result SetGpuMemoryAttribute(Core::System& system, u64 address, u64 size, u32 mask, u32 attr) {
+    LOG_DEBUG(Kernel_SVC, "called, address={:#016x}, size={:#x}, mask={:#08x}, attribute={:#08x}",
+              address, size, mask, attr);
+    R_UNLESS(system.Kernel().GetCpuProfile() == Core::Hardware::CpuProfile::Ounce,
+             ResultNotImplemented);
+    R_UNLESS(Common::IsAligned(address, PageSize), ResultInvalidAddress);
+    R_UNLESS(Common::IsAligned(size, PageSize) && size != 0, ResultInvalidSize);
+    R_UNLESS(address < address + size, ResultInvalidCurrentMemory);
+    constexpr u32 SupportedMask = static_cast<u32>(MemoryAttribute::GpuSharable);
+    R_UNLESS((attr & ~mask) == 0 && (mask & ~SupportedMask) == 0, ResultInvalidCombination);
+    auto& page_table = GetCurrentProcess(system.Kernel()).GetPageTable();
+    R_UNLESS(page_table.Contains(address, size), ResultInvalidCurrentMemory);
+    R_TRY(page_table.SetGpuMemoryAttribute(address, size, static_cast<KMemoryAttribute>(mask),
+                                           static_cast<KMemoryAttribute>(attr)));
+    LOG_DEBUG(Kernel_SVC,
+              "GPU sharable memory attribute updated: address={:#x}, size={:#x}, value={:#x}",
+              address, size, attr);
+    R_SUCCEED();
+}
+
 /// Maps a memory range into a different range.
 Result MapMemory(Core::System& system, u64 dst_addr, u64 src_addr, u64 size) {
     LOG_TRACE(Kernel_SVC, "called, dst_addr={:#x}, src_addr={:#x}, size={:#x}", dst_addr,
@@ -170,6 +191,11 @@ Result SetMemoryAttribute64(Core::System& system, uint64_t address, uint64_t siz
     R_RETURN(SetMemoryAttribute(system, address, size, mask, attr));
 }
 
+Result SetGpuMemoryAttribute64(Core::System& system, uint64_t address, uint64_t size, uint32_t mask,
+                               uint32_t attr) {
+    R_RETURN(SetGpuMemoryAttribute(system, address, size, mask, attr));
+}
+
 Result MapMemory64(Core::System& system, uint64_t dst_address, uint64_t src_address,
                    uint64_t size) {
     R_RETURN(MapMemory(system, dst_address, src_address, size));
@@ -188,6 +214,11 @@ Result SetMemoryPermission64From32(Core::System& system, uint32_t address, uint3
 Result SetMemoryAttribute64From32(Core::System& system, uint32_t address, uint32_t size,
                                   uint32_t mask, uint32_t attr) {
     R_RETURN(SetMemoryAttribute(system, address, size, mask, attr));
+}
+
+Result SetGpuMemoryAttribute64From32(Core::System& system, uint32_t address, uint32_t size,
+                                     uint32_t mask, uint32_t attr) {
+    R_RETURN(SetGpuMemoryAttribute(system, address, size, mask, attr));
 }
 
 Result MapMemory64From32(Core::System& system, uint32_t dst_address, uint32_t src_address,

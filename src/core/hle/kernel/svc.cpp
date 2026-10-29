@@ -1233,6 +1233,15 @@ static void SvcWrap_SetResourceLimitLimitValue64From32(Core::System& system, std
     SetArg32(args, 0, Convert<uint32_t>(ret));
 }
 
+static void SvcWrap_SetGpuMemoryAttribute64From32(Core::System& system, std::span<uint64_t, 8> args) {
+    uint32_t address = Convert<uint32_t>(GetArg32(args, 0));
+    uint32_t size = Convert<uint32_t>(GetArg32(args, 1));
+    uint32_t mask = Convert<uint32_t>(GetArg32(args, 2));
+    uint32_t attr = Convert<uint32_t>(GetArg32(args, 3));
+    Result ret = SetGpuMemoryAttribute64From32(system, address, size, mask, attr);
+    SetArg32(args, 0, Convert<uint32_t>(ret));
+}
+
 static void SvcWrap_MapInsecureMemory64From32(Core::System& system, std::span<uint64_t, 8> args) {
     uint32_t address = Convert<uint32_t>(GetArg32(args, 0));
     uint32_t size = Convert<uint32_t>(GetArg32(args, 1));
@@ -2225,6 +2234,15 @@ static void SvcWrap_SetResourceLimitLimitValue64(Core::System& system, std::span
     SetArg64(args, 0, Convert<uint64_t>(ret));
 }
 
+static void SvcWrap_SetGpuMemoryAttribute64(Core::System& system, std::span<uint64_t, 8> args) {
+    uint64_t address = Convert<uint64_t>(GetArg64(args, 0));
+    uint64_t size = Convert<uint64_t>(GetArg64(args, 1));
+    uint32_t mask = Convert<uint32_t>(GetArg64(args, 2));
+    uint32_t attr = Convert<uint32_t>(GetArg64(args, 3));
+    Result ret = SetGpuMemoryAttribute64(system, address, size, mask, attr);
+    SetArg64(args, 0, Convert<uint64_t>(ret));
+}
+
 static void SvcWrap_MapInsecureMemory64(Core::System& system, std::span<uint64_t, 8> args) {
     uint64_t address = Convert<uint64_t>(GetArg64(args, 0));
     uint64_t size = Convert<uint64_t>(GetArg64(args, 1));
@@ -2362,6 +2380,7 @@ static void Call32(Core::System& system, u32 imm, std::span<uint64_t, 8> args) {
     case SvcId::CreateResourceLimit: return SvcWrap_CreateResourceLimit64From32(system, args);
     case SvcId::SetResourceLimitLimitValue: return SvcWrap_SetResourceLimitLimitValue64From32(system, args);
     case SvcId::CallSecureMonitor: return SvcWrap_CallSecureMonitor64From32(system, args);
+    case SvcId::SetGpuMemoryAttribute: return SvcWrap_SetGpuMemoryAttribute64From32(system, args);
     case SvcId::MapInsecureMemory: return SvcWrap_MapInsecureMemory64From32(system, args);
     case SvcId::UnmapInsecureMemory: return SvcWrap_UnmapInsecureMemory64From32(system, args);
     default: UNREACHABLE_MSG("Unhandled SVC {:#x}!", imm);
@@ -2491,6 +2510,7 @@ static void Call64(Core::System& system, u32 imm, std::span<uint64_t, 8> args) {
     case SvcId::CreateResourceLimit: return SvcWrap_CreateResourceLimit64(system, args);
     case SvcId::SetResourceLimitLimitValue: return SvcWrap_SetResourceLimitLimitValue64(system, args);
     case SvcId::CallSecureMonitor: return SvcWrap_CallSecureMonitor64(system, args);
+    case SvcId::SetGpuMemoryAttribute: return SvcWrap_SetGpuMemoryAttribute64(system, args);
     case SvcId::MapInsecureMemory: return SvcWrap_MapInsecureMemory64(system, args);
     case SvcId::UnmapInsecureMemory: return SvcWrap_UnmapInsecureMemory64(system, args);
     default: UNREACHABLE_MSG("Unhandled SVC {:#x}!", imm);

@@ -64,6 +64,11 @@ public:
         R_RETURN(m_page_table.SetMemoryAttribute(addr, size, mask, attr));
     }
 
+    Result SetGpuMemoryAttribute(KProcessAddress addr, size_t size, KMemoryAttribute mask,
+                                 KMemoryAttribute attr) {
+        R_RETURN(m_page_table.SetGpuMemoryAttribute(addr, size, mask, attr));
+    }
+
     Result SetHeapSize(KProcessAddress* out, size_t size) {
         R_RETURN(m_page_table.SetHeapSize(out, size));
     }
