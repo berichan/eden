@@ -59,6 +59,8 @@ public:
     Result QueryNativeLayerBufferState(u64* out_state, u64 layer_id, u64 owner_process_id);
     Result BindNativeLayer(u64 layer_id, u64 owner_process_id, u64 display_id);
     Result UnbindNativeLayer(u64 layer_id, u64 owner_process_id);
+    Result SelectNativeLayer(u64 layer_id, u64 owner_process_id, u64 display_id,
+                             std::optional<u64> previous_id);
 
     // Managed layers are created by the interaction between am and ommdisp
     // on behalf of an applet. Their lifetime ends with the lifetime of the

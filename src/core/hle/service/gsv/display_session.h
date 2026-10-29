@@ -28,6 +28,8 @@ public:
 private:
     void GetMaxEventId(HLERequestContext& ctx);
     void GetMaxSemaphoreId(HLERequestContext& ctx);
+    void GetMaxTimestampRecorderId(HLERequestContext& ctx);
+    void ConfigureTimestampRecorderPool(HLERequestContext& ctx);
     void InitializeEventQueue(HLERequestContext& ctx);
     void NotifyEvent(HLERequestContext& ctx);
     void ReadEventQueue(HLERequestContext& ctx);
@@ -35,6 +37,7 @@ private:
     void DuplicateSemaphoreHandle(HLERequestContext& ctx);
     void RegisterDisplay(HLERequestContext& ctx);
     void UnregisterDisplay(HLERequestContext& ctx);
+    void SelectDisplayLayer(HLERequestContext& ctx);
     void LinkVsyncSemaphore(HLERequestContext& ctx);
     void UnlinkVsyncSemaphore(HLERequestContext& ctx);
     void ReleaseDisplay();
@@ -66,6 +69,8 @@ private:
     std::optional<DisplayRegistration> m_display;
     std::array<std::optional<u64>, 8> m_vsync_displays{};
     std::array<std::optional<LayerRegistration>, 16> m_layers{};
+    std::optional<u64> m_selected_layer;
+    std::optional<u32> m_timestamp_recorder_count;
 };
 
 } // namespace Service::GSV

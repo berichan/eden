@@ -45,13 +45,16 @@ DisplaySession::DisplaySession(Core::System& system, Kernel::KProcess* process)
     static const FunctionInfo functions[] = {
         {1, &DisplaySession::GetMaxEventId, "GetMaxEventId"},
         {3, &DisplaySession::GetMaxSemaphoreId, "GetMaxSemaphoreId"},
+        {5, &DisplaySession::GetMaxTimestampRecorderId, "GetMaxTimestampRecorderId"},
         {11, &DisplaySession::InitializeEventQueue, "InitializeEventQueue"},
         {13, &DisplaySession::NotifyEvent, "NotifyEvent"},
         {21, &DisplaySession::ReadEventQueue, "ReadEventQueue"},
         {31, &DisplaySession::CreateSemaphore, "CreateSemaphore"},
         {32, &DisplaySession::DuplicateSemaphoreHandle, "DuplicateSemaphoreHandle"},
+        {51, &DisplaySession::ConfigureTimestampRecorderPool, "ConfigureTimestampRecorderPool"},
         {101, &DisplaySession::RegisterDisplay, "RegisterDisplay"},
         {102, &DisplaySession::UnregisterDisplay, "UnregisterDisplay"},
+        {111, &DisplaySession::SelectDisplayLayer, "SelectDisplayLayer"},
         {201, &DisplaySession::CreateLayer, "CreateLayer"},
         {202, &DisplaySession::DestroyLayer, "DestroyLayer"},
         {212, &DisplaySession::QueryLayerBufferState, "QueryLayerBufferState"},
@@ -94,6 +97,31 @@ void DisplaySession::GetMaxSemaphoreId(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
     rb.Push<u32>(static_cast<u32>(m_semaphores.size() - 1));
+}
+
+void DisplaySession::GetMaxTimestampRecorderId(HLERequestContext& ctx) {
+    if (!HasInputWords(ctx, 0)) {
+        Reply(ctx, Kernel::ResultInvalidSize);
+        return;
+    }
+    IPC::ResponseBuilder rb{ctx, 3};
+    rb.Push(ResultSuccess);
+    rb.Push<u32>(7);
+}
+
+void DisplaySession::ConfigureTimestampRecorderPool(HLERequestContext& ctx) {
+    const auto result = [&]() -> Result {
+        R_UNLESS(HasInputWords(ctx, 1), Kernel::ResultInvalidSize);
+        IPC::RequestParser rp{ctx};
+        const auto max_id = rp.Pop<u32>();
+        R_UNLESS(max_id < 8, ResultInvalidArgument);
+        R_UNLESS(!m_timestamp_recorder_count, ResultInvalidState);
+        m_timestamp_recorder_count = max_id + 1;
+        LOG_DEBUG(Service, "Native display timestamp recorder pool configured: count={}",
+                  *m_timestamp_recorder_count);
+        R_SUCCEED();
+    }();
+    Reply(ctx, result);
 }
 
 void DisplaySession::InitializeEventQueue(HLERequestContext& ctx) {
@@ -214,6 +242,7 @@ void DisplaySession::UnregisterDisplay(HLERequestContext& ctx) {
 
 void DisplaySession::ReleaseDisplay() {
     if (m_display) {
+        m_selected_layer.reset();
         for (const auto& layer : m_layers) {
             if (layer) {
                 m_container->UnbindNativeLayer(layer->layer_id, m_process->GetProcessId());
@@ -314,6 +343,9 @@ void DisplaySession::DestroyLayer(HLERequestContext& ctx) {
     const auto slot = std::ranges::find_if(
         m_layers, [=](const auto& layer) { return layer && layer->token == token; });
     if (slot != m_layers.end()) {
+        if (m_selected_layer == (*slot)->layer_id) {
+            m_selected_layer.reset();
+        }
         m_container->DestroyNativeLayer((*slot)->layer_id, m_process->GetProcessId());
         slot->reset();
     }
@@ -368,9 +400,35 @@ void DisplaySession::UnbindLayer(HLERequestContext& ctx) {
     const auto layer = std::ranges::find_if(
         m_layers, [=](const auto& entry) { return entry && entry->token == token; });
     if (layer != m_layers.end()) {
+        if (m_selected_layer == (*layer)->layer_id) {
+            m_selected_layer.reset();
+        }
         m_container->UnbindNativeLayer((*layer)->layer_id, m_process->GetProcessId());
     }
     Reply(ctx, ResultSuccess);
+}
+
+void DisplaySession::SelectDisplayLayer(HLERequestContext& ctx) {
+    const auto result = [&]() -> Result {
+        R_UNLESS(HasInputWords(ctx, 6), Kernel::ResultInvalidSize);
+        IPC::RequestParser rp{ctx};
+        const auto name = rp.PopRaw<std::array<char, 8>>();
+        const auto slot = rp.PopRaw<std::array<char, 8>>();
+        const auto token = rp.Pop<u64>();
+        R_UNLESS((name != std::array<char, 8>{}) && (slot != std::array<char, 8>{}) && token != 0,
+                 ResultInvalidArgument);
+        R_UNLESS(name == DefaultDisplayName && slot == DefaultDisplayName && m_display,
+                 ResultNotFound);
+        const auto layer = std::ranges::find_if(
+            m_layers, [=](const auto& entry) { return entry && entry->token == token; });
+        R_UNLESS(layer != m_layers.end(), ResultNotFound);
+        R_TRY(m_container->SelectNativeLayer((*layer)->layer_id, m_process->GetProcessId(),
+                                             m_display->display_id, m_selected_layer));
+        m_selected_layer = (*layer)->layer_id;
+        LOG_DEBUG(Service, "Native default display layer selected: layer_id={}", *m_selected_layer);
+        R_SUCCEED();
+    }();
+    Reply(ctx, result);
 }
 
 } // namespace Service::GSV

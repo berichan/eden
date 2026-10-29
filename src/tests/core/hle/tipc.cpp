@@ -604,3 +604,60 @@ TEST_CASE("Empty native layers retain their buffer state across display binding"
     REQUIRE(pool.Bind(id, 4, 1) == Result{ErrorModule::VI, 7});
     REQUIRE(pool.Unbind(id, 4) == Result{ErrorModule::VI, 7});
 }
+
+TEST_CASE("Native layer selection replaces only a validated bound layer", "[core][ipc][gsv]") {
+    Service::VI::NativeLayerPool pool;
+    u64 first{}, second{};
+    REQUIRE(pool.Create(&first, 4).IsSuccess());
+    REQUIRE(pool.Create(&second, 4).IsSuccess());
+    REQUIRE(pool.Bind(first, 4, 0).IsSuccess());
+    REQUIRE(pool.Select(first, 4, 0).IsSuccess());
+    bool selected{};
+    REQUIRE(pool.QuerySelected(&selected, first, 4).IsSuccess());
+    REQUIRE(selected);
+    REQUIRE(pool.Select(second, 4, 0, first) == Result{ErrorModule::VI, 1});
+    REQUIRE(pool.QuerySelected(&selected, first, 4).IsSuccess());
+    REQUIRE(selected);
+    REQUIRE(pool.Bind(second, 4, 0).IsSuccess());
+    REQUIRE(pool.Select(second, 5, 0, first) == Result{ErrorModule::VI, 7});
+    REQUIRE(pool.QuerySelected(&selected, first, 4).IsSuccess());
+    REQUIRE(selected);
+    REQUIRE(pool.Select(second, 4, 0, first).IsSuccess());
+    REQUIRE(pool.QuerySelected(&selected, first, 4).IsSuccess());
+    REQUIRE_FALSE(selected);
+    REQUIRE(pool.QuerySelected(&selected, second, 4).IsSuccess());
+    REQUIRE(selected);
+    REQUIRE(pool.Select(second, 4, 0, second).IsSuccess());
+    REQUIRE(pool.Unbind(second, 4).IsSuccess());
+    REQUIRE(pool.QuerySelected(&selected, second, 4).IsSuccess());
+    REQUIRE_FALSE(selected);
+    REQUIRE(pool.Destroy(second, 4).IsSuccess());
+    REQUIRE(pool.QuerySelected(&selected, second, 4) == Result{ErrorModule::VI, 7});
+}
+
+TEST_CASE("Native display selection validates both names and the layer token", "[core][ipc][gsv]") {
+    Caller caller;
+    Service::GSV::DisplaySession service{caller.system, &caller.process};
+    REQUIRE(RequestWords(caller, service, 111, {}).first == Kernel::ResultInvalidSize);
+    const std::array<u32, 6> no_token{0x61666564, 0x00746c75, 0x61666564, 0x00746c75, 0, 0};
+    REQUIRE(RequestWords(caller, service, 111, no_token).first == Result{ErrorModule::VI, 4});
+    const std::array<u32, 6> no_slot{0x61666564, 0x00746c75, 0, 0, 1, 0};
+    REQUIRE(RequestWords(caller, service, 111, no_slot).first == Result{ErrorModule::VI, 4});
+    const std::array<u32, 6> missing_layer{0x61666564, 0x00746c75, 0x61666564, 0x00746c75, 1, 0};
+    REQUIRE(RequestWords(caller, service, 111, missing_layer).first == Result{ErrorModule::VI, 7});
+}
+
+TEST_CASE("Native timestamp recorder setup validates bounds and preserves initialization",
+          "[core][ipc][gsv]") {
+    Caller caller;
+    Service::GSV::DisplaySession service{caller.system, &caller.process};
+    const auto [result, max_id] = RequestWords(caller, service, 5, {}, 2);
+    REQUIRE(result.IsSuccess());
+    REQUIRE(max_id == 7);
+    REQUIRE(RequestWords(caller, service, 51, {}).first == Kernel::ResultInvalidSize);
+    const std::array<u32, 1> invalid_count{8};
+    REQUIRE(RequestWords(caller, service, 51, invalid_count).first == Result{ErrorModule::VI, 4});
+    const std::array<u32, 1> full_count{7};
+    REQUIRE(RequestWords(caller, service, 51, full_count).first.IsSuccess());
+    REQUIRE(RequestWords(caller, service, 51, full_count).first == Result{ErrorModule::VI, 5});
+}

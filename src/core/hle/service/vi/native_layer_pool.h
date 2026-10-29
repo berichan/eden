@@ -53,6 +53,29 @@ public:
         auto* layer = Find(id, owner_process_id);
         R_UNLESS(layer != nullptr, (Result{ErrorModule::VI, 7}));
         layer->display_id.reset();
+        layer->selected = false;
+        R_SUCCEED();
+    }
+
+    Result Select(u64 id, u64 owner_process_id, u64 display_id,
+                  std::optional<u64> previous_id = std::nullopt) {
+        auto* layer = Find(id, owner_process_id);
+        R_UNLESS(layer != nullptr, (Result{ErrorModule::VI, 7}));
+        R_UNLESS(layer->display_id == display_id, (Result{ErrorModule::VI, 1}));
+        if (previous_id) {
+            auto* previous = Find(*previous_id, owner_process_id);
+            if (previous && previous->display_id == display_id) {
+                previous->selected = false;
+            }
+        }
+        layer->selected = true;
+        R_SUCCEED();
+    }
+
+    Result QuerySelected(bool* out_selected, u64 id, u64 owner_process_id) {
+        const auto* layer = Find(id, owner_process_id);
+        R_UNLESS(layer != nullptr, (Result{ErrorModule::VI, 7}));
+        *out_selected = layer->selected;
         R_SUCCEED();
     }
 
@@ -67,6 +90,7 @@ private:
         u64 owner_process_id;
         u64 buffer_state{};
         std::optional<u64> display_id{};
+        bool selected{};
     };
 
     Layer* Find(u64 id, u64 owner_process_id) {

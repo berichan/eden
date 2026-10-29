@@ -117,6 +117,13 @@ Result Container::UnbindNativeLayer(u64 layer_id, u64 owner_process_id) {
     R_RETURN(m_native_layers.Unbind(layer_id, owner_process_id));
 }
 
+Result Container::SelectNativeLayer(u64 layer_id, u64 owner_process_id, u64 display_id,
+                                    std::optional<u64> previous_id) {
+    std::scoped_lock lk{m_lock};
+    R_UNLESS(m_displays.GetDisplayById(display_id) != nullptr, VI::ResultNotFound);
+    R_RETURN(m_native_layers.Select(layer_id, owner_process_id, display_id, previous_id));
+}
+
 Result Container::CreateManagedLayer(u64* out_layer_id, u64 display_id, u64 owner_aruid) {
     std::scoped_lock lk{m_lock};
     R_RETURN(this->CreateLayerLocked(out_layer_id, display_id, owner_aruid));
