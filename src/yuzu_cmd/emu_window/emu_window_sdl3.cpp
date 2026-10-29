@@ -30,26 +30,28 @@ EmuWindow_SDL3::EmuWindow_SDL3(InputCommon::InputSubsystem* input_subsystem_, Co
         LOG_CRITICAL(Frontend, "Failed to initialize SDL3: {}, Exiting...", SDL_GetError());
         exit(1);
     }
-    titlebar_timer = SDL_AddTimer(2000, [](void *userdata, SDL_TimerID, Uint32) -> Uint32 {
-        auto* this_ = (EmuWindow_SDL3*)userdata;
-        auto const results = this_->system.GetAndResetPerfStats();
-        auto const title = fmt::format("{} | {}-{} | FPS: {:.0f} ({:.0f}%)", Common::g_build_fullname, Common::g_scm_branch, Common::g_scm_desc, results.average_game_fps, results.emulation_speed * 100.0f);
-        SDL_SetWindowTitle(this_->render_window, title.c_str());
-        return 2000;
-    }, this);
-    mouse_timer = SDL_AddTimer(100, [](void *userdata, SDL_TimerID, Uint32) -> Uint32 {
-        auto* this_ = (EmuWindow_SDL3*)userdata;
-        this_->input_subsystem->GetMouse()->NotifyChanged();
-        return 100;
-    }, this);
 }
 
 EmuWindow_SDL3::~EmuWindow_SDL3() {
-    SDL_RemoveTimer(titlebar_timer);
-    SDL_RemoveTimer(mouse_timer);
     system.HIDCore().UnloadInputDevices();
     input_subsystem->Shutdown();
     SDL_Quit();
+}
+
+void EmuWindow_SDL3::Update() {
+    const auto now = SDL_GetTicks();
+    if (now - last_titlebar_update >= 2000) {
+        const auto results = system.GetAndResetPerfStats();
+        const auto title = fmt::format("{} | {}-{} | FPS: {:.0f} ({:.0f}%)", Common::g_build_fullname,
+                                       Common::g_scm_branch, Common::g_scm_desc,
+                                       results.average_game_fps, results.emulation_speed * 100.0f);
+        SDL_SetWindowTitle(render_window, title.c_str());
+        last_titlebar_update = now;
+    }
+    if (now - last_mouse_update >= 100) {
+        input_subsystem->GetMouse()->NotifyChanged();
+        last_mouse_update = now;
+    }
 }
 
 InputCommon::MouseButton EmuWindow_SDL3::SDLButtonToMouseButton(u32 button) const {

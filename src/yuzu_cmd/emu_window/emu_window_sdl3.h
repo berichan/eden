@@ -38,6 +38,8 @@ public:
     /// Wait for the next event on the main thread.
     void OnEvent(SDL_Event& event);
 
+    void Update();
+
     // Sets the window icon from yuzu.bmp
     void SetWindowIcon();
 
@@ -81,11 +83,8 @@ protected:
     /// Called when a configuration change affects the minimal size of the window
     void OnMinimalClientAreaChangeRequest(std::pair<u32, u32> minimal_size) override;
 
-    /// Periodic changer of titlebar (independent of event loop)
-    SDL_TimerID titlebar_timer;
-
-    // Mouse resetter once it
-    SDL_TimerID mouse_timer;
+    u64 last_titlebar_update{};
+    u64 last_mouse_update{};
 
     /// Is the window still open?
     bool is_open = true;
