@@ -60,6 +60,10 @@ FileType AppLoader_XCI::IdentifyType(const FileSys::VirtualFile& xci_file) {
     return FileType::Error;
 }
 
+Core::Hardware::CpuProfile AppLoader_XCI::GetCpuProfile(Core::System& system) const {
+    return nca_loader ? nca_loader->GetCpuProfile(system) : Core::Hardware::CpuProfile::Nx;
+}
+
 AppLoader_XCI::LoadResult AppLoader_XCI::Load(Kernel::KProcess& process, Core::System& system) {
     if (is_loaded) {
         return {ResultStatus::ErrorAlreadyLoaded, {}};

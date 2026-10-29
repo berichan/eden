@@ -101,9 +101,9 @@ void DynarmicCallbacks32::AddTicks(u64 ticks) {
     // Divide the number of ticks by the amount of CPU cores. TODO(Subv): This yields only a
     // rough approximation of the amount of executed ticks in the system, it may be thrown off
     // if not all cores are doing a similar amount of work. Instead of doing this, we should
-    // device a way so that timing is consistent across all cores without increasing the ticks 4
-    // times.
-    u64 amortized_ticks = ticks / Core::Hardware::NUM_CPU_CORES;
+    // devise a way so that timing is consistent across all cores without multiplying the ticks
+    // by the number of cores.
+    u64 amortized_ticks = ticks / m_parent.m_system.Kernel().GetCpuCoreCount();
     // Always execute at least one tick.
     amortized_ticks = std::max<u64>(amortized_ticks, 1);
     m_parent.m_system.CoreTiming().AddTicks(amortized_ticks);

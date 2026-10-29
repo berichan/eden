@@ -39,6 +39,10 @@ FileType AppLoader_NAX::GetFileType() const {
     return IdentifyTypeImpl(*nax);
 }
 
+Core::Hardware::CpuProfile AppLoader_NAX::GetCpuProfile(Core::System& system) const {
+    return nca_loader ? nca_loader->GetCpuProfile(system) : Core::Hardware::CpuProfile::Nx;
+}
+
 AppLoader_NAX::LoadResult AppLoader_NAX::Load(Kernel::KProcess& process, Core::System& system) {
     if (is_loaded) {
         return {ResultStatus::ErrorAlreadyLoaded, {}};

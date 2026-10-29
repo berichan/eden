@@ -40,15 +40,12 @@ void GlobalSchedulerContext::RemoveThread(KThread* thread) noexcept {
 /// @note This operation happens every 10ms.
 void GlobalSchedulerContext::PreemptThreads(KernelCore& kernel) noexcept {
     // The priority levels at which the global scheduler preempts threads every 10 ms. They are
-    // ordered from Core 0 to Core 3.
-    static constexpr std::array<u32, Core::Hardware::NUM_CPU_CORES> per_core{
-        59,
-        59,
-        59,
-        63,
+    // ordered by physical core.
+    static constexpr std::array<u32, Core::Hardware::MAX_CPU_CORES> per_core{
+        59, 59, 59, 63, 59, 59,
     };
     ASSERT(KScheduler::IsSchedulerLockedByCurrentThread(kernel));
-    for (u32 core_id = 0; core_id < per_core.size(); core_id++)
+    for (u32 core_id = 0; core_id < kernel.GetCpuCoreCount(); core_id++)
         KScheduler::RotateScheduledQueue(kernel, core_id, per_core[core_id]);
 }
 

@@ -16,7 +16,9 @@
 namespace Kernel {
 
 Result KCapabilities::InitializeForKip(std::span<const u32> kern_caps,
-                                       KProcessPageTable* page_table) {
+                                       KProcessPageTable* page_table,
+                                       Core::Hardware::CpuProfile profile) {
+    m_cpu_profile = profile;
     // We're initializing an initial process.
     m_svc_access_flags.reset();
     m_irq_access_flags.reset();
@@ -26,8 +28,8 @@ Result KCapabilities::InitializeForKip(std::span<const u32> kern_caps,
     m_program_type = 0;
 
     // Initial processes may run on all cores.
-    constexpr u64 VirtMask = Core::Hardware::VirtualCoreMask;
-    constexpr u64 PhysMask = Core::Hardware::ConvertVirtualCoreMaskToPhysical(VirtMask);
+    const u64 VirtMask = Core::Hardware::GetVirtualCoreMask(profile);
+    const u64 PhysMask = Core::Hardware::ConvertVirtualCoreMaskToPhysical(profile, VirtMask);
 
     m_core_mask = VirtMask;
     m_phys_core_mask = PhysMask;
@@ -47,7 +49,9 @@ Result KCapabilities::InitializeForKip(std::span<const u32> kern_caps,
 }
 
 Result KCapabilities::InitializeForUser(std::span<const u32> user_caps,
-                                        KProcessPageTable* page_table) {
+                                        KProcessPageTable* page_table,
+                                        Core::Hardware::CpuProfile profile) {
+    m_cpu_profile = profile;
     // We're initializing a user process.
     m_svc_access_flags.reset();
     m_irq_access_flags.reset();
@@ -58,6 +62,7 @@ Result KCapabilities::InitializeForUser(std::span<const u32> user_caps,
 
     // User processes must specify what cores/priorities they can use.
     m_core_mask = 0;
+    m_phys_core_mask = 0;
     m_priority_mask = 0;
 
     // Parse the user capabilities array.
@@ -88,8 +93,11 @@ Result KCapabilities::SetCorePriorityCapability(const u32 cap) {
     }
     ASSERT((m_core_mask & Core::Hardware::VirtualCoreMask) == m_core_mask);
 
+    R_UNLESS((m_core_mask & ~Core::Hardware::GetVirtualCoreMask(m_cpu_profile)) == 0,
+             ResultInvalidCoreId);
+
     // Set physical core mask.
-    m_phys_core_mask = Core::Hardware::ConvertVirtualCoreMaskToPhysical(m_core_mask);
+    m_phys_core_mask = Core::Hardware::ConvertVirtualCoreMaskToPhysical(m_cpu_profile, m_core_mask);
 
     // Set priority mask.
     for (auto prio = min_prio; prio <= max_prio; prio++) {

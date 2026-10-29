@@ -15,7 +15,17 @@ namespace Hardware {
 
 constexpr u64 BASE_CLOCK_RATE = 1'020'000'000; // Default CPU Frequency = 1020 MHz
 constexpr u64 CNTFREQ = 19'200'000;            // CNTPCT_EL0 Frequency = 19.2 MHz
-constexpr u32 NUM_CPU_CORES = 4;               // Number of CPU Cores - sync with dynarmic exclusive_monitor.h
+// Capacity for guest application cores. Keep in sync with Dynarmic's exclusive monitor.
+constexpr u32 MAX_CPU_CORES = 6;
+
+enum class CpuProfile {
+    Nx,
+    Ounce,
+};
+
+constexpr u32 GetCpuCoreCount(CpuProfile profile) {
+    return profile == CpuProfile::Ounce ? 6 : 4;
+}
 
 // Virtual to Physical core map.
 constexpr std::array<s32, Common::BitSize<u64>()> VirtualToPhysicalCoreMap{
@@ -33,12 +43,21 @@ static constexpr inline u64 VirtualCoreMask = [] {
     return mask;
 }();
 
-static constexpr inline u64 ConvertVirtualCoreMaskToPhysical(u64 v_core_mask) {
+constexpr s32 VirtualToPhysicalCore(CpuProfile profile, s32 core) {
+    return profile == CpuProfile::Ounce && core < 6 ? core : VirtualToPhysicalCoreMap[core];
+}
+
+constexpr u64 GetVirtualCoreMask(CpuProfile profile) {
+    return profile == CpuProfile::Ounce ? (1ULL << GetCpuCoreCount(profile)) - 1 : VirtualCoreMask;
+}
+
+static constexpr inline u64 ConvertVirtualCoreMaskToPhysical(CpuProfile profile, u64 v_core_mask) {
     u64 p_core_mask = 0;
     while (v_core_mask != 0) {
         const u64 next = std::countr_zero(v_core_mask);
         v_core_mask &= ~(static_cast<u64>(1) << next);
-        p_core_mask |= (static_cast<u64>(1) << VirtualToPhysicalCoreMap[next]);
+        p_core_mask |=
+            (static_cast<u64>(1) << VirtualToPhysicalCore(profile, static_cast<s32>(next)));
     }
     return p_core_mask;
 }

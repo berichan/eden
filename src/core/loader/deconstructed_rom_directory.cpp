@@ -153,6 +153,22 @@ FileType AppLoader_DeconstructedRomDirectory::IdentifyType(const FileSys::Virtua
     return FileType::Error;
 }
 
+Core::Hardware::CpuProfile AppLoader_DeconstructedRomDirectory::GetCpuProfile(
+    Core::System& system) const {
+    auto exefs = dir;
+    if (exefs != nullptr && override_update) {
+        const FileSys::PatchManager patch_manager(
+            metadata.GetTitleID(), system.GetFileSystemController(), system.GetContentProvider());
+        exefs = patch_manager.PatchExeFS(exefs);
+    }
+    FileSys::ProgramMetadata selected_metadata;
+    if (exefs != nullptr &&
+        selected_metadata.Load(exefs->GetFile("main.npdm")) == ResultStatus::Success) {
+        return selected_metadata.GetCpuProfile();
+    }
+    return Core::Hardware::CpuProfile::Nx;
+}
+
 AppLoader_DeconstructedRomDirectory::LoadResult AppLoader_DeconstructedRomDirectory::Load(
     Kernel::KProcess& process, Core::System& system) {
     if (is_loaded) {

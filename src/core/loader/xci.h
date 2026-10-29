@@ -44,6 +44,7 @@ public:
     }
 
     LoadResult Load(Kernel::KProcess& process, Core::System& system) override;
+    Core::Hardware::CpuProfile GetCpuProfile(Core::System& system) const override;
 
     ResultStatus VerifyIntegrity(std::function<bool(size_t, size_t)> progress_callback) override;
 

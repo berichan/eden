@@ -122,8 +122,9 @@ namespace Kernel {
         ASSERT(0 <= virt_core && virt_core < static_cast<s32>(Common::BitSize<u64>()));
 
         // Convert the virtual core to a physical core.
-        const s32 phys_core = Core::Hardware::VirtualToPhysicalCoreMap[virt_core];
-        ASSERT(0 <= phys_core && phys_core < static_cast<s32>(Core::Hardware::NUM_CPU_CORES));
+        const s32 phys_core =
+            Core::Hardware::VirtualToPhysicalCore(kernel.GetCpuProfile(), virt_core);
+        ASSERT(0 <= phys_core && phys_core < static_cast<s32>(kernel.GetCpuCoreCount()));
 
         // First, clear the TLS address.
         m_tls_address = {};
@@ -428,7 +429,7 @@ namespace Kernel {
     void KThread::FinishTermination(KernelCore& kernel) {
         // Ensure that the thread is not executing on any core.
         if (m_parent != nullptr) {
-            for (std::size_t i = 0; i < std::size_t(Core::Hardware::NUM_CPU_CORES); ++i) {
+            for (std::size_t i = 0; i < std::size_t(kernel.GetCpuCoreCount()); ++i) {
                 KThread* core_thread{};
                 do {
                     core_thread = kernel.Scheduler(i).GetSchedulerCurrentThread();
@@ -642,14 +643,15 @@ namespace Kernel {
 
             // Translate the virtual core to a physical core.
             if (core_id >= 0) {
-                core_id = Core::Hardware::VirtualToPhysicalCoreMap[core_id];
+                core_id = Core::Hardware::VirtualToPhysicalCore(kernel.GetCpuProfile(), core_id);
             }
 
             // Translate the virtual affinity mask to a physical one.
             while (v_affinity_mask != 0) {
                 const u64 next = std::countr_zero(v_affinity_mask);
                 v_affinity_mask &= ~(1ULL << next);
-                p_affinity_mask |= (1ULL << Core::Hardware::VirtualToPhysicalCoreMap[next]);
+                p_affinity_mask |= (1ULL << Core::Hardware::VirtualToPhysicalCore(
+                                        kernel.GetCpuProfile(), static_cast<s32>(next)));
             }
 
             // If we haven't disabled migration, perform an affinity change.
@@ -697,13 +699,13 @@ namespace Kernel {
                 // Check if the thread is currently running.
                 bool thread_is_current{};
                 s32 thread_core;
-                for (thread_core = 0; thread_core < static_cast<s32>(Core::Hardware::NUM_CPU_CORES);
+                for (thread_core = 0; thread_core < static_cast<s32>(kernel.GetCpuCoreCount());
                      ++thread_core) {
                     if (kernel.Scheduler(thread_core).GetSchedulerCurrentThread() == this) {
                         thread_is_current = true;
                         break;
                     }
-                     }
+                }
 
                 // If the thread is currently running, check whether it's no longer allowed under the
                 // new mask.
@@ -902,7 +904,7 @@ namespace Kernel {
                 } else {
                     // Check if the thread is currently running.
                     // If it is, we'll need to retry.
-                    for (auto i = 0; i < static_cast<s32>(Core::Hardware::NUM_CPU_CORES); ++i) {
+                    for (auto i = 0; i < static_cast<s32>(kernel.GetCpuCoreCount()); ++i) {
                         if (kernel.Scheduler(i).GetSchedulerCurrentThread() == this) {
                             thread_is_current = true;
                             break;
@@ -1447,4 +1449,4 @@ namespace Kernel {
             GetCurrentThread(m_kernel).EnableDispatch(m_kernel);
         }
     }
-}
+    } // namespace Kernel

@@ -40,11 +40,11 @@ public:
 
 private:
     static constexpr u64 GetCoreBit(s32 core) {
-        ASSERT(0 <= core && core < static_cast<s32>(Core::Hardware::NUM_CPU_CORES));
+        ASSERT(0 <= core && core < static_cast<s32>(Core::Hardware::MAX_CPU_CORES));
         return (1ULL << core);
     }
 
-    static constexpr u64 AllowedAffinityMask = (1ULL << Core::Hardware::NUM_CPU_CORES) - 1;
+    static constexpr u64 AllowedAffinityMask = (1ULL << Core::Hardware::MAX_CPU_CORES) - 1;
 
     u64 m_mask{};
 };

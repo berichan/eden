@@ -20,6 +20,7 @@ ProgramMetadata::ProgramMetadata() = default;
 ProgramMetadata::~ProgramMetadata() = default;
 
 Loader::ResultStatus ProgramMetadata::Load(VirtualFile file) {
+    cpu_profile = Core::Hardware::CpuProfile::Nx;
     if (file == nullptr) {
         return Loader::ResultStatus::ErrorBadNPDMHeader;
     }
@@ -45,11 +46,14 @@ Loader::ResultStatus ProgramMetadata::Load(VirtualFile file) {
     // ACID has an RSA signature and public key before its common header:
     // each is 0x100 bytes on NX and 0x180 bytes on Ounce.
     bool found_acid = false;
+    auto parsed_profile = Core::Hardware::CpuProfile::Nx;
     for (const u64 prefix_size : {0x200ULL, 0x300ULL}) {
         if (in_range(prefix_size, sizeof(AcidHeader), npdm_header.acid_size) &&
             file->ReadObject(&acid_header, acid_offset + prefix_size) == sizeof(AcidHeader) &&
             acid_header.magic == std::array{'A', 'C', 'I', 'D'}) {
             found_acid = true;
+            parsed_profile = prefix_size == 0x300 ? Core::Hardware::CpuProfile::Ounce
+                                                  : Core::Hardware::CpuProfile::Nx;
             break;
         }
     }
@@ -136,6 +140,7 @@ Loader::ResultStatus ProgramMetadata::Load(VirtualFile file) {
         return Loader::ResultStatus::ErrorBadKernelCapabilityDescriptors;
     }
 
+    cpu_profile = parsed_profile;
     return Loader::ResultStatus::Success;
 }
 
@@ -168,6 +173,7 @@ void ProgramMetadata::LoadManual(bool is_64_bit, ProgramAddressSpaceType address
                                  u32 main_thread_stack_size, u64 title_id,
                                  u64 filesystem_permissions, u32 system_resource_size,
                                  KernelCapabilityDescriptors capabilities) {
+    cpu_profile = Core::Hardware::CpuProfile::Nx;
     npdm_header.has_64_bit_instructions.Assign(is_64_bit);
     npdm_header.address_space_type.Assign(address_space);
     npdm_header.main_thread_priority = static_cast<u8>(main_thread_prio);

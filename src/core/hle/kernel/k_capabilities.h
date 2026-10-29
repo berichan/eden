@@ -10,6 +10,7 @@
 #include "common/bit_field.h"
 #include "common/common_types.h"
 
+#include "core/hardware_properties.h"
 #include "core/hle/kernel/svc_types.h"
 #include "core/hle/result.h"
 
@@ -22,8 +23,10 @@ class KCapabilities {
 public:
     constexpr explicit KCapabilities() = default;
 
-    Result InitializeForKip(std::span<const u32> kern_caps, KProcessPageTable* page_table);
-    Result InitializeForUser(std::span<const u32> user_caps, KProcessPageTable* page_table);
+    Result InitializeForKip(std::span<const u32> kern_caps, KProcessPageTable* page_table,
+                            Core::Hardware::CpuProfile profile);
+    Result InitializeForUser(std::span<const u32> user_caps, KProcessPageTable* page_table,
+                             Core::Hardware::CpuProfile profile);
 
     static Result CheckCapabilities(KernelCore& kernel, std::span<const u32> user_caps);
 
@@ -284,6 +287,7 @@ private:
 private:
     Svc::SvcAccessFlagSet m_svc_access_flags{};
     InterruptFlagSet m_irq_access_flags{};
+    Core::Hardware::CpuProfile m_cpu_profile{Core::Hardware::CpuProfile::Nx};
     u64 m_core_mask{};
     u64 m_phys_core_mask{};
     u64 m_priority_mask{};

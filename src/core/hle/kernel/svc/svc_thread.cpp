@@ -16,8 +16,8 @@
 namespace Kernel::Svc {
 namespace {
 
-constexpr bool IsValidVirtualCoreId(int32_t core_id) {
-    return (0 <= core_id && core_id < static_cast<int32_t>(Core::Hardware::NUM_CPU_CORES));
+bool IsValidVirtualCoreId(const KernelCore& kernel, int32_t core_id) {
+    return (0 <= core_id && core_id < static_cast<int32_t>(kernel.GetCpuCoreCount()));
 }
 
 } // Anonymous namespace
@@ -38,7 +38,7 @@ Result CreateThread(Core::System& system, Handle* out_handle, u64 entry_point, u
     }
 
     // Validate arguments.
-    R_UNLESS(IsValidVirtualCoreId(core_id), ResultInvalidCoreId);
+    R_UNLESS(IsValidVirtualCoreId(system.Kernel(), core_id), ResultInvalidCoreId);
     R_UNLESS(((1ull << core_id) & process.GetCoreMask()) != 0, ResultInvalidCoreId);
 
     R_UNLESS(HighestThreadPriority <= priority && priority <= LowestThreadPriority,
@@ -262,7 +262,7 @@ Result SetThreadCoreMask(Core::System& system, Handle thread_handle, s32 core_id
         R_UNLESS(affinity_mask != 0, ResultInvalidCombination);
 
         // Validate the core id.
-        if (IsValidVirtualCoreId(core_id)) {
+        if (IsValidVirtualCoreId(system.Kernel(), core_id)) {
             R_UNLESS(((1ULL << core_id) & affinity_mask) != 0, ResultInvalidCombination);
         } else {
             R_UNLESS(core_id == IdealCoreNoUpdate || core_id == IdealCoreDontCare,

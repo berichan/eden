@@ -735,7 +735,7 @@ struct Memory::Impl {
     void HandleRasterizerWrite(VAddr v_address, size_t size) {
         const auto* p = GetPointerImpl(
             v_address, []() {}, []() {});
-        constexpr size_t sys_core = Core::Hardware::NUM_CPU_CORES - 1;
+        const size_t sys_core = system.Kernel().GetCpuCoreCount() - 1;
         const size_t core = (std::min)(system.GetCurrentHostThreadID(),
                                      sys_core); // any other calls threads go to syscore.
         if (!gpu_device_memory) [[unlikely]] {
@@ -776,7 +776,7 @@ struct Memory::Impl {
     };
 
     void InvalidateGPUMemory(u8* p, size_t size) {
-        constexpr size_t sys_core = Core::Hardware::NUM_CPU_CORES - 1;
+        const size_t sys_core = system.Kernel().GetCpuCoreCount() - 1;
         const size_t core = (std::min)(system.GetCurrentHostThreadID(),
                                      sys_core); // any other calls threads go to syscore.
         if (!gpu_device_memory) [[unlikely]] {
@@ -800,9 +800,10 @@ struct Memory::Impl {
     Tegra::MaxwellDeviceMemoryManager* gpu_device_memory{};
     Common::PageTable* current_page_table = nullptr;
 
-    std::array<VideoCore::RasterizerDownloadArea, Core::Hardware::NUM_CPU_CORES> rasterizer_read_areas{};
-    std::array<GPUDirtyState, Core::Hardware::NUM_CPU_CORES> rasterizer_write_areas{};
-    std::array<Common::ScratchBuffer<u32>, Core::Hardware::NUM_CPU_CORES> scratch_buffers{};
+    std::array<VideoCore::RasterizerDownloadArea, Core::Hardware::MAX_CPU_CORES>
+        rasterizer_read_areas{};
+    std::array<GPUDirtyState, Core::Hardware::MAX_CPU_CORES> rasterizer_write_areas{};
+    std::array<Common::ScratchBuffer<u32>, Core::Hardware::MAX_CPU_CORES> scratch_buffers{};
     std::span<Core::GPUDirtyMemoryManager> gpu_dirty_managers;
     std::mutex sys_core_guard;
 #ifdef __ANDROID__

@@ -44,6 +44,7 @@ public:
     }
 
     LoadResult Load(Kernel::KProcess& process, Core::System& system) override;
+    Core::Hardware::CpuProfile GetCpuProfile(Core::System& system) const override;
 
     ResultStatus ReadRomFS(FileSys::VirtualFile& out_dir) override;
     ResultStatus ReadIcon(std::vector<u8>& out_buffer) override;

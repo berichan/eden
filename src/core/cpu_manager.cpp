@@ -24,7 +24,9 @@ CpuManager::CpuManager(System& system_) : system{system_} {}
 CpuManager::~CpuManager() = default;
 
 void CpuManager::Initialize() {
-    num_cores = is_multicore ? Core::Hardware::NUM_CPU_CORES : 1;
+    current_core = 0;
+    idle_count = 0;
+    num_cores = is_multicore ? system.Kernel().GetCpuCoreCount() : 1;
     gpu_barrier.emplace(num_cores + 1);
     for (std::size_t core = 0; core < num_cores; core++)
         core_data[core].host_thread = std::jthread([this, core](std::stop_token token) {
@@ -134,7 +136,7 @@ void CpuManager::SingleCoreRunIdleThread(Kernel::KernelCore& kernel) {
 }
 
 void CpuManager::PreemptSingleCore(Kernel::KernelCore& kernel, bool from_running_environment) {
-    if (idle_count >= 4 || from_running_environment) {
+    if (idle_count >= kernel.GetCpuCoreCount() || from_running_environment) {
         if (!from_running_environment) {
             system.CoreTiming().Idle();
             idle_count = 0;
@@ -143,7 +145,7 @@ void CpuManager::PreemptSingleCore(Kernel::KernelCore& kernel, bool from_running
         system.CoreTiming().Advance();
         kernel.SetIsPhantomModeForSingleCore(false);
     }
-    current_core.store((current_core + 1) % Core::Hardware::NUM_CPU_CORES);
+    current_core.store((current_core + 1) % system.Kernel().GetCpuCoreCount());
     system.CoreTiming().ResetTicks();
     kernel.Scheduler(current_core).PreemptSingleCore(kernel);
 

@@ -54,6 +54,10 @@ public:
         static_cast<void>(Common::AtomicCompareAndSwap(&memory, u64{}, u64{}, observed));
         return size == 8 ? observed : observed & ((1ULL << (size * 8)) - 1);
     }
+
+    bool MemoryWriteExclusive64(u64, u64 value, u64 expected) override {
+        return Common::AtomicCompareAndSwap(&memory, value, expected);
+    }
 };
 
 constexpr u32 EncodeCas(u32 size, u32 ordering, u32 rs, u32 rn, u32 rt) {
@@ -278,4 +282,43 @@ TEST_CASE("Concurrent atomic adds retain updates when the result is discarded", 
     first.join();
     second.join();
     REQUIRE(memory == 1000);
+}
+
+TEST_CASE("Exclusive monitor keeps six independent core reservations", "[core][arm][topology]") {
+    Dynarmic::ExclusiveMonitor monitor{6};
+    REQUIRE(monitor.GetProcessorCount() == 6);
+    for (size_t core = 0; core < 6; ++core) {
+        REQUIRE(monitor.ReadAndMark<u64>(core, 0x1000 + core * 8, [core] { return core + 100; }) ==
+                core + 100);
+    }
+    for (size_t core = 0; core < 6; ++core) {
+        REQUIRE(monitor.DoExclusiveOperation<u64>(core, 0x1000 + core * 8,
+                                                  [core](u64 old) { return old == core + 100; }));
+    }
+    monitor.ReadAndMark<u64>(0, 0x2000, [] { return 37; });
+    monitor.ReadAndMark<u64>(5, 0x2000, [] { return 37; });
+    REQUIRE(monitor.DoExclusiveOperation<u64>(5, 0x2000, [](u64 old) { return old == 37; }));
+    REQUIRE_FALSE(monitor.DoExclusiveOperation<u64>(0, 0x2000, [](u64) { return true; }));
+}
+
+TEST_CASE("Every guest CPU can execute an exclusive load and store", "[core][arm][topology]") {
+    u64 memory = 37;
+    Dynarmic::ExclusiveMonitor monitor{6};
+    for (size_t core = 0; core < 6; ++core) {
+        AtomicTestEnv env{memory};
+        env.code_mem = {0xc85f7c20, 0xc8037c22}; // LDXR X0,[X1]; STXR W3,X2,[X1]
+        Dynarmic::A64::UserConfig config;
+        config.callbacks = &env;
+        config.global_monitor = &monitor;
+        config.processor_id = static_cast<u8>(core);
+        Dynarmic::A64::Jit jit{config};
+        jit.SetRegister(1, 0x1000);
+        jit.SetRegister(2, 100 + core);
+        env.ticks_left = 2;
+        jit.Step();
+        REQUIRE(jit.GetRegister(0) == memory);
+        jit.Step();
+        REQUIRE(jit.GetRegister(3) == 0);
+        REQUIRE(memory == 100 + core);
+    }
 }

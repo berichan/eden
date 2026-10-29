@@ -105,6 +105,11 @@ public:
     /// Sets if emulation is multicore or single core, must be set before Initialize
     void SetMulticore(bool is_multicore);
 
+    /// Must be selected before Initialize; immutable while the kernel is running.
+    void SetCpuProfile(Core::Hardware::CpuProfile profile);
+    Core::Hardware::CpuProfile GetCpuProfile() const;
+    u32 GetCpuCoreCount() const;
+
     /// Resets the kernel to a clean slate for use.
     void Initialize();
 

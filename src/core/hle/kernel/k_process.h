@@ -70,11 +70,12 @@ private:
     using TLPIterator = TLPTree::iterator;
 
 private:
-    std::array<std::unique_ptr<Core::ArmInterface>, Core::Hardware::NUM_CPU_CORES> m_arm_interfaces{};
-    std::array<KThread*, Core::Hardware::NUM_CPU_CORES> m_running_threads{};
-    std::array<u64, Core::Hardware::NUM_CPU_CORES> m_running_thread_idle_counts{};
-    std::array<u64, Core::Hardware::NUM_CPU_CORES> m_running_thread_switch_counts{};
-    std::array<KThread*, Core::Hardware::NUM_CPU_CORES> m_pinned_threads{};
+    std::array<std::unique_ptr<Core::ArmInterface>, Core::Hardware::MAX_CPU_CORES>
+        m_arm_interfaces{};
+    std::array<KThread*, Core::Hardware::MAX_CPU_CORES> m_running_threads{};
+    std::array<u64, Core::Hardware::MAX_CPU_CORES> m_running_thread_idle_counts{};
+    std::array<u64, Core::Hardware::MAX_CPU_CORES> m_running_thread_switch_counts{};
+    std::array<KThread*, Core::Hardware::MAX_CPU_CORES> m_pinned_threads{};
     std::array<DebugWatchpoint, Core::Hardware::NUM_WATCHPOINTS> m_watchpoints{};
     std::map<KProcessAddress, u64> m_debug_page_refcounts{};
 #ifdef HAS_NCE
@@ -145,14 +146,14 @@ private:
     void FinishTermination(KernelCore& kernel);
 
     void PinThread(s32 core_id, KThread* thread) {
-        ASSERT(0 <= core_id && core_id < static_cast<s32>(Core::Hardware::NUM_CPU_CORES));
+        ASSERT(0 <= core_id && core_id < static_cast<s32>(Core::Hardware::MAX_CPU_CORES));
         ASSERT(thread != nullptr);
         ASSERT(m_pinned_threads[core_id] == nullptr);
         m_pinned_threads[core_id] = thread;
     }
 
     void UnpinThread(s32 core_id, KThread* thread) {
-        ASSERT(0 <= core_id && core_id < static_cast<s32>(Core::Hardware::NUM_CPU_CORES));
+        ASSERT(0 <= core_id && core_id < static_cast<s32>(Core::Hardware::MAX_CPU_CORES));
         ASSERT(thread != nullptr);
         ASSERT(m_pinned_threads[core_id] == thread);
         m_pinned_threads[core_id] = nullptr;
@@ -305,7 +306,7 @@ public:
     bool ReleaseUserException(KernelCore& kernel, KThread* thread);
 
     KThread* GetPinnedThread(s32 core_id) const {
-        ASSERT(0 <= core_id && core_id < static_cast<s32>(Core::Hardware::NUM_CPU_CORES));
+        ASSERT(0 <= core_id && core_id < static_cast<s32>(Core::Hardware::MAX_CPU_CORES));
         return m_pinned_threads[core_id];
     }
 

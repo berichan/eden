@@ -18,6 +18,7 @@
 #include "common/common_types.h"
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/vfs/vfs.h"
+#include "core/hardware_properties.h"
 
 namespace Core {
 class System;
@@ -183,6 +184,11 @@ public:
      * @return FileType corresponding to the loaded file
      */
     virtual FileType GetFileType() const = 0;
+
+    /// Select the guest CPU topology before the kernel and its core threads are initialized.
+    virtual Core::Hardware::CpuProfile GetCpuProfile(Core::System& system) const {
+        return Core::Hardware::CpuProfile::Nx;
+    }
 
     /**
      * Load the application and return the created Process instance

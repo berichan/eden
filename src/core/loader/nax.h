@@ -37,6 +37,7 @@ public:
     FileType GetFileType() const override;
 
     LoadResult Load(Kernel::KProcess& process, Core::System& system) override;
+    Core::Hardware::CpuProfile GetCpuProfile(Core::System& system) const override;
 
     ResultStatus ReadRomFS(FileSys::VirtualFile& dir) override;
     ResultStatus ReadProgramId(u64& out_program_id) override;

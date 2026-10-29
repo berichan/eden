@@ -260,11 +260,12 @@ struct System::Impl {
         debugger.emplace(system, port);
     }
 
-    void InitializeKernel(System& system) {
+    void InitializeKernel(System& system, Hardware::CpuProfile profile) {
         LOG_DEBUG(Core, "initialized OK");
 
         // Setting changes may require a full system reinitialization (e.g., disabling multicore).
         ReinitializeIfNecessary(system);
+        kernel.SetCpuProfile(profile);
         kernel.Initialize();
     }
 
@@ -297,18 +298,25 @@ struct System::Impl {
             fs_controller.InitTempStorage();
         }
 
-        InitializeKernel(system);
+        ReinitializeIfNecessary(system);
 
         if (params.applet_type == Service::AM::AppletType::Application) {
             current_application_filepath = filepath;
         }
 
         const auto file = GetGameFileFromPath(virtual_filesystem, filepath);
+        app_loader = Loader::GetLoader(system, file, params.program_id, params.program_index);
+        if (!app_loader) {
+            LOG_CRITICAL(Core, "Failed to obtain loader for {}!", filepath);
+            return SystemResultStatus::ErrorGetLoader;
+        }
+        InitializeKernel(system, app_loader->GetCpuProfile(system));
 
         // Create the application process
         Loader::ResultStatus load_result{};
         std::vector<u8> control;
-        auto process = Service::AM::CreateApplicationProcess(control, app_loader, load_result, system, file, params.program_id, params.program_index);
+        auto process =
+            Service::AM::CreateApplicationProcess(control, app_loader, load_result, system);
         if (load_result != Loader::ResultStatus::Success) {
             LOG_CRITICAL(Core, "Failed to load ROM (Error {})!", load_result);
             ShutdownMainProcess();
@@ -490,11 +498,12 @@ struct System::Impl {
     std::optional<Tools::RenderdocAPI> renderdoc_api;
     std::optional<Tegra::GPU> gpu_core;
 
-    std::array<Core::GPUDirtyMemoryManager, Core::Hardware::NUM_CPU_CORES> gpu_dirty_memory_managers;
+    std::array<Core::GPUDirtyMemoryManager, Core::Hardware::MAX_CPU_CORES>
+        gpu_dirty_memory_managers;
     std::vector<std::vector<u8>> user_channel;
     std::vector<std::vector<u8>> general_channel;
 
-    std::array<u64, Core::Hardware::NUM_CPU_CORES> dynarmic_ticks{};
+    std::array<u64, Core::Hardware::MAX_CPU_CORES> dynarmic_ticks{};
     std::array<u8, 0x20> build_id{};
 
     std::string current_application_filepath;

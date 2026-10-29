@@ -87,7 +87,7 @@ constexpr size_t SlabCountKSession = 1133;
 constexpr size_t SlabCountKLightSession = 100;
 constexpr size_t SlabCountKObjectName = 7;
 constexpr size_t SlabCountKResourceLimit = 5;
-constexpr size_t SlabCountKDebug = Core::Hardware::NUM_CPU_CORES;
+constexpr size_t SlabCountKDebug = Core::Hardware::GetCpuCoreCount(Core::Hardware::CpuProfile::Nx);
 constexpr size_t SlabCountKIoPool = 1;
 constexpr size_t SlabCountKIoRegion = 6;
 constexpr size_t SlabcountKSessionRequestMappings = 40;
@@ -170,6 +170,7 @@ KSlabResourceCounts KSlabResourceCounts::CreateDefault() {
 
 void InitializeSlabResourceCounts(KernelCore& kernel) {
     kernel.SlabResourceCounts() = KSlabResourceCounts::CreateDefault();
+    kernel.SlabResourceCounts().num_KDebug = kernel.GetCpuCoreCount();
     if (KSystemControl::Init::ShouldIncreaseThreadResourceLimit()) {
         kernel.SlabResourceCounts().num_KThread += SlabCountExtraKThread;
     }

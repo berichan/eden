@@ -332,7 +332,7 @@ Kernel::KProcessAddress FindMainModuleEntrypoint(Kernel::KProcess* process) {
 }
 
 void InvalidateInstructionCacheRange(const Kernel::KProcess* process, u64 address, u64 size) {
-    for (size_t i = 0; i < Core::Hardware::NUM_CPU_CORES; i++) {
+    for (size_t i = 0; i < Core::Hardware::MAX_CPU_CORES; i++) {
         auto* interface = process->GetArmInterface(i);
         if (interface) {
             interface->InvalidateCacheRange(address, size);

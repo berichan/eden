@@ -889,7 +889,7 @@ private:
     SyncObjectBuffer m_sync_object_buffer{};
     s64 m_schedule_count{};
     s64 m_last_scheduled_tick{};
-    std::array<QueueEntry, Core::Hardware::NUM_CPU_CORES> m_per_core_priority_queue_entry{};
+    std::array<QueueEntry, Core::Hardware::MAX_CPU_CORES> m_per_core_priority_queue_entry{};
     KThreadQueue* m_wait_queue{};
     LockWithPriorityInheritanceInfoList m_held_lock_info_list{};
     LockWithPriorityInheritanceInfo* m_waiting_lock_info{};

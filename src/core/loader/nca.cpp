@@ -57,6 +57,39 @@ FileType AppLoader_NCA::IdentifyType(const FileSys::VirtualFile& nca_file) {
     return FileType::Error;
 }
 
+FileSys::VirtualDir AppLoader_NCA::GetExeFS(Core::System& system) const {
+    auto exefs = nca->GetExeFS();
+    if (exefs == nullptr) {
+        LOG_INFO(Loader, "No ExeFS found in NCA, looking for ExeFS from update");
+
+        const auto& installed = system.GetContentProvider();
+        const auto update_nca = installed.GetEntry(FileSys::GetUpdateTitleID(nca->GetTitleId()),
+                                                   FileSys::ContentRecordType::Program);
+
+        if (update_nca) {
+            exefs = update_nca->GetExeFS();
+        }
+
+        if (exefs == nullptr) {
+            return nullptr;
+        }
+    }
+
+    return exefs;
+}
+
+Core::Hardware::CpuProfile AppLoader_NCA::GetCpuProfile(Core::System& system) const {
+    if (nca->GetStatus() != ResultStatus::Success ||
+        nca->GetType() != FileSys::NCAContentType::Program) {
+        return Core::Hardware::CpuProfile::Nx;
+    }
+    const auto exefs = GetExeFS(system);
+    if (exefs == nullptr) {
+        return Core::Hardware::CpuProfile::Nx;
+    }
+    return AppLoader_DeconstructedRomDirectory{exefs, true}.GetCpuProfile(system);
+}
+
 AppLoader_NCA::LoadResult AppLoader_NCA::Load(Kernel::KProcess& process, Core::System& system) {
     if (is_loaded) {
         return {ResultStatus::ErrorAlreadyLoaded, {}};
@@ -71,21 +104,9 @@ AppLoader_NCA::LoadResult AppLoader_NCA::Load(Kernel::KProcess& process, Core::S
         return {ResultStatus::ErrorNCANotProgram, {}};
     }
 
-    auto exefs = nca->GetExeFS();
+    const auto exefs = GetExeFS(system);
     if (exefs == nullptr) {
-        LOG_INFO(Loader, "No ExeFS found in NCA, looking for ExeFS from update");
-
-        const auto& installed = system.GetContentProvider();
-        const auto update_nca = installed.GetEntry(FileSys::GetUpdateTitleID(nca->GetTitleId()),
-                                                   FileSys::ContentRecordType::Program);
-
-        if (update_nca) {
-            exefs = update_nca->GetExeFS();
-        }
-
-        if (exefs == nullptr) {
-            return {ResultStatus::ErrorNoExeFS, {}};
-        }
+        return {ResultStatus::ErrorNoExeFS, {}};
     }
 
     directory_loader = std::make_unique<AppLoader_DeconstructedRomDirectory>(exefs, true);

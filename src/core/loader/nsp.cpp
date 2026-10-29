@@ -100,6 +100,11 @@ FileType AppLoader_NSP::IdentifyType(const FileSys::VirtualFile& nsp_file) {
     return FileType::Error;
 }
 
+Core::Hardware::CpuProfile AppLoader_NSP::GetCpuProfile(Core::System& system) const {
+    return secondary_loader ? secondary_loader->GetCpuProfile(system)
+                            : Core::Hardware::CpuProfile::Nx;
+}
+
 AppLoader_NSP::LoadResult AppLoader_NSP::Load(Kernel::KProcess& process, Core::System& system) {
     if (is_loaded) {
         return {ResultStatus::ErrorAlreadyLoaded, {}};

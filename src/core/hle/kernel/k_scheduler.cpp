@@ -213,12 +213,12 @@ u64 KScheduler::UpdateHighestPriorityThreadsImpl(KernelCore& kernel) {
     ClearSchedulerUpdateNeeded(kernel);
 
     u64 cores_needing_scheduling = 0, idle_cores = 0;
-    KThread* top_threads[Core::Hardware::NUM_CPU_CORES];
+    KThread* top_threads[Core::Hardware::MAX_CPU_CORES];
     auto& priority_queue = GetPriorityQueue(kernel);
 
     // We want to go over all cores, finding the highest priority thread and determining if
     // scheduling is needed for that core.
-    for (size_t core_id = 0; core_id < Core::Hardware::NUM_CPU_CORES; core_id++) {
+    for (size_t core_id = 0; core_id < kernel.GetCpuCoreCount(); core_id++) {
         KThread* top_thread = priority_queue.GetScheduledFront(static_cast<s32>(core_id));
         if (top_thread != nullptr) {
             // We need to check if the thread's process has a pinned thread.
@@ -251,7 +251,7 @@ u64 KScheduler::UpdateHighestPriorityThreadsImpl(KernelCore& kernel) {
         const s32 core_id = static_cast<s32>(std::countr_zero(idle_cores));
 
         if (KThread* suggested = priority_queue.GetSuggestedFront(core_id); suggested != nullptr) {
-            s32 migration_candidates[Core::Hardware::NUM_CPU_CORES];
+            s32 migration_candidates[Core::Hardware::MAX_CPU_CORES];
             size_t num_candidates = 0;
 
             // While we have a suggested thread, try to migrate it!
@@ -276,7 +276,7 @@ u64 KScheduler::UpdateHighestPriorityThreadsImpl(KernelCore& kernel) {
                 }
 
                 // Note this core as a candidate for migration.
-                ASSERT(num_candidates < Core::Hardware::NUM_CPU_CORES);
+                ASSERT(num_candidates < kernel.GetCpuCoreCount());
                 migration_candidates[num_candidates++] = suggested_core;
                 suggested = priority_queue.GetSuggestedNext(core_id, suggested);
             }
@@ -515,7 +515,7 @@ void KScheduler::Reload(KernelCore& kernel, KThread* thread) {
 
 void KScheduler::ClearPreviousThread(KernelCore& kernel, KThread* thread) {
     ASSERT(IsSchedulerLockedByCurrentThread(kernel));
-    for (size_t i = 0; i < Core::Hardware::NUM_CPU_CORES; ++i) {
+    for (size_t i = 0; i < kernel.GetCpuCoreCount(); ++i) {
         // Get an atomic reference to the core scheduler's previous thread.
         auto& prev_thread{kernel.Scheduler(i).m_state.prev_thread};
 
@@ -885,7 +885,7 @@ void KScheduler::RescheduleOtherCores(KernelCore& kernel, u64 cores_needing_sche
 
 void KScheduler::RescheduleCores(KernelCore& kernel, u64 core_mask) {
     // Send IPI
-    for (size_t i = 0; i < Core::Hardware::NUM_CPU_CORES; i++) {
+    for (size_t i = 0; i < kernel.GetCpuCoreCount(); i++) {
         if (core_mask & (1ULL << i)) {
             kernel.PhysicalCore(i).Interrupt();
         }

@@ -22,7 +22,7 @@ class KernelCore;
 class SchedulerLock;
 
 using KSchedulerPriorityQueue =
-    KPriorityQueue<KThread, Core::Hardware::NUM_CPU_CORES, Svc::LowestThreadPriority,
+    KPriorityQueue<KThread, Core::Hardware::MAX_CPU_CORES, Svc::LowestThreadPriority,
                    Svc::HighestThreadPriority>;
 
 static constexpr s32 HighestCoreMigrationAllowedPriority = 2;

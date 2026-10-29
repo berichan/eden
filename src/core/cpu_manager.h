@@ -100,7 +100,7 @@ private:
         std::shared_ptr<Common::Fiber> host_context;
         std::jthread host_thread;
     };
-    std::array<CoreData, Core::Hardware::NUM_CPU_CORES> core_data{};
+    std::array<CoreData, Core::Hardware::MAX_CPU_CORES> core_data{};
     Core::System& system;
     std::atomic<std::size_t> current_core{};
     std::size_t idle_count{};

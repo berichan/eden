@@ -9,6 +9,7 @@
 
 #include "common/common_funcs.h"
 #include "common/swap.h"
+#include "core/core.h"
 #include "core/file_sys/romfs.h"
 #include "core/file_sys/vfs/vfs_offset.h"
 #include "core/file_sys/vfs/vfs_vector.h"
@@ -66,11 +67,12 @@ std::vector<u8> MakeMetadata(size_t prefix_size = 0x200) {
     return data;
 }
 
-std::shared_ptr<VectorVfsDirectory> MakeExeFS(FileSys::VirtualDir parent = nullptr) {
+std::shared_ptr<VectorVfsDirectory> MakeExeFS(FileSys::VirtualDir parent = nullptr,
+                                              size_t prefix_size = 0x200) {
     return std::make_shared<VectorVfsDirectory>(
         std::vector<FileSys::VirtualFile>{
             std::make_shared<VectorVfsFile>(MakeNso(), "main"),
-            std::make_shared<VectorVfsFile>(MakeMetadata(), "main.npdm"),
+            std::make_shared<VectorVfsFile>(MakeMetadata(prefix_size), "main.npdm"),
             std::make_shared<VectorVfsFile>(MakeNso(), "sdk"),
         },
         std::vector<FileSys::VirtualDir>{}, "exefs", std::move(parent));
@@ -84,6 +86,9 @@ TEST_CASE("Program metadata supports both ACID signature sizes", "[core][loader]
         FileSys::ProgramMetadata metadata;
         REQUIRE(metadata.Load(std::make_shared<VectorVfsFile>(MakeMetadata(prefix_size))) ==
                 ResultStatus::Success);
+        REQUIRE(metadata.GetCpuProfile() == (prefix_size == 0x300
+                                                 ? Core::Hardware::CpuProfile::Ounce
+                                                 : Core::Hardware::CpuProfile::Nx));
         REQUIRE(metadata.GetTitleID() == 0x0100000000000000);
         REQUIRE(metadata.GetFilesystemPermissions() == 0x21);
         REQUIRE(metadata.GetPoolPartition() == FileSys::PoolPartition::System);
@@ -202,4 +207,38 @@ TEST_CASE("Directory loader reports absent RomFS", "[core][loader]") {
     Loader::AppLoader_DeconstructedRomDirectory loader{exefs};
     FileSys::VirtualFile romfs;
     REQUIRE(loader.ReadRomFS(romfs) == ResultStatus::ErrorNoRomFS);
+}
+
+TEST_CASE("Directory loader selects CPU topology without loading a process",
+          "[core][loader][topology]") {
+    Core::System system;
+    for (const size_t prefix_size : {0x200, 0x300}) {
+        const auto exefs = MakeExeFS(nullptr, prefix_size);
+        const auto main = std::make_shared<VectorVfsFile>(MakeNso(), "main", exefs);
+        Loader::AppLoader_DeconstructedRomDirectory from_file{main};
+        Loader::AppLoader_DeconstructedRomDirectory from_directory{exefs};
+        const auto expected = prefix_size == 0x300 ? Core::Hardware::CpuProfile::Ounce
+                                                   : Core::Hardware::CpuProfile::Nx;
+        REQUIRE(from_file.GetCpuProfile(system) == expected);
+        REQUIRE(from_directory.GetCpuProfile(system) == expected);
+        auto selected = Loader::GetLoader(system, main);
+        REQUIRE(selected != nullptr);
+        REQUIRE(selected->GetCpuProfile(system) == expected);
+    }
+}
+
+TEST_CASE("Reloading metadata does not retain a previous CPU profile", "[core][loader][topology]") {
+    FileSys::ProgramMetadata metadata;
+    REQUIRE(metadata.Load(std::make_shared<VectorVfsFile>(MakeMetadata(0x300))) ==
+            ResultStatus::Success);
+    REQUIRE(metadata.GetCpuProfile() == Core::Hardware::CpuProfile::Ounce);
+    REQUIRE(metadata.Reload(std::make_shared<VectorVfsFile>(MakeMetadata(0x200))) ==
+            ResultStatus::Success);
+    REQUIRE(metadata.GetCpuProfile() == Core::Hardware::CpuProfile::Nx);
+    REQUIRE(metadata.Load(std::make_shared<VectorVfsFile>(MakeMetadata(0x300))) ==
+            ResultStatus::Success);
+    REQUIRE(metadata.Load(nullptr) == ResultStatus::ErrorBadNPDMHeader);
+    REQUIRE(metadata.GetCpuProfile() == Core::Hardware::CpuProfile::Nx);
+    REQUIRE(FileSys::ProgramMetadata::GetDefault().GetCpuProfile() ==
+            Core::Hardware::CpuProfile::Nx);
 }

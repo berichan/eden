@@ -42,6 +42,7 @@ public:
     }
 
     LoadResult Load(Kernel::KProcess& process, Core::System& system) override;
+    Core::Hardware::CpuProfile GetCpuProfile(Core::System& system) const override;
 
     ResultStatus VerifyIntegrity(std::function<bool(size_t, size_t)> progress_callback) override;
 
@@ -58,6 +59,7 @@ public:
     u64 GetProgramId() const;
 
 private:
+    FileSys::VirtualDir GetExeFS(Core::System& system) const;
     std::unique_ptr<FileSys::NCA> nca;
     u64 update_only_program_id{};
     std::unique_ptr<FileSys::NACP> nacp;

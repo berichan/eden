@@ -80,7 +80,7 @@ void InvalidateInstructionCache(KernelCore& kernel, KPageTableBase* table, Addre
             continue;
         }
 
-        for (size_t i = 0; i < Core::Hardware::NUM_CPU_CORES; i++) {
+        for (size_t i = 0; i < kernel.GetCpuCoreCount(); i++) {
             auto* interface = process->GetArmInterface(i);
             if (interface) {
                 interface->InvalidateCacheRange(GetInteger(addr), size);

@@ -11,6 +11,7 @@
 #include "common/common_types.h"
 #include "common/swap.h"
 #include "core/file_sys/vfs/vfs_types.h"
+#include "core/hardware_properties.h"
 
 namespace Loader {
 enum class ResultStatus : u16;
@@ -72,6 +73,9 @@ public:
                     KernelCapabilityDescriptors capabilities);
 
     bool Is64BitProgram() const;
+    Core::Hardware::CpuProfile GetCpuProfile() const {
+        return cpu_profile;
+    }
     ProgramAddressSpaceType GetAddressSpaceType() const;
     u8 GetMainThreadPriority() const;
     u8 GetMainThreadCore() const;
@@ -175,6 +179,7 @@ private:
     };
 
     Header npdm_header{};
+    Core::Hardware::CpuProfile cpu_profile{Core::Hardware::CpuProfile::Nx};
     AciHeader aci_header{};
     AcidHeader acid_header{};
 

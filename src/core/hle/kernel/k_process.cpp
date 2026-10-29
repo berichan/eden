@@ -214,7 +214,7 @@ Result KProcess::Initialize(KernelCore& kernel, const Svc::CreateProcessParamete
     m_is_application = True(params.flags & Svc::CreateProcessFlag::IsApplication);
 
     // Set thread fields.
-    for (size_t i = 0; i < Core::Hardware::NUM_CPU_CORES; i++) {
+    for (size_t i = 0; i < kernel.GetCpuCoreCount(); i++) {
         m_running_threads[i] = nullptr;
         m_pinned_threads[i] = nullptr;
         m_running_thread_idle_counts[i] = 0;
@@ -337,7 +337,8 @@ Result KProcess::Initialize(KernelCore& kernel, const Svc::CreateProcessParamete
                                     KMemoryPermission::KernelRead));
 
     // Initialize capabilities.
-    R_TRY(m_capabilities.InitializeForKip(caps, std::addressof(m_page_table)));
+    R_TRY(m_capabilities.InitializeForKip(caps, std::addressof(m_page_table),
+                                          kernel.GetCpuProfile()));
 
     // Enable mapping device pages as executable on legacy processes.
     if (m_capabilities.GetIntendedKernelMajorVersion() < 26) {
@@ -438,7 +439,8 @@ Result KProcess::Initialize(KernelCore& kernel, const Svc::CreateProcessParamete
                                 KMemoryPermission::KernelRead | KMemoryPermission::NotMapped));
 
     // Initialize capabilities.
-    R_TRY(m_capabilities.InitializeForUser(user_caps, std::addressof(m_page_table)));
+    R_TRY(m_capabilities.InitializeForUser(user_caps, std::addressof(m_page_table),
+                                           kernel.GetCpuProfile()));
 
     // Enable mapping device pages as executable on legacy processes.
     if (m_capabilities.GetIntendedKernelMajorVersion() < 26) {
@@ -1303,23 +1305,22 @@ void KProcess::LoadModule(KernelCore& kernel, CodeSet code_set, KProcessAddress 
 }
 
 void KProcess::InitializeInterfaces(KernelCore& kernel) {
-    m_exclusive_monitor =
-        Core::MakeExclusiveMonitor(this->GetMemory(), Core::Hardware::NUM_CPU_CORES);
+    m_exclusive_monitor = Core::MakeExclusiveMonitor(this->GetMemory(), kernel.GetCpuCoreCount());
 
 #ifdef HAS_NCE
     if (this->IsApplication() && Settings::IsNceEnabled()) {
-        for (size_t i = 0; i < Core::Hardware::NUM_CPU_CORES; i++)
+        for (size_t i = 0; i < kernel.GetCpuCoreCount(); i++)
             m_arm_interfaces[i] = std::make_unique<Core::ArmNce>(kernel.System(), true, i);
     } else
 #endif
         if (this->Is64Bit()) {
-        for (size_t i = 0; i < Core::Hardware::NUM_CPU_CORES; i++) {
+        for (size_t i = 0; i < kernel.GetCpuCoreCount(); i++) {
             m_arm_interfaces[i] = std::make_unique<Core::ArmDynarmic64>(
                 kernel.System(), kernel.IsMulticore(), this,
                 static_cast<Core::DynarmicExclusiveMonitor&>(*m_exclusive_monitor), i);
         }
     } else {
-        for (size_t i = 0; i < Core::Hardware::NUM_CPU_CORES; i++) {
+        for (size_t i = 0; i < kernel.GetCpuCoreCount(); i++) {
             m_arm_interfaces[i] = std::make_unique<Core::ArmDynarmic32>(
                 kernel.System(), kernel.IsMulticore(), this,
                 static_cast<Core::DynarmicExclusiveMonitor&>(*m_exclusive_monitor), i);
