@@ -19,11 +19,19 @@ IApplicationProxyService::IApplicationProxyService(Core::System& system_,
     : ServiceFramework{system_, "appletOE"}, m_window_system{window_system} {
     static const FunctionInfo functions[] = {
         {0, D<&IApplicationProxyService::OpenApplicationProxy>, "OpenApplicationProxy"},
+        {10, D<&IApplicationProxyService::OpenApplicationProxy2>, "OpenApplicationProxy2"},
     };
     RegisterHandlers(functions);
 }
 
 IApplicationProxyService::~IApplicationProxyService() = default;
+
+Result IApplicationProxyService::OpenApplicationProxy2(
+    Out<SharedPointer<IApplicationProxy>> out_application_proxy, u32 options, ClientProcessId pid,
+    InCopyHandle<Kernel::KProcess> process_handle) {
+    LOG_WARNING(Service_AM, "called, options={:#x} (proxy options are not modeled)", options);
+    R_RETURN(OpenApplicationProxy(out_application_proxy, pid, process_handle));
+}
 
 Result IApplicationProxyService::OpenApplicationProxy(
     Out<SharedPointer<IApplicationProxy>> out_application_proxy, ClientProcessId pid,

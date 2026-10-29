@@ -23,6 +23,9 @@ public:
     ~IApplicationProxyService() override;
 
 private:
+    Result OpenApplicationProxy2(Out<SharedPointer<IApplicationProxy>> out_application_proxy,
+                                 u32 options, ClientProcessId pid,
+                                 InCopyHandle<Kernel::KProcess> process_handle);
     Result OpenApplicationProxy(Out<SharedPointer<IApplicationProxy>> out_application_proxy,
                                 ClientProcessId pid, InCopyHandle<Kernel::KProcess> process_handle);
 
