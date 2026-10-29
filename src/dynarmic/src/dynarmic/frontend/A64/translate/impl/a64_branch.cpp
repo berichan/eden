@@ -70,6 +70,12 @@ bool TranslatorVisitor::RET(Reg Rn) {
     return false;
 }
 
+bool TranslatorVisitor::RETA(bool /*M*/) {
+    // Match the existing PAC hint behavior: EnIA and EnIB are modeled as disabled,
+    // so authentication leaves the return address unchanged.
+    return RET(Reg::R30);
+}
+
 bool TranslatorVisitor::CBZ(bool sf, Imm<19> imm19, Reg Rt) {
     const size_t datasize = sf ? 64 : 32;
     const s64 offset = concatenate(imm19, Imm<2>{0}).SignExtend<s64>();

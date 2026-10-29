@@ -12,6 +12,7 @@
 #include "core/file_sys/content_archive.h"
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/patch_manager.h"
+#include "core/file_sys/romfs.h"
 #include "core/file_sys/romfs_factory.h"
 #include "core/hle/kernel/k_page_table.h"
 #include "core/hle/kernel/k_process.h"
@@ -71,11 +72,25 @@ struct PatchCollection {
     std::array<s32, 13> module_patcher_indices{};
 };
 
-AppLoader_DeconstructedRomDirectory::AppLoader_DeconstructedRomDirectory(FileSys::VirtualFile file_, bool override_update_)
-    : AppLoader(std::move(file_))
-    , override_update(override_update_)
-{
-    const auto file_dir = file->GetContainingDirectory();
+AppLoader_DeconstructedRomDirectory::AppLoader_DeconstructedRomDirectory(
+    FileSys::VirtualFile file_, bool override_update_)
+    : AppLoader(std::move(file_)), dir(file == nullptr ? nullptr : file->GetContainingDirectory()),
+      override_update(override_update_) {
+    ReadMetadata();
+}
+
+AppLoader_DeconstructedRomDirectory::AppLoader_DeconstructedRomDirectory(
+    FileSys::VirtualDir directory, bool override_update_)
+    : AppLoader(directory == nullptr ? nullptr : directory->GetFile("main")),
+      dir(std::move(directory)), override_update(override_update_) {
+    ReadMetadata();
+}
+
+void AppLoader_DeconstructedRomDirectory::ReadMetadata() {
+    const auto& file_dir = dir;
+    if (file_dir == nullptr) {
+        return;
+    }
 
     // Title ID
     const auto npdm = file_dir->GetFile("main.npdm");
@@ -124,15 +139,14 @@ AppLoader_DeconstructedRomDirectory::AppLoader_DeconstructedRomDirectory(FileSys
     }
 }
 
-AppLoader_DeconstructedRomDirectory::AppLoader_DeconstructedRomDirectory(
-    FileSys::VirtualDir directory, bool override_update_)
-    : AppLoader(directory->GetFile("main"))
-    , dir(std::move(directory))
-    , override_update(override_update_)
-{}
-
 FileType AppLoader_DeconstructedRomDirectory::IdentifyType(const FileSys::VirtualFile& dir_file) {
-    if (FileSys::IsDirectoryExeFS(dir_file->GetContainingDirectory())) {
+    if (dir_file == nullptr || dir_file->GetName() != "main" ||
+        AppLoader_NSO::IdentifyType(dir_file) != FileType::NSO) {
+        return FileType::Error;
+    }
+
+    const auto directory = dir_file->GetContainingDirectory();
+    if (directory != nullptr && FileSys::IsDirectoryExeFS(directory)) {
         return FileType::DeconstructedRomDirectory;
     }
 
@@ -266,12 +280,40 @@ AppLoader_DeconstructedRomDirectory::LoadResult AppLoader_DeconstructedRomDirect
         LOG_DEBUG(Loader, "loaded module {} @ {:#x}", module, load_addr);
     }
 
+    // The NCA loader registers its own RomFS after loading patched ExeFS.
+    if (!override_update) {
+        system.GetFileSystemController().RegisterProcess(
+            process.GetProcessId(), metadata.GetTitleID(),
+            std::make_shared<FileSys::RomFSFactory>(*this, system.GetContentProvider(),
+                                                  system.GetFileSystemController()));
+    }
+
     is_loaded = true;
     return {ResultStatus::Success,
             LoadParameters{metadata.GetMainThreadPriority(), metadata.GetMainThreadStackSize()}};
 }
 
 ResultStatus AppLoader_DeconstructedRomDirectory::ReadRomFS(FileSys::VirtualFile& out_dir) {
+    if (romfs == nullptr && dir != nullptr) {
+        for (const auto& entry : dir->GetFiles()) {
+            if (entry->GetExtension() == "romfs") {
+                romfs = entry;
+                break;
+            }
+        }
+
+        if (romfs == nullptr) {
+            auto romfs_directory = dir->GetSubdirectory("romfs");
+            if (romfs_directory == nullptr && dir->GetName() == "exefs") {
+                const auto parent = dir->GetParentDirectory();
+                if (parent != nullptr) {
+                    romfs_directory = parent->GetSubdirectory("romfs");
+                }
+            }
+            romfs = FileSys::CreateRomFS(std::move(romfs_directory));
+        }
+    }
+
     if (romfs == nullptr) {
         return ResultStatus::ErrorNoRomFS;
     }

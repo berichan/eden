@@ -324,7 +324,7 @@ struct TranslatorVisitor final {
     bool LDUMAX(bool A, bool R, Reg Rs, Reg Rn, Reg Rt);
     bool LDUMIN(bool A, bool R, Reg Rs, Reg Rn, Reg Rt);
     bool SWP(bool A, bool R, Reg Rs, Reg Rn, Reg Rt);
-    bool LDAPR(Reg Rn, Reg Rt);
+    bool LDAPR(Imm<2> size, Reg Rn, Reg Rt);
 
     // Loads and stores - Load/Store register (register offset)
     bool STRx_reg(Imm<2> size, Imm<1> opc_1, Reg Rm, Imm<3> option, bool S, Reg Rn, Reg Rt);

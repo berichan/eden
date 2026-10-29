@@ -18,6 +18,7 @@ add_executable(tests
     common/unique_function.cpp
     core/core_timing.cpp
     core/internal_network/network.cpp
+    core/loader/deconstructed_rom_directory.cpp
     video_core/memory_tracker.cpp
     input_common/calibration_configuration_job.cpp
 )
@@ -25,6 +26,11 @@ add_executable(tests
 create_target_directory_groups(tests)
 
 target_link_libraries(tests PRIVATE common core input_common video_core)
+if (TARGET dynarmic::dynarmic)
+    target_sources(tests PRIVATE core/arm/authenticated_return.cpp)
+    target_sources(tests PRIVATE core/arm/acquire_load.cpp)
+    target_link_libraries(tests PRIVATE dynarmic::dynarmic)
+endif()
 target_link_libraries(tests PRIVATE ${PLATFORM_LIBRARIES} Catch2::Catch2WithMain Threads::Threads)
 
 add_test(NAME tests COMMAND tests)

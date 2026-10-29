@@ -21,7 +21,7 @@ namespace Loader {
  * This class loads a "deconstructed ROM directory", which are the typical format we see for Switch
  * game dumps. The path should be a "main" NSO, which must be in a directory that contains the other
  * standard ExeFS NSOs (e.g. rtld, sdk, etc.). It will automatically find and load these.
- * Furthermore, it will look for the first .romfs file (optionally) and use this for the RomFS.
+ * RomFS may be a .romfs file, a romfs subdirectory, or a sibling of an exefs directory.
  */
 class AppLoader_DeconstructedRomDirectory final : public AppLoader {
 public:
@@ -54,6 +54,8 @@ public:
     ResultStatus ReadNSOModules(Modules& out_modules) override;
 
 private:
+    void ReadMetadata();
+
     FileSys::ProgramMetadata metadata;
     FileSys::VirtualFile romfs;
     FileSys::VirtualDir dir;

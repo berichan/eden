@@ -20,26 +20,66 @@ ProgramMetadata::ProgramMetadata() = default;
 ProgramMetadata::~ProgramMetadata() = default;
 
 Loader::ResultStatus ProgramMetadata::Load(VirtualFile file) {
+    if (file == nullptr) {
+        return Loader::ResultStatus::ErrorBadNPDMHeader;
+    }
     const std::size_t total_size = file->GetSize();
     if (total_size < sizeof(Header)) {
         return Loader::ResultStatus::ErrorBadNPDMHeader;
     }
 
-    if (sizeof(Header) != file->ReadObject(&npdm_header)) {
+    if (sizeof(Header) != file->ReadObject(&npdm_header) ||
+        npdm_header.magic != std::array{'M', 'E', 'T', 'A'}) {
         return Loader::ResultStatus::ErrorBadNPDMHeader;
     }
 
-    if (sizeof(AcidHeader) != file->ReadObject(&acid_header, npdm_header.acid_offset)) {
+    const auto in_range = [](u64 offset, u64 size, u64 limit) {
+        return offset <= limit && size <= limit - offset;
+    };
+    const u64 acid_offset = npdm_header.acid_offset;
+    const u64 aci_offset = npdm_header.aci_offset;
+    if (!in_range(acid_offset, npdm_header.acid_size, total_size)) {
         return Loader::ResultStatus::ErrorBadACIDHeader;
     }
 
-    if (sizeof(AciHeader) != file->ReadObject(&aci_header, npdm_header.aci_offset)) {
+    // ACID has an RSA signature and public key before its common header:
+    // each is 0x100 bytes on NX and 0x180 bytes on Ounce.
+    bool found_acid = false;
+    for (const u64 prefix_size : {0x200ULL, 0x300ULL}) {
+        if (in_range(prefix_size, sizeof(AcidHeader), npdm_header.acid_size) &&
+            file->ReadObject(&acid_header, acid_offset + prefix_size) == sizeof(AcidHeader) &&
+            acid_header.magic == std::array{'A', 'C', 'I', 'D'}) {
+            found_acid = true;
+            break;
+        }
+    }
+    if (!found_acid) {
+        return Loader::ResultStatus::ErrorBadACIDHeader;
+    }
+
+    if (!in_range(aci_offset, npdm_header.aci_size, total_size) ||
+        npdm_header.aci_size < sizeof(AciHeader) ||
+        sizeof(AciHeader) != file->ReadObject(&aci_header, aci_offset) ||
+        aci_header.magic != std::array{'A', 'C', 'I', '0'}) {
         return Loader::ResultStatus::ErrorBadACIHeader;
+    }
+
+    if (acid_header.fac_size < 0x2c ||
+        !in_range(acid_header.fac_offset, acid_header.fac_size, npdm_header.acid_size)) {
+        return Loader::ResultStatus::ErrorBadFileAccessControl;
+    }
+    if (aci_header.fah_size < 0x1c ||
+        !in_range(aci_header.fah_offset, aci_header.fah_size, npdm_header.aci_size)) {
+        return Loader::ResultStatus::ErrorBadFileAccessHeader;
+    }
+    if (aci_header.kac_size % sizeof(u32) != 0 ||
+        !in_range(aci_header.kac_offset, aci_header.kac_size, npdm_header.aci_size)) {
+        return Loader::ResultStatus::ErrorBadKernelCapabilityDescriptors;
     }
 
     // Load acid_file_access per-component instead of the entire struct, since this struct does not
     // reflect the layout of the real data.
-    std::size_t current_offset = acid_header.fac_offset;
+    std::size_t current_offset = acid_offset + acid_header.fac_offset;
     if (sizeof(FileAccessControl::version) != file->ReadBytes(&acid_file_access.version,
                                                               sizeof(FileAccessControl::version),
                                                               current_offset)) {
@@ -57,7 +97,7 @@ Loader::ResultStatus ProgramMetadata::Load(VirtualFile file) {
     }
 
     // Load aci_file_access per-component instead of the entire struct, same as acid_file_access
-    current_offset = aci_header.fah_offset;
+    current_offset = aci_offset + aci_header.fah_offset;
     if (sizeof(FileAccessHeader::version) != file->ReadBytes(&aci_file_access.version,
                                                              sizeof(FileAccessHeader::version),
                                                              current_offset)) {
@@ -91,7 +131,7 @@ Loader::ResultStatus ProgramMetadata::Load(VirtualFile file) {
 
     aci_kernel_capabilities.resize(aci_header.kac_size / sizeof(u32));
     const u64 read_size = aci_header.kac_size;
-    const u64 read_offset = npdm_header.aci_offset + aci_header.kac_offset;
+    const u64 read_offset = aci_offset + aci_header.kac_offset;
     if (file->ReadBytes(aci_kernel_capabilities.data(), read_size, read_offset) != read_size) {
         return Loader::ResultStatus::ErrorBadKernelCapabilityDescriptors;
     }

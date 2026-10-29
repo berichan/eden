@@ -206,4 +206,10 @@ bool TranslatorVisitor::LDAR(Imm<2> sz, Reg Rn, Reg Rt) {
     return OrderedSharedDecodeAndOperation(*this, size, L, o0, Rn, Rt);
 }
 
+bool TranslatorVisitor::LDAPR(Imm<2> sz, Reg Rn, Reg Rt) {
+    // RCpc acquire permits weaker ordering than LDAR. The existing ordered load
+    // path provides the required acquire semantics on each host backend.
+    return OrderedSharedDecodeAndOperation(*this, sz.ZeroExtend<size_t>(), true, true, Rn, Rt);
+}
+
 }  // namespace Dynarmic::A64

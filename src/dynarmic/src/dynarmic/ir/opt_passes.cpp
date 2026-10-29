@@ -1194,9 +1194,15 @@ static void ConstantPropagation(IR::Block& block) {
 static void DeadCodeElimination(IR::Block& block) {
     // We iterate over the instructions in reverse order.
     // This is because removing an instruction reduces the number of uses for earlier instructions.
-    for (auto it = block.instructions.rbegin(); it != block.instructions.rend(); ++it)
-        if (!it->HasUses() && !MayHaveSideEffects(it->GetOpcode()))
+    for (auto it = block.instructions.rbegin(); it != block.instructions.rend(); ++it) {
+        const bool ordered_read = IsSharedMemoryRead(it->GetOpcode()) &&
+            (it->GetArg(2).GetAccType() == IR::AccType::ORDERED ||
+             it->GetArg(2).GetAccType() == IR::AccType::ORDEREDRW ||
+             it->GetArg(2).GetAccType() == IR::AccType::LIMITEDORDERED);
+        // Acquire ordering is observable even when the loaded value is discarded.
+        if (!it->HasUses() && !MayHaveSideEffects(it->GetOpcode()) && !ordered_read)
             it->Invalidate();
+    }
 }
 
 static void IdentityRemovalPass(IR::Block& block) {
