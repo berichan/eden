@@ -12,6 +12,8 @@
 #include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/kernel.h"
 #include "core/hle/kernel/svc_results.h"
+#include "core/hle/service/gsv/display_event_queue.h"
+#include "core/hle/service/gsv/display_session.h"
 #include "core/hle/service/gsv/gpu_session.h"
 #include "core/hle/service/gsv/syncpt_session.h"
 #include "core/hle/service/gsv/user_session.h"
@@ -219,6 +221,9 @@ TEST_CASE("GSV creates a user context only after boot and process binding", "[co
     REQUIRE(Request(caller, service, 1102, {}) == Kernel::ResultInvalidState);
     REQUIRE(Request(caller, service, 401, {}) == Kernel::ResultInvalidState);
     REQUIRE(Request(caller, service, 402, {}) == Kernel::ResultInvalidState);
+    REQUIRE(Request(caller, service, 301, {}) == Kernel::ResultInvalidState);
+    const std::array<u64, 1> display_version{0x300010000};
+    REQUIRE(Request(caller, service, 305, display_version) == Kernel::ResultInvalidState);
     REQUIRE(Request(caller, service, 11, {}) == Kernel::ResultInvalidState);
     REQUIRE(Request(caller, service, 4, arguments).IsSuccess());
     REQUIRE(Request(caller, service, 4, arguments) == Kernel::ResultInvalidState);
@@ -230,6 +235,10 @@ TEST_CASE("GSV creates a user context only after boot and process binding", "[co
     REQUIRE(Request(caller, service, 1102, {}) == Kernel::ResultInvalidState);
     REQUIRE(Request(caller, service, 1101, {}).IsSuccess());
     REQUIRE(Request(caller, service, 1102, {}).IsSuccess());
+    REQUIRE(Request(caller, service, 301, {}).IsSuccess());
+    REQUIRE(Request(caller, service, 305, {}) == Kernel::ResultInvalidSize);
+    const std::array<u64, 1> invalid_display_version{0};
+    REQUIRE(Request(caller, service, 305, invalid_display_version) == Kernel::ResultNotImplemented);
     const std::array<u64, 1> unsupported_gpu_version{4};
     REQUIRE(Request(caller, service, 497, unsupported_gpu_version) == Kernel::ResultNotImplemented);
     REQUIRE(Request(caller, service, 201, {}).IsSuccess());
@@ -396,4 +405,70 @@ TEST_CASE("Native GPU control sessions validate phases and event bounds", "[core
             Kernel::ResultInvalidArgument);
     REQUIRE(RequestWords(caller, service, 22, {}).first == Kernel::ResultInvalidState);
     REQUIRE(RequestWords(caller, service, 11, missing_event).first == Kernel::ResultInvalidSize);
+}
+
+TEST_CASE("Native display event queues retain, coalesce, and consume notifications",
+          "[core][ipc][gsv]") {
+    Service::GSV::DisplayEventQueue queue;
+    REQUIRE_FALSE(queue.Notify(1));
+    REQUIRE(queue.Initialize(0) == Result{ErrorModule::VI, 4});
+    REQUIRE(queue.Initialize(1024) == Result{ErrorModule::VI, 4});
+    REQUIRE(queue.Initialize(30) == Result{ErrorModule::VI, 4});
+    REQUIRE(queue.Initialize(1023).IsSuccess());
+    REQUIRE(queue.Initialize(31) == Result{ErrorModule::VI, 5});
+    REQUIRE_FALSE(queue.Notify(0));
+    REQUIRE_FALSE(queue.Notify(1024));
+    REQUIRE_FALSE(queue.Notify(0xffffffff));
+    for (const u32 id : {1U, 31U, 32U, 1023U, 31U}) {
+        REQUIRE(queue.Notify(id));
+    }
+    std::array<u8, 128> output{};
+    queue.Drain(output);
+    REQUIRE(output[0] == 2);
+    REQUIRE(output[3] == 0x80);
+    REQUIRE(output[4] == 1);
+    REQUIRE(output[127] == 0x80);
+    queue.Drain(output);
+    REQUIRE(std::ranges::all_of(output, [](u8 byte) { return byte == 0; }));
+}
+
+TEST_CASE("Native display notification reads mark unavailable slots and consume short reads",
+          "[core][ipc][gsv]") {
+    Service::GSV::DisplayEventQueue queue;
+    REQUIRE(queue.Initialize(31).IsSuccess());
+    REQUIRE(queue.Notify(31));
+    REQUIRE_FALSE(queue.Notify(32));
+    std::array<u8, 8> output{};
+    queue.Drain(output);
+    REQUIRE(output[3] == 0x80);
+    REQUIRE(output[4] == 0xff);
+    REQUIRE(output[7] == 0xff);
+    REQUIRE(queue.Notify(31));
+    queue.Drain(std::span{output}.first(1));
+    queue.Drain(output);
+    REQUIRE(output[3] == 0);
+    REQUIRE(output[4] == 0xff);
+}
+
+TEST_CASE("Native display control replies expose bounded pools and reject invalid requests",
+          "[core][ipc][gsv]") {
+    Caller caller;
+    Service::GSV::DisplaySession service{caller.system, &caller.process};
+    const auto [event_result, max_event] = RequestWords(caller, service, 1, {}, 2);
+    REQUIRE(event_result.IsSuccess());
+    REQUIRE(max_event == 1023);
+    const auto [semaphore_result, max_semaphore] = RequestWords(caller, service, 3, {}, 2);
+    REQUIRE(semaphore_result.IsSuccess());
+    REQUIRE(max_semaphore == 7);
+    REQUIRE(RequestWords(caller, service, 11, {}).first == Kernel::ResultInvalidSize);
+    const std::array<u32, 1> invalid_pool{1024};
+    REQUIRE(RequestWords(caller, service, 11, invalid_pool).first == Result{ErrorModule::VI, 4});
+    const std::array<u32, 1> unaligned_pool{32};
+    REQUIRE(RequestWords(caller, service, 11, unaligned_pool).first == Result{ErrorModule::VI, 4});
+    const std::array<u32, 1> invalid_semaphore{8};
+    REQUIRE(RequestWords(caller, service, 31, invalid_semaphore).first ==
+            Result{ErrorModule::VI, 4});
+    REQUIRE(RequestWords(caller, service, 21, {}).first == Result{ErrorModule::VI, 5});
+    const std::array<u32, 1> notify{1};
+    REQUIRE(RequestWords(caller, service, 13, notify).first.IsSuccess());
 }

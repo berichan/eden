@@ -11,6 +11,7 @@
 #include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/k_transfer_memory.h"
 #include "core/hle/kernel/svc_results.h"
+#include "core/hle/service/gsv/display_session.h"
 #include "core/hle/service/gsv/gpu_session.h"
 #include "core/hle/service/gsv/syncpt_session.h"
 #include "core/hle/service/gsv/user_session.h"
@@ -50,6 +51,8 @@ UserSession::UserSession(Core::System& system, Kernel::KProcess* process, u64 ar
         {115, &UserSession::BootNativeMemoryManagement, "BootNativeMemoryManagement"},
         {201, &UserSession::CreateSyncptContext, "CreateSyncptContext"},
         {202, &UserSession::InitializeSyncptContext, "InitializeSyncptContext"},
+        {301, &UserSession::CreateDisplayContext, "CreateDisplayContext"},
+        {305, &UserSession::InitializeDisplayContext, "InitializeDisplayContext"},
         {401, &UserSession::CreateGpuContext, "CreateGpuContext"},
         {402, &UserSession::InitializeGpuContext, "InitializeGpuContext"},
         {497, &UserSession::CreateGpuSessionWithRemoteMemory, "CreateGpuSessionWithRemoteMemory"},
@@ -220,6 +223,38 @@ void UserSession::InitializeGpuContext(HLERequestContext& ctx) {
         return;
     }
     Reply(ctx, m_gpu_session ? m_gpu_session->InitializeContext() : Kernel::ResultInvalidState);
+}
+
+void UserSession::CreateDisplayContext(HLERequestContext& ctx) {
+    if (!HasInputData(ctx, 0)) {
+        Reply(ctx, Kernel::ResultInvalidSize);
+        return;
+    }
+    if (!m_context_created) {
+        Reply(ctx, Kernel::ResultInvalidState);
+        return;
+    }
+    if (!m_display_session) {
+        m_display_session = std::make_shared<DisplaySession>(system, m_process.GetPointerUnsafe());
+    }
+    Reply(ctx, ResultSuccess);
+}
+
+void UserSession::InitializeDisplayContext(HLERequestContext& ctx) {
+    const auto result = [&]() -> Result {
+        R_UNLESS(HasInputData(ctx, sizeof(u64)), Kernel::ResultInvalidSize);
+        R_UNLESS(m_display_session && !m_display_initialized, Kernel::ResultInvalidState);
+        IPC::RequestParser rp{ctx};
+        const auto version = rp.Pop<u64>();
+        R_UNLESS(version == 0x300010000ULL, Kernel::ResultNotImplemented);
+        R_TRY(ctx.TryAddCopyInterface(m_display_session));
+        m_display_initialized = true;
+        LOG_DEBUG(Service, "Native display session initialized: aruid={:#x}, version={:#x}",
+                  m_aruid, version);
+        R_SUCCEED();
+    }();
+    IPC::ResponseBuilder rb{ctx, 2, result.IsSuccess() ? 1U : 0U};
+    rb.Push(result);
 }
 
 void UserSession::CreateSyncptContext(HLERequestContext& ctx) {
