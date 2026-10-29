@@ -26,6 +26,7 @@ public:
                     std::span<u8> inline_output) override;
     void OnOpen(NvCore::SessionId session_id, DeviceFD fd) override;
     void OnClose(DeviceFD fd) override;
+    Kernel::KEvent* QueryEvent(u32 event_id) override;
 
 private:
     NvCore::NativeGpuChannels& channels;

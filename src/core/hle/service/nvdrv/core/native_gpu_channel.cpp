@@ -7,6 +7,8 @@
 #include <stdexcept>
 #include "common/assert.h"
 #include "core/hle/service/nvdrv/core/native_gpu_channel.h"
+#include "core/hle/service/nvdrv/core/native_gpu_error_notifier.h"
+#include "video_core/control/native_gpu_context.h"
 #include "video_core/host1x/syncpoint_shim.h"
 #include "video_core/memory_manager.h"
 
@@ -81,10 +83,39 @@ void NativeGpuSchedulingGroup::Detach(u32 subcontext) {
     --channel_count;
 }
 
+NvResult NativeGpuSchedulingGroup::AcquireGraphicsContext(
+    std::shared_ptr<Tegra::Control::NativeGpuGraphicsContext>* out_context, u32 subcontext,
+    const std::shared_ptr<Tegra::MemoryManager>& address_space) {
+    std::scoped_lock lock{mutex};
+    if (subcontext >= MaxSubcontexts || !runlist || *runlist != 0 ||
+        !subcontexts[subcontext].channel_count ||
+        subcontexts[subcontext].address_space != address_space.get()) {
+        return NvResult::BadParameter;
+    }
+    const auto existing = graphics_contexts.find(address_space.get());
+    if (existing != graphics_contexts.end()) {
+        *out_context = existing->second;
+        return NvResult::Success;
+    }
+    try {
+        auto state = graphics_state ? graphics_state
+                                    : std::make_shared<Tegra::Control::AmpereGraphicsState>();
+        auto context =
+            std::make_shared<Tegra::Control::NativeGpuGraphicsContext>(state, address_space);
+        graphics_contexts.emplace(address_space.get(), context);
+        graphics_state = std::move(state);
+        *out_context = std::move(context);
+    } catch (const std::bad_alloc&) {
+        return NvResult::InsufficientMemory;
+    }
+    return NvResult::Success;
+}
+
 NativeGpuChannel::NativeGpuChannel(
     SessionId owner_, u32 runlist_,
     std::shared_ptr<Tegra::Host1x::SyncpointManager::Reservation> syncpoint_)
-    : owner{owner_}, runlist{runlist_}, syncpoint{std::move(syncpoint_)} {}
+    : owner{owner_}, runlist{runlist_}, syncpoint{std::move(syncpoint_)},
+      error_notifier{std::make_shared<NativeGpuErrorNotifier>()} {}
 
 NativeGpuChannel::~NativeGpuChannel() {
     if (group) {
@@ -134,6 +165,7 @@ NvResult NativeGpuChannel::UnbindGroup(const std::shared_ptr<NativeGpuScheduling
         return NvResult::BadParameter;
     }
     group->Detach(subcontext);
+    graphics_context.reset();
     group.reset();
     subcontext = 0;
     return NvResult::Success;
@@ -159,8 +191,80 @@ std::shared_ptr<const NativeGpuChannel::CommandRing> NativeGpuChannel::GetComman
     return command_ring;
 }
 
+std::shared_ptr<const Tegra::Control::NativeGpuGraphicsContext>
+NativeGpuChannel::GetGraphicsContext() const {
+    std::scoped_lock lock{mutex};
+    return graphics_context;
+}
+
+const std::shared_ptr<NativeGpuErrorNotifier>& NativeGpuChannel::GetErrorNotifier() const {
+    return error_notifier;
+}
+
+std::optional<u32> NativeGpuChannel::GetTimeout() const {
+    std::scoped_lock lock{mutex};
+    return timeout;
+}
+
+NvResult NativeGpuChannel::SetTimeout(u32 timeout_) {
+    std::scoped_lock lock{mutex};
+    if (!open) {
+        return NvResult::InvalidState;
+    }
+    timeout = timeout_;
+    return NvResult::Success;
+}
+
+NvResult NativeGpuChannel::AllocateObjectContext(u32 class_id, u32 flags) {
+    if (class_id != Tegra::Control::AmpereGraphicsState::ClassId) {
+        switch (class_id) {
+        case 0x902d:
+        case 0xa140:
+        case 0xc7c0:
+        case 0xc76f:
+        case 0xc7b5:
+            return NvResult::NotSupported;
+        default:
+            return NvResult::BadParameter;
+        }
+    }
+    // Nonzero flags request preemption modes that need additional execution state.
+    if (flags != 0) {
+        return NvResult::NotSupported;
+    }
+    std::scoped_lock lock{mutex};
+    if (!open || !address_space || !group) {
+        return NvResult::InvalidState;
+    }
+    if (runlist != 0) {
+        return NvResult::BadParameter;
+    }
+    if (graphics_context) {
+        return NvResult::Success;
+    }
+    return group->AcquireGraphicsContext(&graphics_context, subcontext, address_space);
+}
+
 u32 NativeGpuChannel::GetChannelIndex() const {
     return syncpoint->GetId() - Tegra::Host1x::SyncpointManager::NativeChannelSyncpointBase;
+}
+
+NvResult NativeGpuChannel::SetClientData(u64 data) {
+    std::scoped_lock lock{mutex};
+    if (!open) {
+        return NvResult::InvalidState;
+    }
+    client_data = data;
+    return NvResult::Success;
+}
+
+NvResult NativeGpuChannel::GetClientData(u64* out_data) const {
+    std::scoped_lock lock{mutex};
+    if (!open) {
+        return NvResult::InvalidState;
+    }
+    *out_data = client_data;
+    return NvResult::Success;
 }
 
 NvResult NativeGpuChannel::QuerySyncpoint(u64* out_address, NvFence* out_fence,
@@ -235,6 +339,27 @@ NativeGpuChannels::~NativeGpuChannels() {
     for (const auto& [fd, channel] : channels) {
         channel->Close();
     }
+}
+
+NvResult NativeGpuChannels::AllocateObjectContext(DeviceFD fd, SessionId owner, u32 class_id,
+                                                  u32 flags) {
+    const auto channel = Get(fd, owner);
+    return channel ? channel->AllocateObjectContext(class_id, flags) : NvResult::BadParameter;
+}
+
+NvResult NativeGpuChannels::SetClientData(DeviceFD fd, SessionId owner, u64 data) {
+    const auto channel = Get(fd, owner);
+    return channel ? channel->SetClientData(data) : NvResult::BadParameter;
+}
+
+NvResult NativeGpuChannels::SetTimeout(DeviceFD fd, SessionId owner, u32 timeout) {
+    const auto channel = Get(fd, owner);
+    return channel ? channel->SetTimeout(timeout) : NvResult::BadParameter;
+}
+
+NvResult NativeGpuChannels::GetClientData(u64* out_data, DeviceFD fd, SessionId owner) const {
+    const auto channel = Get(fd, owner);
+    return channel ? channel->GetClientData(out_data) : NvResult::BadParameter;
 }
 
 NvResult NativeGpuChannels::Allocate(DeviceFD fd, SessionId owner, u32 requested_runlist) {
