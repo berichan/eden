@@ -12,6 +12,7 @@
 #include "core/hle/kernel/k_event.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/k_readable_event.h"
+#include "core/hle/kernel/svc_results.h"
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/nvdrv/nvdata.h"
 #include "core/hle/service/nvdrv/nvdrv.h"
@@ -44,6 +45,9 @@ void NVDRV::Open(HLERequestContext& ctx) {
     }
 
     DeviceFD fd = nvdrv->Open(device_name, session_id);
+    if (m_native_process.IsNotNull() && fd != INVALID_NVDRV_FD) {
+        m_owned_fds.insert(fd);
+    }
 
     rb.Push<DeviceFD>(fd);
     rb.PushEnum(fd != INVALID_NVDRV_FD ? NvResult::Success : NvResult::FileOperationFailed);
@@ -55,11 +59,20 @@ void NVDRV::ServiceError(HLERequestContext& ctx, NvResult result) {
     rb.PushEnum(result);
 }
 
+bool NVDRV::CanAccessDevice(DeviceFD fd) const {
+    return m_native_process.IsNull() || m_owned_fds.contains(fd);
+}
+
 void NVDRV::Ioctl1(HLERequestContext& ctx) {
     IPC::RequestParser rp{ctx};
     const auto fd = rp.Pop<DeviceFD>();
     const auto command = rp.PopRaw<Ioctl>();
     LOG_DEBUG(Service_NVDRV, "called fd={}, ioctl={:#08x}", fd, command.raw);
+
+    if (!CanAccessDevice(fd)) {
+        ServiceError(ctx, NvResult::AccessDenied);
+        return;
+    }
 
     if (!is_initialized) {
         ServiceError(ctx, NvResult::NotInitialized);
@@ -87,6 +100,11 @@ void NVDRV::Ioctl2(HLERequestContext& ctx) {
     const auto command = rp.PopRaw<Ioctl>();
     LOG_DEBUG(Service_NVDRV, "called fd={}, ioctl={:#08x}", fd, command.raw);
 
+    if (!CanAccessDevice(fd)) {
+        ServiceError(ctx, NvResult::AccessDenied);
+        return;
+    }
+
     if (!is_initialized) {
         ServiceError(ctx, NvResult::NotInitialized);
         LOG_ERROR(Service_NVDRV, "NvServices is not initialized!");
@@ -113,6 +131,11 @@ void NVDRV::Ioctl3(HLERequestContext& ctx) {
     const auto fd = rp.Pop<DeviceFD>();
     const auto command = rp.PopRaw<Ioctl>();
     LOG_DEBUG(Service_NVDRV, "called fd={}, ioctl={:#08x}", fd, command.raw);
+
+    if (!CanAccessDevice(fd)) {
+        ServiceError(ctx, NvResult::AccessDenied);
+        return;
+    }
 
     if (!is_initialized) {
         ServiceError(ctx, NvResult::NotInitialized);
@@ -147,7 +170,14 @@ void NVDRV::Close(HLERequestContext& ctx) {
 
     IPC::RequestParser rp{ctx};
     const auto fd = rp.Pop<DeviceFD>();
+    if (!CanAccessDevice(fd)) {
+        ServiceError(ctx, NvResult::AccessDenied);
+        return;
+    }
     const auto result = nvdrv->Close(fd);
+    if (result == NvResult::Success) {
+        m_owned_fds.erase(fd);
+    }
 
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
@@ -185,6 +215,11 @@ void NVDRV::QueryEvent(HLERequestContext& ctx) {
     IPC::RequestParser rp{ctx};
     const auto fd = rp.Pop<DeviceFD>();
     const auto event_id = rp.Pop<u32>();
+
+    if (!CanAccessDevice(fd)) {
+        ServiceError(ctx, NvResult::AccessDenied);
+        return;
+    }
 
     if (!is_initialized) {
         ServiceError(ctx, NvResult::NotInitialized);
@@ -243,8 +278,40 @@ void NVDRV::DumpGraphicsMemoryInfo(HLERequestContext& ctx) {
     rb.Push(ResultSuccess);
 }
 
-NVDRV::NVDRV(Core::System& system_, std::shared_ptr<Module> nvdrv_, const char* name)
-    : ServiceFramework{system_, name}, nvdrv{std::move(nvdrv_)} {
+void NVDRV::SetConfiguration(HLERequestContext& ctx) {
+    IPC::RequestParser rp{ctx};
+    const auto configuration = rp.Pop<u64>();
+    IPC::ResponseBuilder rb{ctx, 2};
+    if ((configuration & ~u64{1}) != 0) {
+        rb.Push(Kernel::ResultNotImplemented);
+        return;
+    }
+    m_configuration = configuration;
+    LOG_DEBUG(Service_NVDRV, "Native driver configuration={:#x}", m_configuration);
+    rb.Push(ResultSuccess);
+}
+
+NVDRV::NVDRV(Core::System& system_, std::shared_ptr<Module> nvdrv_, const char* name,
+             Kernel::KProcess* native_process)
+    : ServiceFramework{system_, name}, nvdrv{std::move(nvdrv_)},
+      m_native_process{system_.Kernel(), native_process} {
+    if (m_native_process.IsNotNull()) {
+        static const FunctionInfo native_functions[] = {
+            {0, &NVDRV::Open, "Open"},
+            {1, &NVDRV::Ioctl1, "Ioctl"},
+            {2, &NVDRV::Close, "Close"},
+            {4, &NVDRV::QueryEvent, "QueryEvent"},
+            {9, &NVDRV::DumpGraphicsMemoryInfo, "DumpStatus"},
+            {10, nullptr, "InitializeDevtools"},
+            {11, &NVDRV::Ioctl2, "Ioctl2"},
+            {12, &NVDRV::Ioctl3, "Ioctl3"},
+            {13, &NVDRV::SetConfiguration, "SetConfiguration"},
+        };
+        RegisterHandlers(native_functions);
+        session_id = nvdrv->GetContainer().OpenSession(native_process);
+        is_initialized = true;
+        return;
+    }
     static const FunctionInfo functions[] = {
         {0, &NVDRV::Open, "Open"},
         {1, &NVDRV::Ioctl1, "Ioctl"},
@@ -266,6 +333,9 @@ NVDRV::NVDRV(Core::System& system_, std::shared_ptr<Module> nvdrv_, const char* 
 }
 
 NVDRV::~NVDRV() {
+    for (const auto fd : m_owned_fds) {
+        nvdrv->Close(fd);
+    }
     if (is_initialized) {
         auto& container = nvdrv->GetContainer();
         container.CloseSession(session_id);

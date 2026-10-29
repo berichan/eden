@@ -11,8 +11,10 @@
 #include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/k_transfer_memory.h"
 #include "core/hle/kernel/svc_results.h"
+#include "core/hle/service/gsv/syncpt_session.h"
 #include "core/hle/service/gsv/user_session.h"
 #include "core/hle/service/ipc_helpers.h"
+#include "core/hle/service/nvdrv/nvdrv_interface.h"
 
 namespace Service::GSV {
 namespace {
@@ -44,6 +46,10 @@ UserSession::UserSession(Core::System& system, Kernel::KProcess* process, u64 ar
         {4, &UserSession::BootWithRemoteMemory, "BootWithRemoteMemory"},
         {11, &UserSession::SetCurrentProcessHandle, "SetCurrentProcessHandle"},
         {101, &UserSession::CreateContext, "CreateContext"},
+        {201, &UserSession::CreateSyncptContext, "CreateSyncptContext"},
+        {202, &UserSession::InitializeSyncptContext, "InitializeSyncptContext"},
+        {1402, &UserSession::CreateNvDrv2UserSessionWithRemoteMemory,
+         "CreateNvDrv2UserSessionWithRemoteMemory"},
     };
     RegisterHandlersTipc(functions);
 }
@@ -124,6 +130,44 @@ void UserSession::CreateContext(HLERequestContext& ctx) {
         R_SUCCEED();
     }();
     Reply(ctx, result);
+}
+
+void UserSession::CreateSyncptContext(HLERequestContext& ctx) {
+    if (!m_context_created) {
+        Reply(ctx, Kernel::ResultInvalidState);
+        return;
+    }
+    if (!m_syncpt) {
+        m_syncpt = std::make_shared<SyncptSession>(system);
+    }
+    Reply(ctx, ResultSuccess);
+}
+
+void UserSession::InitializeSyncptContext(HLERequestContext& ctx) {
+    const auto result = m_syncpt ? ctx.TryAddCopyInterface(m_syncpt) : Kernel::ResultInvalidState;
+    IPC::ResponseBuilder rb{ctx, 2, result.IsSuccess() ? 1U : 0U};
+    rb.Push(result);
+}
+
+void UserSession::CreateNvDrv2UserSessionWithRemoteMemory(HLERequestContext& ctx) {
+    const auto result = [&]() -> Result {
+        R_UNLESS(HasInputData(ctx, 0), Kernel::ResultInvalidSize);
+        R_UNLESS(m_context_created && m_work_memory_mode == WorkMemoryMode::Remote,
+                 Kernel::ResultInvalidState);
+        R_UNLESS(m_nvdrv_user.expired(), Result{0x200f3});
+        if (!m_nvdrv) {
+            // Keep native device state local to this graphics context, including across reopen.
+            m_nvdrv = std::make_shared<Nvidia::Module>(system);
+        }
+        auto user = std::make_shared<Nvidia::NVDRV>(system, m_nvdrv, "nvdrv2:user",
+                                                    m_process.GetPointerUnsafe());
+        R_TRY(ctx.TryAddCopyInterface(user));
+        m_nvdrv_user = user;
+        LOG_DEBUG(Service, "Native driver session created: aruid={:#x}", m_aruid);
+        R_SUCCEED();
+    }();
+    IPC::ResponseBuilder rb{ctx, 2, result.IsSuccess() ? 1U : 0U};
+    rb.Push(result);
 }
 
 } // namespace Service::GSV

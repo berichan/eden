@@ -7,8 +7,10 @@
 #pragma once
 
 #include <memory>
+#include <set>
 
 #include "common/scratch_buffer.h"
+#include "core/hle/kernel/k_auto_object.h"
 #include "core/hle/service/nvdrv/nvdrv.h"
 #include "core/hle/service/service.h"
 
@@ -16,7 +18,8 @@ namespace Service::Nvidia {
 
 class NVDRV final : public ServiceFramework<NVDRV> {
 public:
-    explicit NVDRV(Core::System& system_, std::shared_ptr<Module> nvdrv_, const char* name);
+    explicit NVDRV(Core::System& system_, std::shared_ptr<Module> nvdrv_, const char* name,
+                   Kernel::KProcess* native_process = nullptr);
     ~NVDRV() override;
 
     std::shared_ptr<Module> GetModule() const {
@@ -35,10 +38,15 @@ private:
     void SetGraphicsFirmwareMemoryMarginEnabled(HLERequestContext& ctx);
     void GetStatus(HLERequestContext& ctx);
     void DumpGraphicsMemoryInfo(HLERequestContext& ctx);
+    void SetConfiguration(HLERequestContext& ctx);
 
     void ServiceError(HLERequestContext& ctx, NvResult result);
+    bool CanAccessDevice(DeviceFD fd) const;
 
     std::shared_ptr<Module> nvdrv;
+    Kernel::KScopedAutoObject<Kernel::KProcess> m_native_process;
+    std::set<DeviceFD> m_owned_fds;
+    u64 m_configuration{};
 
     u64 pid{};
     bool is_initialized{};

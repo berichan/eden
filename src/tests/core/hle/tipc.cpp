@@ -3,12 +3,14 @@
 
 #include <array>
 #include <cstring>
+#include <utility>
 #include <catch2/catch_test_macros.hpp>
 #include "core/core.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/kernel.h"
 #include "core/hle/kernel/svc_results.h"
+#include "core/hle/service/gsv/syncpt_session.h"
 #include "core/hle/service/gsv/user_session.h"
 #include "core/hle/service/hle_ipc.h"
 #include "core/hle/service/ipc_helpers.h"
@@ -70,6 +72,28 @@ Result Request(Caller& caller, Service::GSV::UserSession& service, u32 command,
     Result result{};
     result.raw = ctx.CommandBuffer()[2];
     return result;
+}
+
+std::pair<Result, u32> SyncptRequest(Caller& caller, Service::GSV::SyncptSession& service,
+                                     u32 command, std::span<const u32> arguments) {
+    std::array<u32_le, IPC::COMMAND_BUFFER_LENGTH> data{};
+    size_t offset{};
+    IPC::CommandHeader header{};
+    header.type.Assign(static_cast<IPC::CommandType>(16 + command));
+    header.data_size.Assign(static_cast<u32>(arguments.size()));
+    Put(data, offset, header);
+    for (const auto argument : arguments) {
+        Put(data, offset, argument);
+    }
+    Service::HLERequestContext ctx{caller.system.Kernel(), caller.process.GetMemory(), nullptr,
+                                   &caller.thread};
+    REQUIRE(ctx.PopulateFromIncomingCommandBuffer(data.data()).IsSuccess());
+    service.InvokeRequestTipc(ctx);
+    IPC::CommandHeader output{};
+    std::memcpy(&output, ctx.CommandBuffer(), sizeof(output));
+    REQUIRE(output.enable_handle_descriptor == 0);
+    REQUIRE(output.data_size == ((command == 1) ? 2U : 1U));
+    return {Result{ctx.CommandBuffer()[2]}, ctx.CommandBuffer()[3]};
 }
 
 } // namespace
@@ -180,11 +204,75 @@ TEST_CASE("GSV creates a user context only after boot and process binding", "[co
     Service::GSV::UserSession service{caller.system, &caller.process, 0x55};
     const std::array<u64, 6> arguments{0x55, 0x8000000000000001, 0, 0, 0, 0};
     REQUIRE(Request(caller, service, 101, {}) == Kernel::ResultInvalidState);
+    REQUIRE(Request(caller, service, 1402, {}) == Kernel::ResultInvalidState);
+    REQUIRE(Request(caller, service, 201, {}) == Kernel::ResultInvalidState);
+    REQUIRE(Request(caller, service, 202, {}) == Kernel::ResultInvalidState);
     REQUIRE(Request(caller, service, 11, {}) == Kernel::ResultInvalidState);
     REQUIRE(Request(caller, service, 4, arguments).IsSuccess());
     REQUIRE(Request(caller, service, 4, arguments) == Kernel::ResultInvalidState);
     REQUIRE(Request(caller, service, 101, {}) == Kernel::ResultInvalidState);
+    REQUIRE(Request(caller, service, 1402, {}) == Kernel::ResultInvalidState);
     REQUIRE(Request(caller, service, 11, {}).IsSuccess());
     REQUIRE(Request(caller, service, 101, {}).IsSuccess());
     REQUIRE(Request(caller, service, 101, {}) == Kernel::ResultInvalidState);
+    REQUIRE(Request(caller, service, 201, {}).IsSuccess());
+    REQUIRE(Request(caller, service, 201, {}).IsSuccess());
+}
+
+TEST_CASE("GSV syncpoint ping echoes the complete value and rejects truncated data",
+          "[core][ipc][gsv]") {
+    Caller caller;
+    Service::GSV::SyncptSession service{caller.system};
+    for (const u32 words : {0U, 1U, 2U, 3U}) {
+        CAPTURE(words);
+        std::array<u32_le, IPC::COMMAND_BUFFER_LENGTH> data{};
+        size_t offset{};
+        IPC::CommandHeader header{};
+        header.type.Assign(static_cast<IPC::CommandType>(16));
+        header.data_size.Assign(words);
+        Put(data, offset, header);
+        Put(data, offset, u64{0xfedcba9876543210});
+        Service::HLERequestContext ctx{caller.system.Kernel(), caller.process.GetMemory(), nullptr,
+                                       &caller.thread};
+        REQUIRE(ctx.PopulateFromIncomingCommandBuffer(data.data()).IsSuccess());
+        service.InvokeRequestTipc(ctx);
+        IPC::CommandHeader output{};
+        std::memcpy(&output, ctx.CommandBuffer(), sizeof(output));
+        if (words == 2) {
+            REQUIRE(output.data_size == 3);
+            REQUIRE(ctx.CommandBuffer()[2] == ResultSuccess.raw);
+            REQUIRE(ctx.CommandBuffer()[3] == 0x76543210);
+            REQUIRE(ctx.CommandBuffer()[4] == 0xfedcba98);
+        } else {
+            REQUIRE(output.data_size == 1);
+            REQUIRE(ctx.CommandBuffer()[2] == Kernel::ResultInvalidSize.raw);
+        }
+    }
+}
+
+TEST_CASE("GSV syncpoint event pools validate initialization and index limits",
+          "[core][ipc][gsv]") {
+    Caller caller;
+    Service::GSV::SyncptSession service{caller.system};
+    const auto [result, count] = SyncptRequest(caller, service, 1, {});
+    REQUIRE(result.IsSuccess());
+    REQUIRE(count == 63);
+    const std::array<u32, 1> zero{0};
+    REQUIRE(SyncptRequest(caller, service, 22, zero).first.IsError());
+    REQUIRE(SyncptRequest(caller, service, 21, {}).first == Kernel::ResultInvalidSize);
+    const std::array<u32, 1> too_many{64};
+    REQUIRE(SyncptRequest(caller, service, 21, too_many).first == Result{0x80f3});
+    SECTION("Full application event pool") {
+        const std::array<u32, 1> max_events{63};
+        REQUIRE(SyncptRequest(caller, service, 21, max_events).first.IsSuccess());
+        REQUIRE(SyncptRequest(caller, service, 22, too_many).first == Result{0x100f3});
+        const std::array<u32, 1> overflow{0xffffffff};
+        REQUIRE(SyncptRequest(caller, service, 22, overflow).first == Result{0x100f3});
+    }
+    SECTION("Empty client pool retains only its internal slot") {
+        REQUIRE(SyncptRequest(caller, service, 21, zero).first.IsSuccess());
+        const std::array<u32, 1> first_client{1};
+        REQUIRE(SyncptRequest(caller, service, 22, first_client).first == Result{0x100f3});
+    }
+    REQUIRE(SyncptRequest(caller, service, 21, zero).first == Result{0x200f3});
 }
