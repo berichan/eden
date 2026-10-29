@@ -479,6 +479,14 @@ void KPageTableBase::Finalize() {
     // Finalize memory blocks.
     {
         KScopedLightLock lk(m_general_lock);
+        // GPU pins retain one additional reference to each physical page. Drop these before the
+        // ordinary mapping references, including pins left behind by a terminating process.
+        for (auto it = m_memory_block_manager.FindIterator(m_address_space_start);
+             it != m_memory_block_manager.end(); ++it) {
+            if (True(it->GetAttribute() & KMemoryAttribute::GpuShared)) {
+                this->CloseGpuMemoryReferences(it->GetAddress(), it->GetSize());
+            }
+        }
         m_memory_block_manager.Finalize(m_memory_block_slab_manager, std::move(BlockCallback));
     }
 
@@ -2099,9 +2107,12 @@ Result KPageTableBase::SetMemoryAttribute(KProcessAddress addr, size_t size, KMe
     KMemoryPermission old_perm;
     KMemoryAttribute old_attr;
     size_t num_allocator_blocks;
-    constexpr KMemoryAttribute AttributeTestMask =
-        ~(KMemoryAttribute::SetMask | KMemoryAttribute::DeviceShared |
-          KMemoryAttribute::GpuSharable);
+    // The native SDK changes cache policy after registering GPU memory. This does not release
+    // its physical references or alter permissions; permission locking still uses stricter checks.
+    const KMemoryAttribute AttributeTestMask = ~(
+        KMemoryAttribute::SetMask | KMemoryAttribute::DeviceShared | KMemoryAttribute::GpuSharable |
+        (False(mask & KMemoryAttribute::PermissionLocked) ? KMemoryAttribute::GpuShared
+                                                          : KMemoryAttribute::None));
     const KMemoryState state_test_mask =
         (True(mask & KMemoryAttribute::Uncached) ? KMemoryState::FlagCanChangeAttribute
                                                  : KMemoryState::None) |
@@ -2167,6 +2178,80 @@ Result KPageTableBase::SetGpuMemoryAttribute(KProcessAddress addr, size_t size,
     R_TRY(allocator_result);
     m_memory_block_manager.UpdateAttribute(std::addressof(allocator), addr, num_pages, mask, attr);
     R_SUCCEED();
+}
+
+Result KPageTableBase::LockGpuSharableMemory(Svc::lp64::PhysicalMemoryInfo* out,
+                                             KProcessAddress addr, size_t size) {
+    R_UNLESS(Common::IsAligned(GetInteger(addr), PageSize), ResultInvalidAddress);
+    R_UNLESS(size != 0 && Common::IsAligned(size, PageSize), ResultInvalidSize);
+    R_UNLESS(addr < addr + size && this->Contains(addr, size), ResultInvalidCurrentMemory);
+    KScopedLightLock lk(m_general_lock);
+
+    constexpr auto State = KMemoryState::FlagMapped | KMemoryState::FlagReferenceCounted |
+                           KMemoryState::FlagCanDeviceMap;
+    constexpr auto Attributes = KMemoryAttribute::GpuSharable | KMemoryAttribute::GpuShared |
+                                KMemoryAttribute::Locked | KMemoryAttribute::IpcLocked;
+    MemoryRange range;
+    R_TRY(this->GetContiguousMemoryRangeWithState(
+        &range, addr, size, State, State, KMemoryPermission::UserRead, KMemoryPermission::UserRead,
+        Attributes, KMemoryAttribute::GpuSharable));
+    ASSERT(range.IsHeap());
+
+    size_t blocks_needed{};
+    R_TRY(this->CheckMemoryStateContiguous(&blocks_needed, addr, range.GetSize(), State, State,
+                                           KMemoryPermission::UserRead, KMemoryPermission::UserRead,
+                                           Attributes, KMemoryAttribute::GpuSharable));
+    Result allocator_result;
+    KMemoryBlockManagerUpdateAllocator allocator(&allocator_result, m_memory_block_slab_manager,
+                                                 blocks_needed);
+    R_TRY(allocator_result);
+    range.Open(m_system.Kernel());
+    m_memory_block_manager.UpdateAttribute(&allocator, addr, range.GetSize() / PageSize,
+                                           KMemoryAttribute::GpuShared,
+                                           KMemoryAttribute::GpuShared);
+    *out = {.physical_address = GetInteger(range.GetAddress()),
+            .virtual_address = GetInteger(addr),
+            .size = range.GetSize()};
+    R_SUCCEED();
+}
+
+Result KPageTableBase::UnlockGpuSharableMemory(KProcessAddress addr, size_t size) {
+    R_UNLESS(Common::IsAligned(GetInteger(addr), PageSize), ResultInvalidAddress);
+    R_UNLESS(size != 0 && Common::IsAligned(size, PageSize), ResultInvalidSize);
+    R_UNLESS(addr < addr + size && this->Contains(addr, size), ResultInvalidCurrentMemory);
+    KScopedLightLock lk(m_general_lock);
+
+    constexpr auto State = KMemoryState::FlagMapped | KMemoryState::FlagReferenceCounted |
+                           KMemoryState::FlagCanDeviceMap;
+    constexpr auto Shared = KMemoryAttribute::GpuSharable | KMemoryAttribute::GpuShared;
+    size_t blocks_needed{};
+    R_TRY(this->CheckMemoryStateContiguous(&blocks_needed, addr, size, State, State,
+                                           KMemoryPermission::None, KMemoryPermission::None, Shared,
+                                           Shared));
+    Result allocator_result;
+    KMemoryBlockManagerUpdateAllocator allocator(&allocator_result, m_memory_block_slab_manager,
+                                                 blocks_needed);
+    R_TRY(allocator_result);
+    m_memory_block_manager.UpdateAttribute(&allocator, addr, size / PageSize,
+                                           KMemoryAttribute::GpuShared, KMemoryAttribute::None);
+    this->CloseGpuMemoryReferences(addr, size);
+    R_SUCCEED();
+}
+
+void KPageTableBase::CloseGpuMemoryReferences(KProcessAddress addr, size_t size) {
+    ASSERT(this->IsLockedByCurrentThread());
+    // The mapping remains locked throughout traversal, so releasing pins needs no page-group
+    // allocation and cannot fail partway through because a slab heap is exhausted.
+    while (size != 0) {
+        MemoryRange range;
+        R_ASSERT(this->GetContiguousMemoryRangeWithState(
+            &range, addr, size, KMemoryState::FlagReferenceCounted,
+            KMemoryState::FlagReferenceCounted, KMemoryPermission::None, KMemoryPermission::None,
+            KMemoryAttribute::None, KMemoryAttribute::None));
+        range.Close(m_system.Kernel());
+        addr += range.GetSize();
+        size -= range.GetSize();
+    }
 }
 
 Result KPageTableBase::SetHeapSize(KProcessAddress* out, size_t size) {

@@ -151,6 +151,33 @@ Result SetGpuMemoryAttribute(Core::System& system, u64 address, u64 size, u32 ma
     R_SUCCEED();
 }
 
+Result LockGpuSharableMemory(Core::System& system, lp64::PhysicalMemoryInfo* out_info,
+                             Handle process_handle, u64 address, u64 size) {
+    R_UNLESS(system.Kernel().GetCpuProfile() == Core::Hardware::CpuProfile::Ounce,
+             ResultNotImplemented);
+    R_UNLESS(Common::IsAligned(address, PageSize), ResultInvalidAddress);
+    R_UNLESS(size != 0 && Common::IsAligned(size, PageSize), ResultInvalidSize);
+    R_UNLESS(address < address + size, ResultInvalidCurrentMemory);
+    KScopedAutoObject process = GetCurrentProcess(system.Kernel())
+                                    .GetHandleTable()
+                                    .GetObject<KProcess>(system.Kernel(), process_handle);
+    R_UNLESS(process.IsNotNull(), ResultInvalidHandle);
+    R_RETURN(process->GetPageTable().LockGpuSharableMemory(out_info, address, size));
+}
+
+Result UnlockGpuSharableMemory(Core::System& system, Handle process_handle, u64 address, u64 size) {
+    R_UNLESS(system.Kernel().GetCpuProfile() == Core::Hardware::CpuProfile::Ounce,
+             ResultNotImplemented);
+    R_UNLESS(Common::IsAligned(address, PageSize), ResultInvalidAddress);
+    R_UNLESS(size != 0 && Common::IsAligned(size, PageSize), ResultInvalidSize);
+    R_UNLESS(address < address + size, ResultInvalidCurrentMemory);
+    KScopedAutoObject process = GetCurrentProcess(system.Kernel())
+                                    .GetHandleTable()
+                                    .GetObject<KProcess>(system.Kernel(), process_handle);
+    R_UNLESS(process.IsNotNull(), ResultInvalidHandle);
+    R_RETURN(process->GetPageTable().UnlockGpuSharableMemory(address, size));
+}
+
 /// Maps a memory range into a different range.
 Result MapMemory(Core::System& system, u64 dst_addr, u64 src_addr, u64 size) {
     LOG_TRACE(Kernel_SVC, "called, dst_addr={:#x}, src_addr={:#x}, size={:#x}", dst_addr,
@@ -196,6 +223,16 @@ Result SetGpuMemoryAttribute64(Core::System& system, uint64_t address, uint64_t 
     R_RETURN(SetGpuMemoryAttribute(system, address, size, mask, attr));
 }
 
+Result LockGpuSharableMemory64(Core::System& system, lp64::PhysicalMemoryInfo* out_info,
+                               Handle process_handle, uint64_t address, uint64_t size) {
+    R_RETURN(LockGpuSharableMemory(system, out_info, process_handle, address, size));
+}
+
+Result UnlockGpuSharableMemory64(Core::System& system, Handle process_handle, uint64_t address,
+                                 uint64_t size) {
+    R_RETURN(UnlockGpuSharableMemory(system, process_handle, address, size));
+}
+
 Result MapMemory64(Core::System& system, uint64_t dst_address, uint64_t src_address,
                    uint64_t size) {
     R_RETURN(MapMemory(system, dst_address, src_address, size));
@@ -219,6 +256,21 @@ Result SetMemoryAttribute64From32(Core::System& system, uint32_t address, uint32
 Result SetGpuMemoryAttribute64From32(Core::System& system, uint32_t address, uint32_t size,
                                      uint32_t mask, uint32_t attr) {
     R_RETURN(SetGpuMemoryAttribute(system, address, size, mask, attr));
+}
+
+Result LockGpuSharableMemory64From32(Core::System& system, ilp32::PhysicalMemoryInfo* out_info,
+                                     Handle process_handle, uint32_t address, uint32_t size) {
+    lp64::PhysicalMemoryInfo info{};
+    R_TRY(LockGpuSharableMemory(system, &info, process_handle, address, size));
+    *out_info = {.physical_address = info.physical_address,
+                 .virtual_address = static_cast<u32>(info.virtual_address),
+                 .size = static_cast<u32>(info.size)};
+    R_SUCCEED();
+}
+
+Result UnlockGpuSharableMemory64From32(Core::System& system, Handle process_handle,
+                                       uint32_t address, uint32_t size) {
+    R_RETURN(UnlockGpuSharableMemory(system, process_handle, address, size));
 }
 
 Result MapMemory64From32(Core::System& system, uint32_t dst_address, uint32_t src_address,

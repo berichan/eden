@@ -4,7 +4,9 @@
 #pragma once
 
 #include <array>
+#include <mutex>
 #include <optional>
+#include "common/assert.h"
 #include "common/common_types.h"
 #include "core/hle/result.h"
 
@@ -21,9 +23,11 @@ public:
         u64 name;
         u64 memory_budget;
         u64 debug_label;
+        u32 memory_references{};
     };
 
     Result Create(u8* out_id, u64 name, u64 memory_budget, u64 debug_label) {
+        const std::scoped_lock lock{m_mutex};
         R_UNLESS(name != 0, InvalidArgument);
         for (size_t index = 0; index < m_devices.size(); ++index) {
             if (!m_devices[index]) {
@@ -36,17 +40,36 @@ public:
     }
 
     Result Destroy(u8 id) {
+        const std::scoped_lock lock{m_mutex};
         R_UNLESS(id < m_devices.size(), InvalidArgument);
         R_UNLESS(m_devices[id], InvalidDevice);
+        R_UNLESS(m_devices[id]->memory_references == 0, InvalidDevice);
         m_devices[id].reset();
         R_SUCCEED();
     }
 
-    const Device* Get(u8 id) const {
-        return id < m_devices.size() && m_devices[id] ? &*m_devices[id] : nullptr;
+    std::optional<Device> Get(u8 id) const {
+        const std::scoped_lock lock{m_mutex};
+        return id < m_devices.size() ? m_devices[id] : std::nullopt;
+    }
+
+    Result RetainMemory(u8 id) {
+        const std::scoped_lock lock{m_mutex};
+        R_UNLESS(id < m_devices.size(), InvalidArgument);
+        R_UNLESS(m_devices[id], InvalidDevice);
+        R_UNLESS(m_devices[id]->memory_references != UINT32_MAX, OutOfDevices);
+        ++m_devices[id]->memory_references;
+        R_SUCCEED();
+    }
+
+    void ReleaseMemory(u8 id) {
+        const std::scoped_lock lock{m_mutex};
+        ASSERT(id < m_devices.size() && m_devices[id] && m_devices[id]->memory_references != 0);
+        --m_devices[id]->memory_references;
     }
 
 private:
+    mutable std::mutex m_mutex;
     std::array<std::optional<Device>, Capacity> m_devices;
 };
 

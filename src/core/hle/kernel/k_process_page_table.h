@@ -73,6 +73,15 @@ public:
         R_RETURN(m_page_table.SetHeapSize(out, size));
     }
 
+    Result LockGpuSharableMemory(Svc::lp64::PhysicalMemoryInfo* out, KProcessAddress addr,
+                                 size_t size) {
+        R_RETURN(m_page_table.LockGpuSharableMemory(out, addr, size));
+    }
+
+    Result UnlockGpuSharableMemory(KProcessAddress addr, size_t size) {
+        R_RETURN(m_page_table.UnlockGpuSharableMemory(addr, size));
+    }
+
     Result SetMaxHeapSize(size_t size) {
         R_RETURN(m_page_table.SetMaxHeapSize(size));
     }

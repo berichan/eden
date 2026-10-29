@@ -445,6 +445,7 @@ private:
                         const KPageGroup& pg);
 
     Result MakePageGroup(KPageGroup& pg, KProcessAddress addr, size_t num_pages);
+    void CloseGpuMemoryReferences(KProcessAddress addr, size_t size);
     bool IsValidPageGroup(const KPageGroup& pg, KProcessAddress addr, size_t num_pages);
 
     Result GetContiguousMemoryRangeWithState(MemoryRange* out, KProcessAddress address, size_t size,
@@ -510,6 +511,9 @@ public:
                               KMemoryAttribute attr);
     Result SetGpuMemoryAttribute(KProcessAddress addr, size_t size, KMemoryAttribute mask,
                                  KMemoryAttribute attr);
+    Result LockGpuSharableMemory(Svc::lp64::PhysicalMemoryInfo* out, KProcessAddress addr,
+                                 size_t size);
+    Result UnlockGpuSharableMemory(KProcessAddress addr, size_t size);
     Result SetHeapSize(KProcessAddress* out, size_t size);
     Result SetMaxHeapSize(size_t size);
     Result QueryInfo(KMemoryInfo* out_info, Svc::PageInfo* out_page_info,

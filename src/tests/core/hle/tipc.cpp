@@ -124,8 +124,8 @@ TEST_CASE("Native graphics device records retain metadata and enforce the eight-
     for (u8 index = 0; index < 8; ++index) {
         REQUIRE(devices.Create(&id, 0x74736574, u64{1} << (32 + index), index).IsSuccess());
         REQUIRE(id == index);
-        const auto* device = devices.Get(id);
-        REQUIRE(device != nullptr);
+        const auto device = devices.Get(id);
+        REQUIRE(device.has_value());
         REQUIRE(device->name == 0x74736574);
         REQUIRE(device->memory_budget == u64{1} << (32 + index));
         REQUIRE(device->debug_label == index);
@@ -135,7 +135,7 @@ TEST_CASE("Native graphics device records retain metadata and enforce the eight-
     REQUIRE(id == 0xff);
     REQUIRE(devices.Destroy(8) == Service::GSV::GraphicsDeviceTable::InvalidArgument);
     REQUIRE(devices.Destroy(3).IsSuccess());
-    REQUIRE(devices.Get(3) == nullptr);
+    REQUIRE_FALSE(devices.Get(3));
     REQUIRE(devices.Destroy(3) == Service::GSV::GraphicsDeviceTable::InvalidDevice);
     REQUIRE(devices.Create(&id, 2, 3, 4).IsSuccess());
     REQUIRE(id == 3);
@@ -170,6 +170,22 @@ TEST_CASE("GPU memory attribute SVC validates native profile, ranges and its dis
             ResultInvalidCombination);
     REQUIRE(Svc::SetGpuMemoryAttribute64(caller.system, 0x100000000ULL, ~u64{0xfff}, share, 0) ==
             ResultInvalidCurrentMemory);
+
+    Svc::lp64::PhysicalMemoryInfo info{1, 2, 3};
+    REQUIRE(Svc::LockGpuSharableMemory64(caller.system, &info, 0, 1, 0x1000) == ResultInvalidAddress);
+    REQUIRE(Svc::LockGpuSharableMemory64(caller.system, &info, 0, 0x1000, 0) == ResultInvalidSize);
+    REQUIRE(Svc::LockGpuSharableMemory64(caller.system, &info, 0, ~u64{0xfff}, 0x2000) ==
+            ResultInvalidCurrentMemory);
+    REQUIRE(info.physical_address == 1);
+    REQUIRE(info.virtual_address == 2);
+    REQUIRE(info.size == 3);
+    REQUIRE(Svc::UnlockGpuSharableMemory64(caller.system, 0, 1, 0x1000) == ResultInvalidAddress);
+    REQUIRE(Svc::UnlockGpuSharableMemory64(caller.system, 0, 0x1000, 0) == ResultInvalidSize);
+    REQUIRE(Svc::UnlockGpuSharableMemory64(caller.system, 0, ~u64{0xfff}, 0x2000) ==
+            ResultInvalidCurrentMemory);
+    caller.system.Kernel().SetCpuProfile(Core::Hardware::CpuProfile::Nx);
+    REQUIRE(Svc::LockGpuSharableMemory64(caller.system, &info, 0, 0x1000, 0x1000) == ResultNotImplemented);
+    REQUIRE(Svc::UnlockGpuSharableMemory64(caller.system, 0, 0x1000, 0x1000) == ResultNotImplemented);
 }
 
 TEST_CASE("Native graphics device commands enforce initialization, packet sizes and lifetime",

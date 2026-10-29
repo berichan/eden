@@ -18,6 +18,8 @@ namespace Service::GSV {
 
 class GraphicsDeviceTable;
 class GpuAddressSpacePool;
+class GpuMemoryPool;
+class GpuUserEvents;
 
 class GpuSession final : public ServiceFramework<GpuSession> {
 public:
@@ -47,11 +49,11 @@ private:
     void GetGpuPartitionRange(HLERequestContext& ctx);
 
     Kernel::KScopedAutoObject<Kernel::KProcess> m_process;
-    KernelHelpers::ServiceContext m_service_context;
-    std::array<Kernel::KEvent*, 8> m_events{};
+    std::shared_ptr<GpuUserEvents> m_events;
     Kernel::KScopedAutoObject<Kernel::KClientSession> m_worker_client;
     std::shared_ptr<GraphicsDeviceTable> m_graphics_devices;
     std::shared_ptr<GpuAddressSpacePool> m_address_spaces;
+    std::shared_ptr<GpuMemoryPool> m_memory;
     Phase m_phase{Phase::SessionCreated};
 };
 

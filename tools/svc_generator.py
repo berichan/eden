@@ -136,6 +136,8 @@ SVCS = [
      [0x7F, "void CallSecureMonitor(SecureMonitorArguments args);"],
 
      [0x80, "Result SetGpuMemoryAttribute(Address address, Size size, uint32_t mask, uint32_t attr);"],
+     [0x81, "Result LockGpuSharableMemory(PhysicalMemoryInfo* out_info, Handle process_handle, Address address, Size size);"],
+     [0x82, "Result UnlockGpuSharableMemory(Handle process_handle, Address address, Size size);"],
 
      [0x90, "Result MapInsecureMemory(Address address, Size size);"],
      [0x91, "Result UnmapInsecureMemory(Address address, Size size);"],

@@ -138,6 +138,8 @@ Result GetProcessInfo(Core::System& system, int64_t* out_info, Handle process_ha
 Result CreateResourceLimit(Core::System& system, Handle* out_handle);
 Result SetResourceLimitLimitValue(Core::System& system, Handle resource_limit_handle, LimitableResource which, int64_t limit_value);
 Result SetGpuMemoryAttribute(Core::System& system, uint64_t address, uint64_t size, uint32_t mask, uint32_t attr);
+Result LockGpuSharableMemory(Core::System& system, lp64::PhysicalMemoryInfo* out_info, Handle process_handle, uint64_t address, uint64_t size);
+Result UnlockGpuSharableMemory(Core::System& system, Handle process_handle, uint64_t address, uint64_t size);
 Result MapInsecureMemory(Core::System& system, uint64_t address, uint64_t size);
 Result UnmapInsecureMemory(Core::System& system, uint64_t address, uint64_t size);
 
@@ -260,6 +262,8 @@ Result GetProcessInfo64From32(Core::System& system, int64_t* out_info, Handle pr
 Result CreateResourceLimit64From32(Core::System& system, Handle* out_handle);
 Result SetResourceLimitLimitValue64From32(Core::System& system, Handle resource_limit_handle, LimitableResource which, int64_t limit_value);
 Result SetGpuMemoryAttribute64From32(Core::System& system, uint32_t address, uint32_t size, uint32_t mask, uint32_t attr);
+Result LockGpuSharableMemory64From32(Core::System& system, ilp32::PhysicalMemoryInfo* out_info, Handle process_handle, uint32_t address, uint32_t size);
+Result UnlockGpuSharableMemory64From32(Core::System& system, Handle process_handle, uint32_t address, uint32_t size);
 Result MapInsecureMemory64From32(Core::System& system, uint32_t address, uint32_t size);
 Result UnmapInsecureMemory64From32(Core::System& system, uint32_t address, uint32_t size);
 
@@ -382,6 +386,8 @@ Result GetProcessInfo64(Core::System& system, int64_t* out_info, Handle process_
 Result CreateResourceLimit64(Core::System& system, Handle* out_handle);
 Result SetResourceLimitLimitValue64(Core::System& system, Handle resource_limit_handle, LimitableResource which, int64_t limit_value);
 Result SetGpuMemoryAttribute64(Core::System& system, uint64_t address, uint64_t size, uint32_t mask, uint32_t attr);
+Result LockGpuSharableMemory64(Core::System& system, lp64::PhysicalMemoryInfo* out_info, Handle process_handle, uint64_t address, uint64_t size);
+Result UnlockGpuSharableMemory64(Core::System& system, Handle process_handle, uint64_t address, uint64_t size);
 Result MapInsecureMemory64(Core::System& system, uint64_t address, uint64_t size);
 Result UnmapInsecureMemory64(Core::System& system, uint64_t address, uint64_t size);
 
@@ -508,6 +514,8 @@ enum class SvcId : u32 {
     SetResourceLimitLimitValue = 0x7e,
     CallSecureMonitor = 0x7f,
     SetGpuMemoryAttribute = 0x80,
+    LockGpuSharableMemory = 0x81,
+    UnlockGpuSharableMemory = 0x82,
     MapInsecureMemory = 0x90,
     UnmapInsecureMemory = 0x91,
 };

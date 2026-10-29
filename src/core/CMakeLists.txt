@@ -699,6 +699,8 @@ add_library(core STATIC
     hle/service/gsv/display_session.h
     hle/service/gsv/gpu_session.cpp
     hle/service/gsv/gpu_session.h
+    hle/service/gsv/gpu_memory_pool.cpp
+    hle/service/gsv/gpu_memory_pool.h
     hle/service/gsv/gpu_address_space_pool.cpp
     hle/service/gsv/gpu_address_space_pool.h
     hle/service/gsv/graphics_device_table.h

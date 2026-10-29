@@ -11,6 +11,7 @@
 #include "core/hle/kernel/k_readable_event.h"
 #include "core/hle/kernel/svc_results.h"
 #include "core/hle/service/gsv/gpu_address_space_pool.h"
+#include "core/hle/service/gsv/gpu_memory_pool.h"
 #include "core/hle/service/gsv/gpu_session.h"
 #include "core/hle/service/gsv/graphics_device_table.h"
 #include "core/hle/service/ipc_helpers.h"
@@ -18,6 +19,20 @@
 #include "video_core/memory_manager.h"
 
 namespace Service::GSV {
+
+class GpuUserEvents {
+public:
+    explicit GpuUserEvents(Core::System& system) : m_context{system, "GpuUserEvents"} {}
+    ~GpuUserEvents() {
+        for (auto* event : events) {
+            m_context.CloseEvent(event);
+        }
+    }
+    KernelHelpers::ServiceContext m_context;
+    std::mutex mutex;
+    std::array<Kernel::KEvent*, 8> events{};
+};
+
 namespace {
 
 constexpr Result ResultAlreadyCreated{0x200f3};
@@ -34,21 +49,63 @@ void Reply(HLERequestContext& ctx, Result result) {
     rb.Push(result);
 }
 
-// Keep a separate native endpoint ready before publishing its handle. Memory and mapping
-// operations still need their own handlers; unregistered commands return protocol errors.
 class KUserWorkerSession final : public ServiceFramework<KUserWorkerSession> {
 public:
     explicit KUserWorkerSession(Core::System& system, Kernel::KProcess* process,
                                 std::shared_ptr<GraphicsDeviceTable> devices,
-                                std::shared_ptr<GpuAddressSpacePool> address_spaces)
+                                std::shared_ptr<GpuAddressSpacePool> address_spaces,
+                                std::shared_ptr<GpuMemoryPool> memory,
+                                std::shared_ptr<GpuUserEvents> events)
         : ServiceFramework{system, "GpuWorkerSession"}, m_process{system.Kernel(), process},
-          m_graphics_devices{std::move(devices)}, m_address_spaces{std::move(address_spaces)} {}
+          m_graphics_devices{std::move(devices)}, m_address_spaces{std::move(address_spaces)},
+          m_memory{std::move(memory)}, m_events{std::move(events)} {
+        static const FunctionInfo functions[] = {
+            {101, &KUserWorkerSession::RegisterMemory, "RegisterMemory"},
+            {102, &KUserWorkerSession::UnregisterMemory, "UnregisterMemory"},
+        };
+        RegisterHandlersTipc(functions);
+    }
     ~KUserWorkerSession() override = default;
 
 private:
+    void RegisterMemory(HLERequestContext& ctx) {
+        u32 handle{};
+        const auto result = [&]() -> Result {
+            R_UNLESS(HasInputWords(ctx, 6), Kernel::ResultInvalidSize);
+            IPC::RequestParser rp{ctx};
+            const auto address = rp.Pop<u64>();
+            const auto last = rp.Pop<u64>();
+            const auto flags = static_cast<u8>(rp.Pop<u32>());
+            const auto device_id = static_cast<u8>(rp.Pop<u32>());
+            R_RETURN(m_memory->Register(&handle, address, last, flags, device_id));
+        }();
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(result);
+        rb.Push(handle);
+    }
+
+    void UnregisterMemory(HLERequestContext& ctx) {
+        const auto result = [&]() -> Result {
+            R_UNLESS(HasInputWords(ctx, 2), Kernel::ResultInvalidSize);
+            IPC::RequestParser rp{ctx};
+            const auto handle = rp.Pop<u32>();
+            const auto event_id = rp.Pop<u32>();
+            const std::scoped_lock lock{m_events->mutex};
+            R_UNLESS(event_id < m_events->events.size() && m_events->events[event_id] != nullptr,
+                     GraphicsDeviceTable::InvalidArgument);
+            R_TRY(m_memory->Unregister(handle));
+            // No native jobs can reference this allocation yet. Signal release only after its
+            // real physical pins and device reference have been dropped.
+            R_RETURN(m_events->events[event_id]->Signal(system.Kernel()));
+        }();
+        Reply(ctx, result);
+    }
+
     Kernel::KScopedAutoObject<Kernel::KProcess> m_process;
     std::shared_ptr<GraphicsDeviceTable> m_graphics_devices;
     std::shared_ptr<GpuAddressSpacePool> m_address_spaces;
+    std::shared_ptr<GpuMemoryPool> m_memory;
+    std::shared_ptr<GpuUserEvents> m_events;
 };
 
 } // namespace
@@ -56,10 +113,11 @@ private:
 GpuSession::GpuSession(Core::System& system, Kernel::KProcess* process,
                        std::shared_ptr<GpuAddressSpacePool> address_spaces)
     : ServiceFramework{system, "GsvGpuSession"}, m_process{system.Kernel(), process},
-      m_service_context{system, "GsvGpuSession"}, m_worker_client{system.Kernel()},
+      m_events{std::make_shared<GpuUserEvents>(system)}, m_worker_client{system.Kernel()},
       m_graphics_devices{std::make_shared<GraphicsDeviceTable>()},
       m_address_spaces{address_spaces ? std::move(address_spaces)
-                                      : std::make_shared<GpuAddressSpacePool>()} {
+                                      : std::make_shared<GpuAddressSpacePool>()},
+      m_memory{std::make_shared<GpuMemoryPool>(system.Kernel(), process, m_graphics_devices)} {
     static const FunctionInfo functions[] = {
         {11, &GpuSession::GetEventIdRange, "GetEventIdRange"},
         {12, &GpuSession::CreateEvent, "CreateEvent"},
@@ -75,11 +133,7 @@ GpuSession::GpuSession(Core::System& system, Kernel::KProcess* process,
     RegisterHandlersTipc(functions);
 }
 
-GpuSession::~GpuSession() {
-    for (auto* event : m_events) {
-        m_service_context.CloseEvent(event);
-    }
-}
+GpuSession::~GpuSession() = default;
 
 Result GpuSession::CreateContext() {
     const auto guard = LockService();
@@ -114,7 +168,7 @@ void GpuSession::GetEventIdRange(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
     rb.Push<u32>(0);
-    rb.Push<u32>(static_cast<u32>(m_events.size() - 1));
+    rb.Push<u32>(static_cast<u32>(m_events->events.size() - 1));
 }
 
 void GpuSession::CreateEvent(HLERequestContext& ctx) {
@@ -123,11 +177,12 @@ void GpuSession::CreateEvent(HLERequestContext& ctx) {
         R_UNLESS(m_phase == Phase::Initialized, Kernel::ResultInvalidState);
         IPC::RequestParser rp{ctx};
         const auto id = rp.Pop<u32>();
-        R_UNLESS(id < m_events.size(), Kernel::ResultInvalidArgument);
-        R_UNLESS(m_events[id] == nullptr, ResultAlreadyCreated);
-        auto* event = m_service_context.CreateEvent("GpuUserEvent");
+        const std::scoped_lock lock{m_events->mutex};
+        R_UNLESS(id < m_events->events.size(), Kernel::ResultInvalidArgument);
+        R_UNLESS(m_events->events[id] == nullptr, ResultAlreadyCreated);
+        auto* event = m_events->m_context.CreateEvent("GpuUserEvent");
         R_UNLESS(event != nullptr, Kernel::ResultOutOfResource);
-        m_events[id] = event;
+        m_events->events[id] = event;
         ctx.AddCopyObject(&event->GetReadableEvent());
         LOG_DEBUG(Service, "Native GPU event created: id={}", id);
         R_SUCCEED();
@@ -142,16 +197,19 @@ void GpuSession::RequestKUserWorkerSession(HLERequestContext& ctx) {
         R_UNLESS(m_phase == Phase::Initialized, Kernel::ResultInvalidState);
         IPC::RequestParser rp{ctx};
         const auto id = rp.Pop<u32>();
-        R_UNLESS(id < m_events.size() && m_events[id] != nullptr, Kernel::ResultInvalidArgument);
+        const std::scoped_lock lock{m_events->mutex};
+        R_UNLESS(id < m_events->events.size() && m_events->events[id] != nullptr,
+                 Kernel::ResultInvalidArgument);
         R_UNLESS(m_worker_client.IsNull(), ResultAlreadyCreated);
         Kernel::KClientSession* client{};
         R_TRY(ctx.CreateInterfaceSession(
             &client, std::make_shared<KUserWorkerSession>(system, m_process.GetPointerUnsafe(),
-                                                          m_graphics_devices, m_address_spaces)));
+                                                          m_graphics_devices, m_address_spaces,
+                                                          m_memory, m_events)));
         m_worker_client.SetObject(client);
         client->Close(system.Kernel());
         // Signal only after the actual worker endpoint has been registered and retained.
-        R_TRY(m_events[id]->Signal(system.Kernel()));
+        R_TRY(m_events->events[id]->Signal(system.Kernel()));
         LOG_DEBUG(Service, "Native GPU worker session ready: event_id={}", id);
         R_SUCCEED();
     }();
