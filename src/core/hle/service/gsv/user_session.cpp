@@ -11,6 +11,7 @@
 #include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/k_transfer_memory.h"
 #include "core/hle/kernel/svc_results.h"
+#include "core/hle/service/gsv/gpu_session.h"
 #include "core/hle/service/gsv/syncpt_session.h"
 #include "core/hle/service/gsv/user_session.h"
 #include "core/hle/service/ipc_helpers.h"
@@ -25,7 +26,7 @@ bool HasInputData(HLERequestContext& ctx, size_t size) {
     const size_t offset = ctx.GetDataPayloadOffset();
     const size_t words = header.data_size;
     return ctx.IsTipc() && offset <= IPC::COMMAND_BUFFER_LENGTH &&
-           words <= IPC::COMMAND_BUFFER_LENGTH - offset && size <= words * sizeof(u32);
+           words <= IPC::COMMAND_BUFFER_LENGTH - offset && size == words * sizeof(u32);
 }
 
 void Reply(HLERequestContext& ctx, Result result) {
@@ -46,8 +47,14 @@ UserSession::UserSession(Core::System& system, Kernel::KProcess* process, u64 ar
         {4, &UserSession::BootWithRemoteMemory, "BootWithRemoteMemory"},
         {11, &UserSession::SetCurrentProcessHandle, "SetCurrentProcessHandle"},
         {101, &UserSession::CreateContext, "CreateContext"},
+        {115, &UserSession::BootNativeMemoryManagement, "BootNativeMemoryManagement"},
         {201, &UserSession::CreateSyncptContext, "CreateSyncptContext"},
         {202, &UserSession::InitializeSyncptContext, "InitializeSyncptContext"},
+        {401, &UserSession::CreateGpuContext, "CreateGpuContext"},
+        {402, &UserSession::InitializeGpuContext, "InitializeGpuContext"},
+        {497, &UserSession::CreateGpuSessionWithRemoteMemory, "CreateGpuSessionWithRemoteMemory"},
+        {1101, &UserSession::CreateGraphicsFrameContext, "CreateGraphicsFrameContext"},
+        {1102, &UserSession::InitializeGraphicsFrameContext, "InitializeGraphicsFrameContext"},
         {1402, &UserSession::CreateNvDrv2UserSessionWithRemoteMemory,
          "CreateNvDrv2UserSessionWithRemoteMemory"},
     };
@@ -132,7 +139,94 @@ void UserSession::CreateContext(HLERequestContext& ctx) {
     Reply(ctx, result);
 }
 
+void UserSession::BootNativeMemoryManagement(HLERequestContext& ctx) {
+    u64 modes{};
+    const auto result = [&]() -> Result {
+        R_UNLESS(HasInputData(ctx, sizeof(u64)), Kernel::ResultInvalidSize);
+        R_UNLESS(m_context_created, Kernel::ResultInvalidState);
+        IPC::RequestParser rp{ctx};
+        const auto requested_modes = rp.Pop<u64>();
+        R_UNLESS((requested_modes & ~u64{2}) == 0, Kernel::ResultNotImplemented);
+        // This negotiates the client's block mode. It does not allocate or map a memory region;
+        // mode bit 1 uses SVC 0x80 and separate native-memory creation commands for those steps.
+        modes = requested_modes;
+        LOG_DEBUG(Service, "GSV native memory modes negotiated: {:#x}", modes);
+        R_SUCCEED();
+    }();
+    IPC::ResponseBuilder rb{ctx, 4};
+    rb.Push(result);
+    rb.Push(modes);
+}
+
+void UserSession::CreateGraphicsFrameContext(HLERequestContext& ctx) {
+    if (!HasInputData(ctx, 0)) {
+        Reply(ctx, Kernel::ResultInvalidSize);
+        return;
+    }
+    if (!m_context_created) {
+        Reply(ctx, Kernel::ResultInvalidState);
+        return;
+    }
+    m_graphics_frame_created = true;
+    Reply(ctx, ResultSuccess);
+}
+
+void UserSession::InitializeGraphicsFrameContext(HLERequestContext& ctx) {
+    if (!HasInputData(ctx, 0)) {
+        Reply(ctx, Kernel::ResultInvalidSize);
+        return;
+    }
+    if (!m_graphics_frame_created) {
+        Reply(ctx, Kernel::ResultInvalidState);
+        return;
+    }
+    // No frame has been submitted yet. Frame scheduling and mode commands require separate
+    // implementations beyond this context's initialization.
+    m_graphics_frame_initialized = true;
+    LOG_DEBUG(Service, "GSV graphics frame context initialized: aruid={:#x}", m_aruid);
+    Reply(ctx, ResultSuccess);
+}
+
+void UserSession::CreateGpuSessionWithRemoteMemory(HLERequestContext& ctx) {
+    const auto result = [&]() -> Result {
+        R_UNLESS(HasInputData(ctx, sizeof(u64)), Kernel::ResultInvalidSize);
+        R_UNLESS(m_context_created && m_work_memory_mode == WorkMemoryMode::Remote,
+                 Kernel::ResultInvalidState);
+        IPC::RequestParser rp{ctx};
+        const auto version = rp.Pop<u64>();
+        R_UNLESS(version == 2 || version == 3, Kernel::ResultNotImplemented);
+        R_UNLESS(!m_gpu_session, Result{0x200f3});
+        auto gpu = std::make_shared<GpuSession>(system, m_process.GetPointerUnsafe());
+        R_TRY(ctx.TryAddCopyInterface(gpu));
+        m_gpu_session = std::move(gpu);
+        LOG_DEBUG(Service, "Native GPU session created: aruid={:#x}, version={}", m_aruid, version);
+        R_SUCCEED();
+    }();
+    IPC::ResponseBuilder rb{ctx, 2, result.IsSuccess() ? 1U : 0U};
+    rb.Push(result);
+}
+
+void UserSession::CreateGpuContext(HLERequestContext& ctx) {
+    if (!HasInputData(ctx, 0)) {
+        Reply(ctx, Kernel::ResultInvalidSize);
+        return;
+    }
+    Reply(ctx, m_gpu_session ? m_gpu_session->CreateContext() : Kernel::ResultInvalidState);
+}
+
+void UserSession::InitializeGpuContext(HLERequestContext& ctx) {
+    if (!HasInputData(ctx, 0)) {
+        Reply(ctx, Kernel::ResultInvalidSize);
+        return;
+    }
+    Reply(ctx, m_gpu_session ? m_gpu_session->InitializeContext() : Kernel::ResultInvalidState);
+}
+
 void UserSession::CreateSyncptContext(HLERequestContext& ctx) {
+    if (!HasInputData(ctx, 0)) {
+        Reply(ctx, Kernel::ResultInvalidSize);
+        return;
+    }
     if (!m_context_created) {
         Reply(ctx, Kernel::ResultInvalidState);
         return;
@@ -144,6 +238,10 @@ void UserSession::CreateSyncptContext(HLERequestContext& ctx) {
 }
 
 void UserSession::InitializeSyncptContext(HLERequestContext& ctx) {
+    if (!HasInputData(ctx, 0)) {
+        Reply(ctx, Kernel::ResultInvalidSize);
+        return;
+    }
     const auto result = m_syncpt ? ctx.TryAddCopyInterface(m_syncpt) : Kernel::ResultInvalidState;
     IPC::ResponseBuilder rb{ctx, 2, result.IsSuccess() ? 1U : 0U};
     rb.Push(result);

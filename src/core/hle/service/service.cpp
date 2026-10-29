@@ -73,6 +73,11 @@ void ServiceFrameworkBase::ReportUnimplementedFunction(HLERequestContext& ctx,
         LOG_WARNING(Service, "Using auto stub fallback!");
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(ResultSuccess);
+    } else {
+        const Result result = ctx.IsTipc() ? Result{ErrorModule::TIPC, 10}
+                                          : Result{ErrorModule::CMIF, 221};
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(result);
     }
 }
 

@@ -198,7 +198,9 @@ void HLERequestContext::ParseCommandBuffer(u32_le* src_cmdbuf, bool incoming) {
         // Padding to align to 16 bytes
         rp.AlignWithPadding();
 
-        if (GetManager()->IsDomain() &&
+        const auto request_manager = GetManager();
+        const bool is_domain = request_manager && request_manager->IsDomain();
+        if (is_domain &&
             ((command_header->type == IPC::CommandType::Request ||
               command_header->type == IPC::CommandType::RequestWithContext) ||
              !incoming)) {
@@ -207,7 +209,7 @@ void HLERequestContext::ParseCommandBuffer(u32_le* src_cmdbuf, bool incoming) {
             if (incoming || domain_message_header) {
                 domain_message_header = rp.PopRaw<IPC::DomainMessageHeader>();
             } else {
-                if (GetManager()->IsDomain()) {
+                if (is_domain) {
                     LOG_WARNING(IPC, "Domain request has no DomainMessageHeader!");
                 }
             }

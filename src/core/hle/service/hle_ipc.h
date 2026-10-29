@@ -348,6 +348,8 @@ public:
     void AddMoveInterface(SessionRequestHandlerPtr s);
     Result TryAddMoveInterface(SessionRequestHandlerPtr s);
     Result TryAddCopyInterface(SessionRequestHandlerPtr s);
+    // Creates a registered server and returns an owned client reference for a deferred reply.
+    Result CreateInterfaceSession(Kernel::KClientSession** out_session, SessionRequestHandlerPtr s);
 
     void AddCopyObject(Kernel::KAutoObject* object) {
         outgoing_copy_objects.emplace_back(object);
@@ -398,7 +400,6 @@ public:
 
 private:
     friend struct IPC::ResponseBuilder;
-    Result CreateInterfaceSession(Kernel::KClientSession** out_session, SessionRequestHandlerPtr s);
 
     void ParseCommandBuffer(u32_le* src_cmdbuf, bool incoming);
 

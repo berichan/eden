@@ -694,6 +694,8 @@ add_library(core STATIC
     hle/service/glue/time/worker.h
     hle/service/grc/grc.cpp
     hle/service/grc/grc.h
+    hle/service/gsv/gpu_session.cpp
+    hle/service/gsv/gpu_session.h
     hle/service/gsv/syncpt_session.cpp
     hle/service/gsv/syncpt_session.h
     hle/service/gsv/user_session.cpp

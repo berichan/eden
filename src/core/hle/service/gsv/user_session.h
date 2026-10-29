@@ -19,6 +19,7 @@ class NVDRV;
 namespace Service::GSV {
 
 class SyncptSession;
+class GpuSession;
 
 class UserSession final : public ServiceFramework<UserSession> {
 public:
@@ -36,6 +37,12 @@ private:
     void BootWithRemoteMemory(HLERequestContext& ctx);
     void SetCurrentProcessHandle(HLERequestContext& ctx);
     void CreateContext(HLERequestContext& ctx);
+    void BootNativeMemoryManagement(HLERequestContext& ctx);
+    void CreateGraphicsFrameContext(HLERequestContext& ctx);
+    void InitializeGraphicsFrameContext(HLERequestContext& ctx);
+    void CreateGpuSessionWithRemoteMemory(HLERequestContext& ctx);
+    void CreateGpuContext(HLERequestContext& ctx);
+    void InitializeGpuContext(HLERequestContext& ctx);
     void CreateSyncptContext(HLERequestContext& ctx);
     void InitializeSyncptContext(HLERequestContext& ctx);
     void CreateNvDrv2UserSessionWithRemoteMemory(HLERequestContext& ctx);
@@ -50,6 +57,9 @@ private:
     std::shared_ptr<Nvidia::Module> m_nvdrv;
     std::weak_ptr<Nvidia::NVDRV> m_nvdrv_user;
     std::shared_ptr<SyncptSession> m_syncpt;
+    std::shared_ptr<GpuSession> m_gpu_session;
+    bool m_graphics_frame_created{};
+    bool m_graphics_frame_initialized{};
 };
 
 } // namespace Service::GSV
