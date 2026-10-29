@@ -16,6 +16,7 @@
 #include "core/hle/service/gsv/graphics_device_table.h"
 #include "core/hle/service/ipc_helpers.h"
 #include "video_core/gpu.h"
+#include "video_core/host1x/host1x.h"
 #include "video_core/memory_manager.h"
 
 namespace Service::GSV {
@@ -62,6 +63,8 @@ public:
         static const FunctionInfo functions[] = {
             {101, &KUserWorkerSession::RegisterMemory, "RegisterMemory"},
             {102, &KUserWorkerSession::UnregisterMemory, "UnregisterMemory"},
+            {211, &KUserWorkerSession::MapMemory, "NormalMapGpuMemory4K"},
+            {213, &KUserWorkerSession::UnmapMemory, "NormalUnmapGpuMemory4K"},
         };
         RegisterHandlersTipc(functions);
     }
@@ -93,12 +96,64 @@ private:
             const std::scoped_lock lock{m_events->mutex};
             R_UNLESS(event_id < m_events->events.size() && m_events->events[event_id] != nullptr,
                      GraphicsDeviceTable::InvalidArgument);
-            R_TRY(m_memory->Unregister(handle));
-            // No native jobs can reference this allocation yet. Signal release only after its
-            // real physical pins and device reference have been dropped.
-            R_RETURN(m_events->events[event_id]->Signal(system.Kernel()));
+            R_RETURN(m_memory->Unregister(handle, m_events->events[event_id]));
         }();
         Reply(ctx, result);
+    }
+
+    void MapMemory(HLERequestContext& ctx) {
+        u8 kind{};
+        const auto result = [&]() -> Result {
+            R_UNLESS(HasInputWords(ctx, 16), Kernel::ResultInvalidSize);
+            IPC::RequestParser rp{ctx};
+            const auto address_space = rp.Pop<u32>();
+            const auto address = rp.Pop<u64>();
+            const auto last = rp.Pop<u64>();
+            const auto handle = rp.Pop<u32>();
+            const auto offset = rp.Pop<u64>();
+            GpuMemoryPool::MapOptions options;
+            options.permission = static_cast<u8>(rp.Pop<u32>());
+            options.cacheability = static_cast<u8>(rp.Pop<u32>());
+            options.kind = static_cast<u8>(rp.Pop<u32>());
+            options.compressed_kind = static_cast<u8>(rp.Pop<u32>());
+            options.raw_texture = static_cast<u8>(rp.Pop<u32>());
+            options.device_id = static_cast<u8>(rp.Pop<u32>());
+            options.sync = static_cast<u8>(rp.Pop<u32>());
+            const auto event_id = rp.Pop<u32>();
+            const std::scoped_lock lock{m_events->mutex};
+            R_UNLESS(event_id < m_events->events.size() && m_events->events[event_id],
+                     GraphicsDeviceTable::InvalidArgument);
+            R_TRY(m_memory->Map(&kind, *m_address_spaces, system.Host1x().MemoryManager(),
+                                address_space, address, last, handle, offset, options));
+            // Completion reports a mapping that is already visible through the canonical GMMU.
+            R_RETURN(m_events->events[event_id]->Signal(system.Kernel()));
+        }();
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(result);
+        rb.Push<u32>(kind);
+    }
+
+    void UnmapMemory(HLERequestContext& ctx) {
+        u64 unmapped{};
+        const auto result = [&]() -> Result {
+            R_UNLESS(HasInputWords(ctx, 7), Kernel::ResultInvalidSize);
+            IPC::RequestParser rp{ctx};
+            const auto address_space = rp.Pop<u32>();
+            const auto address = rp.Pop<u64>();
+            const auto last = rp.Pop<u64>();
+            const auto sync = static_cast<u8>(rp.Pop<u32>());
+            const auto event_id = rp.Pop<u32>();
+            R_UNLESS(sync <= 1, GraphicsDeviceTable::InvalidArgument);
+            const std::scoped_lock lock{m_events->mutex};
+            R_UNLESS(event_id < m_events->events.size() && m_events->events[event_id],
+                     GraphicsDeviceTable::InvalidArgument);
+            R_TRY(m_memory->Unmap(address_space, address, last));
+            unmapped = last - address + 1;
+            R_RETURN(m_events->events[event_id]->Signal(system.Kernel()));
+        }();
+        IPC::ResponseBuilder rb{ctx, 4};
+        rb.Push(result);
+        rb.Push<u64>(unmapped);
     }
 
     Kernel::KScopedAutoObject<Kernel::KProcess> m_process;

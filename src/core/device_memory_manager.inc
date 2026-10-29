@@ -205,10 +205,10 @@ void DeviceMemoryManager<Traits>::Free(DAddr start, size_t size) {
 template <typename Traits>
 void DeviceMemoryManager<Traits>::Map(DAddr address, VAddr virtual_address, size_t size, Asid asid,
                                       bool track) {
-    Core::Memory::Memory* process_memory = registered_processes[asid.id];
+    std::scoped_lock lk(mapping_guard);
+    Core::Memory::Memory* process_memory = GetProcessMemory(asid);
     size_t start_page_d = address >> Memory::YUZU_PAGEBITS;
     size_t num_pages = Common::AlignUp(size, Memory::YUZU_PAGESIZE) >> Memory::YUZU_PAGEBITS;
-    std::scoped_lock lk(mapping_guard);
 
     tracked_entries.CommitRegion(start_page_d, start_page_d + num_pages);
     for (size_t i = 0; i < num_pages; i++) {
@@ -273,7 +273,7 @@ void DeviceMemoryManager<Traits>::Unmap(DAddr address, size_t size) {
 template <typename Traits>
 void DeviceMemoryManager<Traits>::TrackContinuityImpl(DAddr address, VAddr virtual_address,
                                                       size_t size, Asid asid) {
-    Core::Memory::Memory* process_memory = registered_processes[asid.id];
+    Core::Memory::Memory* process_memory = GetProcessMemory(asid);
     size_t start_page_d = address >> Memory::YUZU_PAGEBITS;
     size_t num_pages = Common::AlignUp(size, Memory::YUZU_PAGESIZE) >> Memory::YUZU_PAGEBITS;
     uintptr_t last_ptr = 0;
@@ -517,6 +517,7 @@ void DeviceMemoryManager<Traits>::WriteBlockUnsafe(DAddr address, const void* sr
 
 template <typename Traits>
 Asid DeviceMemoryManager<Traits>::RegisterProcess(Memory::Memory* memory_device_inter) {
+    std::scoped_lock lk(process_guard);
     size_t new_id{};
     if (!id_pool.empty()) {
         new_id = id_pool.front();
@@ -531,6 +532,7 @@ Asid DeviceMemoryManager<Traits>::RegisterProcess(Memory::Memory* memory_device_
 
 template <typename Traits>
 void DeviceMemoryManager<Traits>::UnregisterProcess(Asid asid) {
+    std::scoped_lock lk(process_guard);
     registered_processes[asid.id] = nullptr;
     id_pool.push_front(asid.id);
 }
@@ -547,7 +549,7 @@ void DeviceMemoryManager<Traits>::UpdatePagesCachedCountNoLock(DAddr addr, size_
     const size_t page_end = Common::DivCeil(addr + size, Memory::YUZU_PAGESIZE);
     size_t page = addr >> Memory::YUZU_PAGEBITS;
     auto [asid, base_vaddress] = ExtractCPUBacking(page);
-    auto* memory_device_inter = registered_processes[asid.id];
+    auto* memory_device_inter = GetProcessMemory(asid);
     const auto release_pending = [&] {
         if (uncache_bytes > 0) {
             if (memory_device_inter != nullptr) {
@@ -577,7 +579,7 @@ void DeviceMemoryManager<Traits>::UpdatePagesCachedCountNoLock(DAddr addr, size_
 
         if (asid.id != asid_2.id) [[unlikely]] {
             release_pending();
-            memory_device_inter = registered_processes[asid_2.id];
+            memory_device_inter = GetProcessMemory(asid_2);
         }
 
         if (vpage != old_vpage + 1) [[unlikely]] {

@@ -187,6 +187,25 @@ GPUVAddr MemoryManager::Map(GPUVAddr gpu_addr, DAddr dev_addr, std::size_t size,
     return PageTableOp(gpu_addr, dev_addr, size, kind, EntryType::Mapped);
 }
 
+bool MemoryManager::MapIfFree(GPUVAddr gpu_addr, DAddr dev_addr, std::size_t size, PTEKind kind) {
+    std::scoped_lock lock{mapping_guard};
+    if (size == 0 || !Common::IsAligned(gpu_addr, page_size) ||
+        !Common::IsAligned(dev_addr, page_size) || !Common::IsAligned(size, page_size) ||
+        gpu_addr >= address_space_size || size > address_space_size - gpu_addr ||
+        dev_addr >= (1ULL << MaxwellDeviceMemoryManager::AS_BITS) ||
+        size > (1ULL << MaxwellDeviceMemoryManager::AS_BITS) - dev_addr ||
+        OverlapsSyncpointShim(gpu_addr, size)) {
+        return false;
+    }
+    for (auto address = gpu_addr; address < gpu_addr + size; address += page_size) {
+        if (GetEntry(address, true) != EntryType::Free ||
+            GetEntry(address, false) != EntryType::Free) {
+            return false;
+        }
+    }
+    return PageTableOp(gpu_addr, dev_addr, size, kind, EntryType::Mapped) == gpu_addr;
+}
+
 GPUVAddr MemoryManager::MapSparse(GPUVAddr gpu_addr, std::size_t size, bool is_big_pages) {
     std::scoped_lock lock{mapping_guard};
     if (OverlapsSyncpointShim(gpu_addr, size)) {

@@ -134,6 +134,7 @@ public:
 
     GPUVAddr Map(GPUVAddr gpu_addr, DAddr dev_addr, std::size_t size,
                  PTEKind kind = PTEKind::INVALID, bool is_big_pages = true);
+    bool MapIfFree(GPUVAddr gpu_addr, DAddr dev_addr, std::size_t size, PTEKind kind);
     GPUVAddr MapSparse(GPUVAddr gpu_addr, std::size_t size, bool is_big_pages = true);
     void Unmap(GPUVAddr gpu_addr, std::size_t size);
 

@@ -139,7 +139,7 @@ private:
     static constexpr size_t device_virtual_bits = Traits::device_virtual_bits;
     static constexpr size_t device_as_size = 1ULL << device_virtual_bits;
     static constexpr size_t physical_min_bits = 32;
-    static constexpr size_t physical_max_bits = 33;
+    static constexpr size_t physical_max_bits = 34;
     static constexpr size_t page_bits = 12;
     static constexpr size_t page_size = 1ULL << page_bits;
     static constexpr size_t page_mask = page_size - 1ULL;
@@ -185,10 +185,16 @@ private:
 
     std::deque<size_t> id_pool;
     std::deque<Memory::Memory*> registered_processes;
+    std::mutex process_guard;
+
+    Memory::Memory* GetProcessMemory(Asid asid) {
+        std::scoped_lock lock{process_guard};
+        return registered_processes.at(asid.id);
+    }
 
     // Memory protection management
 
-    static constexpr size_t guest_max_as_bits = 39;
+    static constexpr size_t guest_max_as_bits = 42;
     static constexpr size_t guest_as_size = 1ULL << guest_max_as_bits;
     static constexpr size_t guest_mask = guest_as_size - 1ULL;
     static constexpr size_t asid_start_bit = guest_max_as_bits;
