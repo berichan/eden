@@ -9,6 +9,7 @@
 #include "common/logging.h"
 #include "core/core.h"
 #include "shader_recompiler/exception.h"
+#include "video_core/control/native_compute.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/memory_manager.h"
@@ -29,6 +30,71 @@ KeplerCompute::KeplerCompute(MemoryManager& memory_manager_)
 
 KeplerCompute::~KeplerCompute() = default;
 
+void KeplerCompute::SetNativeContext(
+    std::shared_ptr<const Control::NativeGpuGraphicsContext> context) {
+    ASSERT(!context || context->GetAddressSpace().get() == &memory_manager);
+    method_sink.clear();
+    uploads.clear();
+    indirect_compute.reset();
+    native_compute =
+        context ? std::make_unique<Control::NativeCompute>(std::move(context)) : nullptr;
+    native_mode = false;
+    execution_mask.reset();
+    if (native_compute) {
+        execution_mask.set();
+    } else {
+        execution_mask[KEPLER_COMPUTE_REG_INDEX(exec_upload)] = true;
+        execution_mask[KEPLER_COMPUTE_REG_INDEX(data_upload)] = true;
+        execution_mask[KEPLER_COMPUTE_REG_INDEX(launch)] = true;
+    }
+}
+
+bool KeplerCompute::CallNativeMethod(u32 method, u32 value, bool last, std::stop_token stop_token) {
+    if (!native_compute) {
+        return false;
+    }
+    using Qmd = Control::NativeQmdScheduler;
+    struct HostContext {
+        KeplerCompute& owner;
+        std::stop_token stop_token;
+    } context{*this, stop_token};
+    const Control::NativeCompute::Host host{
+        {&context,
+         [](void*, const Qmd::Release& release) {
+             // Timestamped, wide-payload and reduction releases need their own adapter.
+             return release.SizeBytes() == 4 && !(release.flags & ((1U << 26) | (1U << 29)));
+         },
+         [](void* context, const Qmd::Descriptor& descriptor) {
+             return static_cast<HostContext*>(context)->owner.DispatchNativeCompute(descriptor);
+         },
+         [](void* context, const Qmd::Release& release) {
+             auto& self = static_cast<HostContext*>(context)->owner;
+             if (!self.rasterizer || !self.rasterizer->SynchronizeNativeWork()) {
+                 return false;
+             }
+             const u32 payload = static_cast<u32>(release.payload);
+             return self.memory_manager.WriteBlockChecked(
+                 release.address, {reinterpret_cast<const u8*>(&payload), sizeof(payload)});
+         },
+         [](void* context) {
+             return static_cast<HostContext*>(context)->stop_token.stop_requested();
+         }},
+        [](void* context) {
+            const auto& self = static_cast<HostContext*>(context)->owner;
+            return self.rasterizer && self.rasterizer->SynchronizeNativeWork();
+        },
+    };
+    return native_compute->CallMethod(method, value, last, host);
+}
+
+bool KeplerCompute::HasNativeMethodFailure() const {
+    return native_compute && native_compute->GetError() != Control::NativeCompute::Error::None;
+}
+
+bool KeplerCompute::HasPendingNativeMacro() const {
+    return native_compute && native_compute->HasPendingMacro();
+}
+
 void KeplerCompute::BindRasterizer(VideoCore::RasterizerInterface* rasterizer_) {
     rasterizer = rasterizer_;
     upload_state.BindRasterizer(rasterizer);
@@ -42,6 +108,10 @@ void KeplerCompute::ConsumeSinkImpl(Core::System& system) {
 }
 
 void KeplerCompute::CallMethod(Core::System& system, u32 method, u32 method_argument, bool is_last_call) {
+    if (native_compute) {
+        CallNativeMethod(method, method_argument, is_last_call);
+        return;
+    }
     ASSERT_MSG(method < Regs::NUM_REGS, "Invalid KeplerCompute register, increase the size of the Regs structure");
 
     regs.reg_array[method] = method_argument;
@@ -86,6 +156,14 @@ void KeplerCompute::CallMethod(Core::System& system, u32 method, u32 method_argu
 }
 
 void KeplerCompute::CallMultiMethod(Core::System& system, u32 method, const u32* base_start, u32 amount, u32 methods_pending) {
+    if (native_compute) {
+        for (u32 index = 0; index < amount; ++index) {
+            if (!CallNativeMethod(method, base_start[index], methods_pending - index <= 1)) {
+                break;
+            }
+        }
+        return;
+    }
     switch (method) {
     case KEPLER_COMPUTE_REG_INDEX(data_upload):
         upload_address = current_dma_segment;

@@ -8,8 +8,10 @@
 #include <catch2/catch_test_macros.hpp>
 #include "core/core.h"
 #include "core/device_memory.h"
+#include "video_core/control/native_compute.h"
 #include "video_core/control/native_gpu_context.h"
 #include "video_core/control/native_macro_processor.h"
+#include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/memory_manager.h"
@@ -641,4 +643,84 @@ TEST_CASE("Native macro calls latch their entry and forward finite instruction b
     REQUIRE(budget.CallMethod(0xe0b, 2, true, host.Bind(), 2) == Processor::Status::Failed);
     REQUIRE(budget.GetExecutionResult().error == Engine::Error::InstructionLimit);
     REQUIRE(host.writes.back() == std::pair<u32, u32>{0xd00, 3});
+}
+
+TEST_CASE("Native compute macros share uploaded programs and retain their own method state",
+          "[ipc][video_core]") {
+    Core::System system;
+    Core::DeviceMemory memory;
+    Tegra::MaxwellDeviceMemoryManager backing{memory};
+    auto space = std::make_shared<Tegra::MemoryManager>(system, backing, 32, 1ULL << 32, 16, 12);
+    auto state = std::make_shared<Tegra::Control::AmpereGraphicsState>();
+    auto context = std::make_shared<Tegra::Control::NativeGpuGraphicsContext>(state, space);
+    Processor uploader{state};
+    MethodHost upload_host;
+    Upload(uploader, SumProgram(0xd00), upload_host);
+    using Compute = Tegra::Control::NativeCompute;
+    Compute first{context}, second{context};
+    REQUIRE(first.CallMethod(0xe0a, 8, false, {}));
+    REQUIRE(first.HasPendingMacro());
+    REQUIRE(second.CallMethod(0xe0a, 3, false, {}));
+    REQUIRE(first.CallMethod(0xe0b, 9, true, {}));
+    REQUIRE(first.ReadRegister(0xd00) == 17);
+    REQUIRE(second.ReadRegister(0xd00) == 0);
+    REQUIRE(second.CallMethod(0xe0b, 4, true, {}));
+    REQUIRE(second.ReadRegister(0xd00) == 7);
+    REQUIRE(first.ReadRegister(0xd00) == 17);
+    REQUIRE(first.CallMethod(0xe0a, 1, false, {}));
+    REQUIRE_FALSE(first.CallMethod(0xb0, 3, true, {}));
+    REQUIRE(first.GetError() == Compute::Error::MacroFailed);
+    REQUIRE_FALSE(context->HasQmdFailure());
+    REQUIRE_FALSE(first.CallMethod(0xe0b, 1, true, {}));
+}
+
+TEST_CASE("Native compute methods fail unsupported actions without invoking legacy compute",
+          "[ipc][video_core]") {
+    Core::System system;
+    Core::DeviceMemory memory;
+    Tegra::MaxwellDeviceMemoryManager backing{memory};
+    auto space = std::make_shared<Tegra::MemoryManager>(system, backing, 32, 1ULL << 32, 16, 12);
+    auto state = std::make_shared<Tegra::Control::AmpereGraphicsState>();
+    auto context = std::make_shared<Tegra::Control::NativeGpuGraphicsContext>(state, space);
+    Tegra::Engines::KeplerCompute compute{*space};
+    compute.SetNativeContext(context);
+    REQUIRE(compute.execution_mask[0xad]);
+    REQUIRE(compute.CallNativeMethod(0xad, 0x10, true));
+    REQUIRE_FALSE(compute.CallNativeMethod(0xb0, 3, true));
+    REQUIRE(compute.HasNativeMethodFailure());
+    REQUIRE(context->HasQmdFailure());
+    REQUIRE_FALSE(compute.CallNativeMethod(0xd00, 12, true));
+    compute.SetNativeContext(nullptr);
+    REQUIRE_FALSE(compute.HasNativeMethodFailure());
+    REQUIRE_FALSE(compute.execution_mask[0xad]);
+    REQUIRE(compute.execution_mask[KEPLER_COMPUTE_REG_INDEX(launch)]);
+    using Compute = Tegra::Control::NativeCompute;
+    for (const u32 method : {0xaeU, 0x6cU, 0x6dU, 0x157U, 0x16aU}) {
+        Compute rejected{context};
+        REQUIRE_FALSE(rejected.CallMethod(method, 1, true, {}));
+        REQUIRE(rejected.GetError() == Compute::Error::UnsupportedMethod);
+        REQUIRE(rejected.ReadRegister(method) == 0);
+        REQUIRE_FALSE(rejected.CallMethod(0xad, 0x20, true, {}));
+    }
+    Compute shadow{context};
+    REQUIRE(shadow.CallMethod(0x49, 1, true, {}));
+    REQUIRE_FALSE(shadow.CallMethod(0x49, 3, true, {}));
+    REQUIRE(shadow.ReadRegister(0x49) == 1);
+    std::stop_source stop;
+    stop.request_stop();
+    compute.SetNativeContext(context);
+    REQUIRE_FALSE(compute.CallNativeMethod(0xad, 0x10, true, stop.get_token()));
+    REQUIRE(compute.HasNativeMethodFailure());
+
+    auto setup = Method();
+    Inst read;
+    read.alu[0] = {Op::State, Z, I, Z};
+    read.immediate[0] = 0x123;
+    read.end_next = true;
+    Processor uploader{state};
+    MethodHost upload_host;
+    Upload(uploader, std::array{setup, read, Inst{}}, upload_host);
+    Compute unknown_read{context};
+    REQUIRE_FALSE(unknown_read.CallMethod(0xe0a, 0, true, {}));
+    REQUIRE(unknown_read.GetError() == Compute::Error::MacroFailed);
 }

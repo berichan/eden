@@ -8,8 +8,10 @@
 
 #include <array>
 #include <cstddef>
+#include <memory>
 #include <optional>
 #include <span>
+#include <stop_token>
 #include <vector>
 #include "common/bit_field.h"
 #include "common/common_funcs.h"
@@ -29,6 +31,11 @@ class MemoryManager;
 namespace VideoCore {
 class RasterizerInterface;
 }
+
+namespace Tegra::Control {
+class NativeCompute;
+class NativeGpuGraphicsContext;
+} // namespace Tegra::Control
 
 namespace Tegra::Engines {
 
@@ -51,6 +58,11 @@ public:
 
     /// Binds a rasterizer to this engine.
     void BindRasterizer(VideoCore::RasterizerInterface* rasterizer);
+
+    void SetNativeContext(std::shared_ptr<const Control::NativeGpuGraphicsContext> context);
+    bool CallNativeMethod(u32 method, u32 value, bool last, std::stop_token stop_token = {});
+    bool HasNativeMethodFailure() const;
+    bool HasPendingNativeMacro() const;
 
     static constexpr std::size_t NumConstBuffers = 8;
 
@@ -247,6 +259,7 @@ private:
     std::vector<UploadInfo> uploads;
     std::optional<GPUVAddr> indirect_compute{};
     bool native_mode{};
+    std::unique_ptr<Control::NativeCompute> native_compute;
 };
 
 #define ASSERT_REG_POSITION(field_name, position)                                                  \

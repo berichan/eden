@@ -62,6 +62,12 @@ public:
         return false;
     }
 
+    // Native CPU-side releases require actual host GPU completion, independent of
+    // the accuracy setting's legacy fence shortcuts.
+    virtual bool SynchronizeNativeWork() {
+        return false;
+    }
+
     /// Resets the counter of a query
     virtual void ResetCounter(VideoCommon::QueryType type) = 0;
 

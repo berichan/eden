@@ -674,6 +674,11 @@ void RasterizerVulkan::ResetCounter(VideoCommon::QueryType type) {
     }
 }
 
+bool RasterizerVulkan::SynchronizeNativeWork() {
+    scheduler.Finish();
+    return true;
+}
+
 void RasterizerVulkan::Query(GPUVAddr gpu_addr, VideoCommon::QueryType type,
                              VideoCommon::QueryPropertiesFlags flags, u32 payload, u32 subreport) {
     query_cache.CounterReport(gpu_addr, type, flags, payload, subreport);

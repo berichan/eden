@@ -28,6 +28,7 @@
 #include "shader_recompiler/frontend/ampere/lower_to_maxwell.h"
 #include "shader_recompiler/frontend/maxwell/translate_program.h"
 #include "shader_recompiler/host_translate_info.h"
+#include "video_core/control/native_command_stream.h"
 #include "video_core/control/native_gpu_context.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/gpu.h"
@@ -752,6 +753,55 @@ TEST_CASE("GPU pins retain real heap pages until partial unlock or process table
             REQUIRE(view->Read<u32>(va + 0x900) == 77);
             REQUIRE(release_host.releases == 1);
             REQUIRE(accepted_release.HasQmdFailure());
+
+            // Decode real pinned command memory into the actual native compute adapter.
+            using Stream = Tegra::Control::NativeCommandStream;
+            auto method_context =
+                std::make_shared<GraphicsContext>(graphics_state, spaces.Acquire(space));
+            compute.SetNativeContext(method_context);
+            qmd[4] = 1U << 14;
+            REQUIRE(write_qmd());
+            const auto header = [](u32 method, u32 count) {
+                return (1U << 29) | (count << 16) | (1U << 13) | method;
+            };
+            const std::array commands{header(0xad, 1), static_cast<u32>((va + 0x800) >> 8),
+                                      header(0xb0, 1), 3U,
+                                      header(0xb0, 1), 7U};
+            REQUIRE(view->WriteBlockChecked(
+                va + 0xa00, {reinterpret_cast<const u8*>(commands.data()), sizeof(commands)}));
+            struct CommandHost {
+                Tegra::MemoryManager& space;
+                Tegra::Engines::KeplerCompute& compute;
+            } command_host{*view, compute};
+            const Stream::Host bindings{
+                &command_host,
+                [](void* opaque, GPUVAddr address, size_t size) {
+                    return static_cast<CommandHost*>(opaque)->space.IsReadableRange(address, size);
+                },
+                [](void* opaque, GPUVAddr address, std::span<u32> output) {
+                    return static_cast<CommandHost*>(opaque)->space.ReadBlockChecked(
+                        address, {reinterpret_cast<u8*>(output.data()), output.size_bytes()});
+                },
+                [](void* opaque, u32 subchannel, u32 method, u32 value, bool last) {
+                    return subchannel == 1 &&
+                           static_cast<CommandHost*>(opaque)->compute.CallNativeMethod(method,
+                                                                                       value, last);
+                },
+            };
+            const std::array entries{
+                u64{va + 0xa00} | (u64{3} << 42) | (u64{1} << 41),
+                u64{va + 0xa0c} | (u64{3} << 42) | (u64{1} << 41),
+            };
+            Stream native_commands;
+            const auto native_result = native_commands.Execute(entries, bindings);
+            REQUIRE(native_result.error == Stream::Error::MethodFailed);
+            REQUIRE(native_result.method == 0xb0);
+            REQUIRE(native_result.address == va + 0xa14);
+            REQUIRE(native_result.methods == 2);
+            REQUIRE(compute.HasNativeMethodFailure());
+            REQUIRE(method_context->HasQmdFailure());
+            REQUIRE(view->Read<u32>(va + 0x900) == 77);
+            compute.SetNativeContext(nullptr);
         }
         selected = 0xfe;
         REQUIRE(pool.Map(&selected, spaces, backing, space, va + PageSize, va + 2 * PageSize - 1,
