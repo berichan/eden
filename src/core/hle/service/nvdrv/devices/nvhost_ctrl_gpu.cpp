@@ -10,6 +10,7 @@
 #include "core/core.h"
 #include "core/core_timing.h"
 #include "core/hle/service/nvdrv/devices/ioctl_serialization.h"
+#include "core/hle/service/nvdrv/devices/native_gpu_characteristics.h"
 #include "core/hle/service/nvdrv/devices/nvhost_ctrl_gpu.h"
 #include "core/hle/service/nvdrv/nvdrv.h"
 
@@ -40,6 +41,9 @@ NvResult nvhost_ctrl_gpu::Ioctl1(DeviceFD fd, Ioctl command, std::span<const u8>
             return WrapFixed(this, &nvhost_ctrl_gpu::ZBCQueryTable, input, output);
         //deviation
         case 0x5:
+            if (command.length == 0xe0) {
+                return NvResult::NotSupported;
+            }
             return WrapFixed(this, &nvhost_ctrl_gpu::GetCharacteristics1, input, output);
         case 0x6:
             return WrapFixed(this, &nvhost_ctrl_gpu::GetTPCMasks1, input, output);
@@ -94,6 +98,14 @@ NvResult nvhost_ctrl_gpu::Ioctl3(DeviceFD fd, Ioctl command, std::span<const u8>
     case 'G':
         switch (command.cmd) {
         case 0x5:
+            if (command.length == 0xe0) {
+                const auto result = ReadNativeGpuCharacteristics(input, output, inline_output);
+                if (result == NvResult::Success) {
+                    m_native_abi = true;
+                    LOG_DEBUG(Service_NVDRV, "Native GPU characteristics returned");
+                }
+                return result;
+            }
             return WrapFixedInlOut(this, &nvhost_ctrl_gpu::GetCharacteristics3, input, output,
                                    inline_output);
         case 0x6:
@@ -105,6 +117,12 @@ NvResult nvhost_ctrl_gpu::Ioctl3(DeviceFD fd, Ioctl command, std::span<const u8>
             // TODO (jarrodnorwell)
 
             return NvResult::NotImplemented;
+        case 0x1f:
+            if (command.length != 0x10) {
+                return NvResult::InvalidSize;
+            }
+            LOG_DEBUG(Service_NVDRV, "Native GPU engine info requested");
+            return ReadNativeGpuEngineInfo(input, output, inline_output);
         default:
             break;
         }
@@ -212,7 +230,7 @@ NvResult nvhost_ctrl_gpu::GetCharacteristics3(
 NvResult nvhost_ctrl_gpu::GetTPCMasks1(IoctlGpuGetTpcMasksArgs& params) {
     LOG_DEBUG(Service_NVDRV, "called, mask_buffer_size={:#x}", params.mask_buffer_size);
     if (params.mask_buffer_size != 0) {
-        params.tcp_mask = 3;
+        params.tcp_mask = m_native_abi ? 0x3f : 3;
     }
     return NvResult::Success;
 }
@@ -220,7 +238,7 @@ NvResult nvhost_ctrl_gpu::GetTPCMasks1(IoctlGpuGetTpcMasksArgs& params) {
 NvResult nvhost_ctrl_gpu::GetTPCMasks3(IoctlGpuGetTpcMasksArgs& params, std::span<u32> tpc_mask) {
     LOG_DEBUG(Service_NVDRV, "called, mask_buffer_size={:#x}", params.mask_buffer_size);
     if (params.mask_buffer_size != 0) {
-        params.tcp_mask = 3;
+        params.tcp_mask = m_native_abi ? 0x3f : 3;
     }
     if (!tpc_mask.empty()) {
         tpc_mask.front() = params.tcp_mask;

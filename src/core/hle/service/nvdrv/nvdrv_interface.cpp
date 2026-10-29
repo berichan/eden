@@ -5,6 +5,7 @@
 // SPDX-FileCopyrightText: 2021 Skyline Team and Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include "common/logging.h"
 #include "common/scope_exit.h"
 #include "common/string_util.h"
@@ -82,6 +83,7 @@ void NVDRV::Ioctl1(HLERequestContext& ctx) {
 
     // Check device
     output_buffer.resize_destructive(ctx.GetWriteBufferSize(0));
+    std::ranges::fill(output_buffer, u8{});
     const auto input_buffer = ctx.ReadBuffer(0);
 
     const auto nv_result = nvdrv->Ioctl1(fd, command, input_buffer, output_buffer);
@@ -114,6 +116,7 @@ void NVDRV::Ioctl2(HLERequestContext& ctx) {
     const auto input_buffer = ctx.ReadBuffer(0);
     const auto input_inlined_buffer = ctx.ReadBuffer(1);
     output_buffer.resize_destructive(ctx.GetWriteBufferSize(0));
+    std::ranges::fill(output_buffer, u8{});
 
     const auto nv_result =
         nvdrv->Ioctl2(fd, command, input_buffer, input_inlined_buffer, output_buffer);
@@ -146,6 +149,8 @@ void NVDRV::Ioctl3(HLERequestContext& ctx) {
     const auto input_buffer = ctx.ReadBuffer(0);
     output_buffer.resize_destructive(ctx.GetWriteBufferSize(0));
     inline_output_buffer.resize_destructive(ctx.GetWriteBufferSize(1));
+    std::ranges::fill(output_buffer, u8{});
+    std::ranges::fill(inline_output_buffer, u8{});
 
     const auto nv_result =
         nvdrv->Ioctl3(fd, command, input_buffer, output_buffer, inline_output_buffer);

@@ -206,6 +206,7 @@ private:
     NvResult GetGpuTime(IoctlGetGpuTime& params);
 
     EventInterface& events_interface;
+    bool m_native_abi{};
 
     // Events
     Kernel::KEvent* error_notifier_event;

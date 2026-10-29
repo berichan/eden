@@ -19,6 +19,7 @@ add_executable(tests
     core/kernel/cpu_topology.cpp
     core/core_timing.cpp
     core/hle/tipc.cpp
+    core/hle/native_gpu_characteristics.cpp
     core/internal_network/network.cpp
     core/loader/deconstructed_rom_directory.cpp
     video_core/memory_tracker.cpp
