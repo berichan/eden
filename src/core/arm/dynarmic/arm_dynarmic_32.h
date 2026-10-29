@@ -7,9 +7,9 @@
 #pragma once
 
 #include <dynarmic/interface/A32/a32.h>
-#include <dynarmic/interface/code_page.h>
 
 #include "core/arm/arm_interface.h"
+#include "core/arm/dynarmic/code_page_cache.h"
 #include "core/arm/dynarmic/dynarmic_exclusive_monitor.h"
 
 namespace Core::Memory {
@@ -33,7 +33,7 @@ public:
     u64 MemoryRead(u32 vaddr, size_t size) override;
     std::optional<u32> MemoryReadCode(u32 vaddr) override;
     void InstructionSynchronizationBarrierRaised() override {
-        last_code_addr = u64(-1); //reset back, force refetch
+        code_cache.Invalidate();
     }
     void MemoryWrite(Dynarmic::A32::VAddr vaddr, u64 value, size_t size) override;
     bool MemoryWriteExclusive8(u32 vaddr, u8 value, u8 expected) override;
@@ -47,8 +47,7 @@ public:
     bool CheckMemoryAccess(u64 addr, u64 size, Kernel::DebugWatchpointType type);
     void ReturnException(u32 pc, Dynarmic::HaltReason hr);
     //
-    Dynarmic::CodePage cached_code_page;
-    u64 last_code_addr = u64(-1);
+    CodePageCache code_cache;
     ArmDynarmic32& m_parent;
     Core::Memory::Memory& m_memory;
     Kernel::KProcess* m_process{};

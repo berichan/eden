@@ -38,14 +38,7 @@ Dynarmic::A64::Vector DynarmicCallbacks64::MemoryRead128(u64 vaddr) {
 }
 
 std::optional<u32> DynarmicCallbacks64::MemoryReadCode(u64 vaddr) {
-    if (!m_memory.IsValidVirtualAddressRange(vaddr, sizeof(u32)))
-        return std::nullopt;
-    auto const aligned_vaddr = vaddr & ~Core::Memory::YUZU_PAGEMASK;
-    if (last_code_addr != aligned_vaddr) {
-        m_memory.ReadBlock(aligned_vaddr, &cached_code_page, sizeof(cached_code_page));
-        last_code_addr = aligned_vaddr;
-    }
-    return cached_code_page.inst[(vaddr & Core::Memory::YUZU_PAGEMASK) / sizeof(u32)];
+    return code_cache.Read(m_memory, vaddr);
 }
 
 void DynarmicCallbacks64::MemoryWrite(Dynarmic::A64::VAddr vaddr, u64 value, std::size_t size) {
@@ -88,7 +81,7 @@ bool DynarmicCallbacks64::MemoryWriteExclusive128(u64 vaddr, Dynarmic::A64::Vect
 }
 
 void DynarmicCallbacks64::InstructionCacheOperationRaised(Dynarmic::A64::InstructionCacheOperation op, u64 value) {
-    last_code_addr = u64(-1); //invalidate cached page
+    code_cache.Invalidate();
     switch (op) {
     case Dynarmic::A64::InstructionCacheOperation::InvalidateByVAToPoU: {
         static constexpr u64 ICACHE_LINE_SIZE = 64;
@@ -479,11 +472,12 @@ void ArmDynarmic64::SignalInterrupt(Kernel::KThread* thread) {
 }
 
 void ArmDynarmic64::ClearInstructionCache() {
-    m_cb->last_code_addr = u64(-1);
+    m_cb->code_cache.Invalidate();
     m_jit->ClearCache();
 }
 
 void ArmDynarmic64::InvalidateCacheRange(u64 addr, std::size_t size) {
+    m_cb->code_cache.Invalidate();
     m_jit->InvalidateCacheRange(addr, size);
 }
 

@@ -29,6 +29,7 @@ create_target_directory_groups(tests)
 
 target_link_libraries(tests PRIVATE common core input_common video_core)
 if (TARGET dynarmic::dynarmic)
+    target_sources(tests PRIVATE core/arm/code_page_cache.cpp)
     target_sources(tests PRIVATE core/arm/authenticated_return.cpp)
     target_sources(tests PRIVATE core/arm/acquire_load.cpp)
     target_sources(tests PRIVATE core/arm/compare_exchange.cpp)
