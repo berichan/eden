@@ -41,14 +41,23 @@ NvResult nvhost_as_gpu::Ioctl1(DeviceFD fd, Ioctl command, std::span<const u8> i
                                std::span<u8> output) {
     // Native mapping commands use GSV. Do not reinterpret their handles or page sizes as Maxwell
     // requests while the native driver-side mappings and region queries are being implemented.
-    if (module.GetNativeAddressSpaces() && command.group == 'A' && command.cmd != 0x8 &&
-        command.cmd != 0x9 && command.cmd != 0xb) {
+    if (module.GetNativeAddressSpaces() && command.group == 'A' && command.cmd != 0x1 &&
+        command.cmd != 0x8 && command.cmd != 0x9 && command.cmd != 0xb) {
         return NvResult::NotSupported;
     }
     switch (command.group) {
     case 'A':
         switch (command.cmd) {
         case 0x1:
+            if (module.GetNativeAddressSpaces()) {
+                if (command.is_in == 0 || command.is_out != 0) {
+                    return NvResult::BadParameter;
+                }
+                if (command.length != sizeof(IoctlBindChannel) ||
+                    input.size() < sizeof(IoctlBindChannel)) {
+                    return NvResult::InvalidSize;
+                }
+            }
             return WrapFixed(this, &nvhost_as_gpu::BindChannel, input, output);
         case 0x2:
             return WrapFixed(this, &nvhost_as_gpu::AllocateSpace, input, output);
@@ -127,8 +136,16 @@ NvResult nvhost_as_gpu::Ioctl3(DeviceFD fd, Ioctl command, std::span<const u8> i
     return NvResult::NotImplemented;
 }
 
-void nvhost_as_gpu::OnOpen(NvCore::SessionId session_id, DeviceFD fd) {}
-void nvhost_as_gpu::OnClose(DeviceFD fd) {}
+void nvhost_as_gpu::OnOpen(NvCore::SessionId session_id, DeviceFD fd) {
+    if (module.GetNativeAddressSpaces()) {
+        std::scoped_lock lock{mutex};
+        native_owner = session_id;
+    }
+}
+void nvhost_as_gpu::OnClose(DeviceFD fd) {
+    std::scoped_lock lock{mutex};
+    native_owner.reset();
+}
 
 NvResult nvhost_as_gpu::AllocAsEx(IoctlAllocAsEx& params) {
     LOG_DEBUG(Service_NVDRV, "called, big_page_size={:#x}", params.big_page_size);
@@ -531,6 +548,14 @@ NvResult nvhost_as_gpu::UnmapBuffer(IoctlUnmapBuffer& params) {
 NvResult nvhost_as_gpu::BindChannel(IoctlBindChannel& params) {
     LOG_DEBUG(Service_NVDRV, "called, fd={:X}", params.fd);
 
+    if (module.GetNativeAddressSpaces()) {
+        std::scoped_lock lock{mutex};
+        if (!native_owner || !vm.initialised || !gmmu) {
+            return NvResult::InvalidState;
+        }
+        const auto channel = module.GetNativeChannels().Get(params.fd, *native_owner);
+        return channel ? channel->BindAddressSpace(gmmu) : NvResult::BadParameter;
+    }
     auto gpu_channel_device = module.GetDevice<nvhost_gpu>(params.fd);
     gpu_channel_device->channel_state->memory_manager = gmmu.get();
     return NvResult::Success;

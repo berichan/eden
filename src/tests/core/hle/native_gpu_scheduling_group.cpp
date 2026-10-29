@@ -12,8 +12,9 @@ TEST_CASE("Native GPU scheduling groups validate configuration and close indepen
           "[core][ipc]") {
     using namespace Service::Nvidia;
     Core::System system;
-    Devices::nvhost_tsg_gpu first{system};
-    Devices::nvhost_tsg_gpu second{system};
+    NvCore::NativeGpuChannels channels;
+    Devices::nvhost_tsg_gpu first{system, channels};
+    Devices::nvhost_tsg_gpu second{system, channels};
     constexpr DeviceFD FirstFd = 3;
     constexpr DeviceFD SecondFd = 4;
     const Ioctl interleave{.raw = 0xc0085407};
@@ -74,8 +75,7 @@ TEST_CASE("Native GPU scheduling groups validate configuration and close indepen
     }
     REQUIRE(first.GetSchedulingParameters()->interleave_level == 2);
     REQUIRE(first.GetSchedulingParameters()->l2_promotion == 4);
-    for (u32 raw : {0xc0045401U, 0xc018540bU, 0x00005403U, 0x00005404U, 0x00005405U, 0xc0045408U,
-                    0xc0084807U, 0xc00854ffU}) {
+    for (u32 raw : {0x00005403U, 0x00005404U, 0x00005405U, 0xc0045408U, 0xc0084807U, 0xc00854ffU}) {
         REQUIRE(first.Ioctl1(FirstFd, Ioctl{.raw = raw}, input, output) == NvResult::NotSupported);
     }
     REQUIRE(first.Ioctl2(FirstFd, interleave, input, input, output) == NvResult::NotSupported);

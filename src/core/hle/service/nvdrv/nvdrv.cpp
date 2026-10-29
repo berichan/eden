@@ -5,6 +5,7 @@
 // SPDX-FileCopyrightText: 2021 Skyline Team and Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <new>
 #include <utility>
 
 #include <fmt/ranges.h>
@@ -18,6 +19,7 @@
 #include "core/hle/service/nvdrv/devices/nvhost_ctrl.h"
 #include "core/hle/service/nvdrv/devices/nvhost_ctrl_gpu.h"
 #include "core/hle/service/nvdrv/devices/nvhost_gpu.h"
+#include "core/hle/service/nvdrv/devices/nvhost_native_gpu.h"
 #include "core/hle/service/nvdrv/devices/nvhost_nvdec.h"
 #include "core/hle/service/nvdrv/devices/nvhost_nvdec_common.h"
 #include "core/hle/service/nvdrv/devices/nvhost_nvjpg.h"
@@ -130,7 +132,7 @@ Module::Module(Core::System& system,
       service_context{system, "nvdrv"}, events_interface{*this} {
     if (native_address_spaces) {
         builders["/dev/nvhost-tsg-gpu"] = [this, &system](DeviceFD fd) {
-            auto device = std::make_shared<Devices::nvhost_tsg_gpu>(system);
+            auto device = std::make_shared<Devices::nvhost_tsg_gpu>(system, native_channels);
             return open_files.emplace(fd, std::move(device)).first;
         };
     }
@@ -139,6 +141,10 @@ Module::Module(Core::System& system,
         return open_files.emplace(fd, std::move(device)).first;
     };
     builders["/dev/nvhost-gpu"] = [this, &system](DeviceFD fd) {
+        if (native_address_spaces) {
+            auto device = std::make_shared<Devices::nvhost_native_gpu>(system, native_channels);
+            return open_files.emplace(fd, std::move(device)).first;
+        }
         auto device = std::make_shared<Devices::nvhost_gpu>(system, events_interface, container);
         return open_files.emplace(fd, std::move(device)).first;
     };
@@ -197,9 +203,14 @@ DeviceFD Module::Open(const std::string& device_name, NvCore::SessionId session_
 
     const DeviceFD fd = next_fd++;
     auto& builder = it->second;
-    auto device = builder(fd)->second;
-
-    device->OnOpen(session_id, fd);
+    try {
+        auto device = builder(fd)->second;
+        device->OnOpen(session_id, fd);
+    } catch (const std::bad_alloc&) {
+        open_files.erase(fd);
+        LOG_ERROR(Service_NVDRV, "Could not allocate device {}", device_name);
+        return INVALID_NVDRV_FD;
+    }
     LOG_DEBUG(Service_NVDRV, "Opened device {} as fd={}", device_name, fd);
 
     return fd;

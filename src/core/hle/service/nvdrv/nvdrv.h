@@ -17,6 +17,7 @@
 #include "common/common_types.h"
 #include "core/hle/service/kernel_helpers.h"
 #include "core/hle/service/nvdrv/core/container.h"
+#include "core/hle/service/nvdrv/core/native_gpu_channel.h"
 #include "core/hle/service/nvdrv/nvdata.h"
 #include "core/hle/service/service.h"
 
@@ -103,12 +104,17 @@ public:
         return native_address_spaces;
     }
 
+    NvCore::NativeGpuChannels& GetNativeChannels() {
+        return native_channels;
+    }
+
 private:
     friend class EventInterface;
 
     /// Manages syncpoints on the host
     NvCore::Container container;
     const std::shared_ptr<GSV::GpuAddressSpacePool> native_address_spaces;
+    NvCore::NativeGpuChannels native_channels;
 
     /// Id to use for the next open file descriptor.
     DeviceFD next_fd = 1;

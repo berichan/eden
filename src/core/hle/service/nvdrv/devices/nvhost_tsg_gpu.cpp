@@ -8,7 +8,8 @@
 
 namespace Service::Nvidia::Devices {
 
-nvhost_tsg_gpu::nvhost_tsg_gpu(Core::System& system_) : nvdevice{system_} {}
+nvhost_tsg_gpu::nvhost_tsg_gpu(Core::System& system_, NvCore::NativeGpuChannels& channels_)
+    : nvdevice{system_}, channels{channels_} {}
 
 nvhost_tsg_gpu::~nvhost_tsg_gpu() = default;
 
@@ -18,39 +19,57 @@ NvResult nvhost_tsg_gpu::Ioctl1(DeviceFD fd, Ioctl command, std::span<const u8> 
     if (!open_fd || *open_fd != fd) {
         return NvResult::InvalidState;
     }
-    if (command.group != 'T' || (command.cmd != 7 && command.cmd != 0xd)) {
-        // Opening a scheduling group does not allocate a GPU channel. Channel binding,
-        // submission and scheduler operations need their own implementations.
+    if (command.group != 'T') {
+        return NvResult::NotSupported;
+    }
+    size_t parameter_size{};
+    switch (command.cmd) {
+    case 1:
+    case 2:
+        parameter_size = sizeof(u32_le);
+        break;
+    case 0xb:
+        parameter_size = 6 * sizeof(u32_le);
+        break;
+    case 7:
+    case 0xd:
+        parameter_size = 2 * sizeof(u32_le);
+        break;
+    default:
         LOG_ERROR(Service_NVDRV, "Unsupported TSG ioctl={:08X}", command.raw);
         return NvResult::NotSupported;
     }
     if (command.is_in == 0 || command.is_out == 0) {
         return NvResult::BadParameter;
     }
-    constexpr size_t ParameterSize = 2 * sizeof(u32_le);
-    if (command.length != ParameterSize || input.size() < ParameterSize ||
-        output.size() < ParameterSize) {
+    if (command.length != parameter_size || input.size() < parameter_size ||
+        output.size() < parameter_size) {
         return NvResult::InvalidSize;
     }
 
     u32_le value;
     std::memcpy(&value, input.data(), sizeof(value));
-    if (command.cmd == 7) {
-        if (value > 2) {
+    NvResult result;
+    if (command.cmd == 1 || command.cmd == 2 || command.cmd == 0xb) {
+        const auto channel = channels.Get(static_cast<DeviceFD>(static_cast<u32>(value)), owner);
+        if (!channel) {
             return NvResult::BadParameter;
         }
-        parameters.interleave_level = value;
+        u32_le subcontext{};
+        if (command.cmd == 0xb) {
+            std::memcpy(&subcontext, input.data() + sizeof(u32_le), sizeof(subcontext));
+        }
+        result =
+            command.cmd == 2 ? channel->UnbindGroup(group) : channel->BindGroup(group, subcontext);
     } else {
-        if (value != 1 && value != 2 && value != 4) {
-            return NvResult::BadParameter;
-        }
-        parameters.l2_promotion = value;
+        result = command.cmd == 7 ? group->SetInterleave(value) : group->SetL2Promotion(value);
     }
-    // The second word is reserved and is preserved, not interpreted as another setting.
-    std::memmove(output.data(), input.data(), ParameterSize);
-    LOG_DEBUG(Service_NVDRV, "TSG configuration: fd={}, interleave={}, l2_promotion={}", fd,
-              parameters.interleave_level, parameters.l2_promotion);
-    return NvResult::Success;
+    if (result == NvResult::Success) {
+        std::memmove(output.data(), input.data(), parameter_size);
+        LOG_DEBUG(Service_NVDRV, "TSG request completed: fd={}, ioctl={:08X}, value={}", fd,
+                  command.raw, value);
+    }
+    return result;
 }
 
 NvResult nvhost_tsg_gpu::Ioctl2(DeviceFD fd, Ioctl command, std::span<const u8> input,
@@ -68,8 +87,9 @@ NvResult nvhost_tsg_gpu::Ioctl3(DeviceFD fd, Ioctl command, std::span<const u8> 
 void nvhost_tsg_gpu::OnOpen(NvCore::SessionId session_id, DeviceFD fd) {
     std::scoped_lock lock{mutex};
     if (!open_fd) {
+        group = std::make_shared<NvCore::NativeGpuSchedulingGroup>(session_id);
+        owner = session_id;
         open_fd = fd;
-        parameters = {};
     }
 }
 
@@ -77,14 +97,14 @@ void nvhost_tsg_gpu::OnClose(DeviceFD fd) {
     std::scoped_lock lock{mutex};
     if (open_fd && *open_fd == fd) {
         open_fd.reset();
-        parameters = {};
+        group.reset();
     }
 }
 
 std::optional<nvhost_tsg_gpu::SchedulingParameters> nvhost_tsg_gpu::GetSchedulingParameters()
     const {
     std::scoped_lock lock{mutex};
-    return open_fd ? std::optional{parameters} : std::nullopt;
+    return open_fd ? std::optional{group->GetParameters()} : std::nullopt;
 }
 
 } // namespace Service::Nvidia::Devices

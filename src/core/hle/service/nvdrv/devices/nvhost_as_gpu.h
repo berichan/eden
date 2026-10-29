@@ -161,6 +161,7 @@ private:
     [[nodiscard]] bool FreeMappingLocked(u64 offset) noexcept;
 
     Module& module;
+    std::optional<NvCore::SessionId> native_owner;
 
     NvCore::Container& container;
     NvCore::NvMap& nvmap;

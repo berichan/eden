@@ -5,18 +5,16 @@
 
 #include <mutex>
 #include <optional>
+#include "core/hle/service/nvdrv/core/native_gpu_channel.h"
 #include "core/hle/service/nvdrv/devices/nvdevice.h"
 
 namespace Service::Nvidia::Devices {
 
 class nvhost_tsg_gpu final : public nvdevice {
 public:
-    struct SchedulingParameters {
-        u32 interleave_level{};
-        u32 l2_promotion{};
-    };
+    using SchedulingParameters = NvCore::NativeGpuSchedulingGroup::Parameters;
 
-    explicit nvhost_tsg_gpu(Core::System& system);
+    nvhost_tsg_gpu(Core::System& system, NvCore::NativeGpuChannels& channels);
     ~nvhost_tsg_gpu() override;
 
     NvResult Ioctl1(DeviceFD fd, Ioctl command, std::span<const u8> input,
@@ -33,8 +31,10 @@ public:
 
 private:
     mutable std::mutex mutex;
+    NvCore::NativeGpuChannels& channels;
     std::optional<DeviceFD> open_fd;
-    SchedulingParameters parameters;
+    NvCore::SessionId owner{};
+    std::shared_ptr<NvCore::NativeGpuSchedulingGroup> group;
 };
 
 } // namespace Service::Nvidia::Devices

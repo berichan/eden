@@ -861,6 +861,8 @@ add_library(core STATIC
     hle/service/ns/system_update_interface.h
     hle/service/nvdrv/core/container.cpp
     hle/service/nvdrv/core/container.h
+    hle/service/nvdrv/core/native_gpu_channel.cpp
+    hle/service/nvdrv/core/native_gpu_channel.h
     hle/service/nvdrv/core/heap_mapper.cpp
     hle/service/nvdrv/core/heap_mapper.h
     hle/service/nvdrv/core/nvmap.cpp
@@ -880,6 +882,8 @@ add_library(core STATIC
     hle/service/nvdrv/devices/nvhost_ctrl_gpu.h
     hle/service/nvdrv/devices/nvhost_gpu.cpp
     hle/service/nvdrv/devices/nvhost_gpu.h
+    hle/service/nvdrv/devices/nvhost_native_gpu.cpp
+    hle/service/nvdrv/devices/nvhost_native_gpu.h
     hle/service/nvdrv/devices/nvhost_tsg_gpu.cpp
     hle/service/nvdrv/devices/nvhost_tsg_gpu.h
     hle/service/nvdrv/devices/nvhost_nvdec.cpp
