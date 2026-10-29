@@ -10,6 +10,7 @@
 #include <bitset>
 #include <cmath>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <type_traits>
 #include <vector>
@@ -30,6 +31,11 @@
 namespace Core {
 class System;
 }
+
+namespace Tegra::Control {
+struct AmpereGraphicsState;
+class NativeMacroProcessor;
+} // namespace Tegra::Control
 
 namespace Tegra {
 class MemoryManager;
@@ -60,6 +66,9 @@ public:
 
     /// Binds a rasterizer to this engine.
     void BindRasterizer(VideoCore::RasterizerInterface* rasterizer);
+
+    void SetNativeMacroState(std::shared_ptr<Control::AmpereGraphicsState> native_state);
+    bool HasNativeMacroFailure() const;
 
     /// Register structure of the Maxwell3D engine.
     struct Regs {
@@ -3250,6 +3259,7 @@ private:
     void RefreshParametersImpl();
 
     bool IsMethodExecutable(u32 method);
+    bool IsNativeStateMethod(u32 method);
 
     MemoryManager& memory_manager;
 
@@ -3265,6 +3275,8 @@ private:
 
     /// Interpreter for the macro codes uploaded to the GPU.
     MacroEngine macro_engine;
+    std::unique_ptr<Control::NativeMacroProcessor> native_macro_processor;
+    bool native_action_failed{};
 
     Upload::State upload_state;
 

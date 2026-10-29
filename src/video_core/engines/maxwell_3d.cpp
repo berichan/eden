@@ -12,8 +12,8 @@
 #include "common/settings.h"
 #include "core/core.h"
 #include "core/core_timing.h"
+#include "video_core/control/native_macro_processor.h"
 #include "video_core/dirty_flags.h"
-#include "video_core/engines/maxwell_3d.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/gpu.h"
 #include "video_core/memory_manager.h"
@@ -43,6 +43,35 @@ Maxwell3D::Maxwell3D(MemoryManager& memory_manager_)
 }
 
 Maxwell3D::~Maxwell3D() = default;
+
+void Maxwell3D::SetNativeMacroState(std::shared_ptr<Control::AmpereGraphicsState> native_state) {
+    executing_macro = 0;
+    macro_params.clear();
+    macro_segments.clear();
+    current_macro_dirty = false;
+    native_action_failed = false;
+    native_macro_processor =
+        native_state ? std::make_unique<Control::NativeMacroProcessor>(std::move(native_state))
+                     : nullptr;
+    if (native_macro_processor) {
+        execution_mask.set();
+    } else {
+        for (size_t method = 0; method < execution_mask.size(); ++method) {
+            execution_mask[method] = IsMethodExecutable(static_cast<u32>(method));
+        }
+    }
+}
+
+bool Maxwell3D::HasNativeMacroFailure() const {
+    return native_action_failed ||
+           (native_macro_processor &&
+            native_macro_processor->GetError() != Control::NativeMacroProcessor::Error::None);
+}
+
+bool Maxwell3D::IsNativeStateMethod(u32 method) {
+    return !(method >= 0x154 && method <= 0x15d) &&
+           (!IsMethodExecutable(method) || method == MAXWELL3D_REG_INDEX(shadow_ram_control));
+}
 
 void Maxwell3D::BindRasterizer(VideoCore::RasterizerInterface* rasterizer_) {
     rasterizer = rasterizer_;
@@ -386,6 +415,47 @@ void Maxwell3D::CallMacroMethod(Core::System& system, u32 method, const std::vec
 }
 
 void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument, bool is_last_call) {
+    if (HasNativeMacroFailure()) {
+        return;
+    }
+    if (native_macro_processor) {
+        if (method >= MacroRegistersStart || (method >= 0x45 && method <= 0x48)) {
+            ConsumeSink(system);
+        }
+        struct HostContext {
+            Maxwell3D& engine;
+            Core::System& system;
+        } context{*this, system};
+        const Control::NativeMacroProcessor::Host host{
+            &context,
+            [](void* context, u32 method, u32& value) {
+                value = static_cast<HostContext*>(context)->engine.GetRegisterValue(method);
+                return true;
+            },
+            [](void* context, u32 method, u32 value) {
+                auto& self = *static_cast<HostContext*>(context);
+                // Native draw/action adapters must opt in before MME can execute those methods.
+                if (!self.engine.IsNativeStateMethod(method)) {
+                    return false;
+                }
+                self.engine.CallMethod(self.system, method, value, true);
+                return true;
+            },
+        };
+        const auto status =
+            native_macro_processor->CallMethod(method, method_argument, is_last_call, host);
+        if (status != Control::NativeMacroProcessor::Status::Unhandled) {
+            if (status == Control::NativeMacroProcessor::Status::Accepted && method >= 0x45 &&
+                method <= 0x48) {
+                ProcessDirtyRegisters(method, method_argument);
+            }
+            return;
+        }
+        if (!IsNativeStateMethod(method)) {
+            native_action_failed = true;
+            return;
+        }
+    }
     // It is an error to write to a register other than the current macro's ARG register before
     // it has finished execution.
     if (executing_macro != 0) {
@@ -406,6 +476,12 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
 }
 
 void Maxwell3D::CallMultiMethod(Core::System& system, u32 method, const u32* base_start, u32 amount, u32 methods_pending) {
+    if (native_macro_processor) {
+        for (u32 index = 0; index < amount; ++index) {
+            CallMethod(system, method, base_start[index], methods_pending - index <= 1);
+        }
+        return;
+    }
     // Methods after 0xE00 are special, they're actually triggers for some microcode that was
     // uploaded to the GPU during initialization.
     if (method >= MacroRegistersStart) {

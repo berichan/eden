@@ -6,11 +6,18 @@
 #include <utility>
 #include <vector>
 #include <catch2/catch_test_macros.hpp>
+#include "core/core.h"
+#include "core/device_memory.h"
 #include "video_core/control/native_gpu_context.h"
+#include "video_core/control/native_macro_processor.h"
+#include "video_core/engines/maxwell_3d.h"
+#include "video_core/host1x/gpu_device_memory_manager.h"
+#include "video_core/memory_manager.h"
 #include "video_core/turing_macro.h"
 
 namespace {
 using Engine = Tegra::TuringMacroEngine;
+using Maxwell3D = Tegra::Engines::Maxwell3D;
 using Inst = Engine::Instruction;
 using Op = Engine::Operation;
 constexpr auto Z = Engine::Zero;
@@ -438,4 +445,200 @@ TEST_CASE("Turing MME retains data RAM and propagates host failures without late
     undefined.alu[0].source_a = L1;
     Upload(engine, std::array{undefined});
     REQUIRE(engine.Execute(0, {}, 20).error == Engine::Error::InvalidInstruction);
+}
+
+namespace {
+using Processor = Tegra::Control::NativeMacroProcessor;
+struct MethodHost {
+    std::array<u32, 0xe00> registers{};
+    std::vector<std::pair<u32, u32>> writes;
+    bool reject_write{};
+    bool cancelled{};
+    Processor::Host Bind() {
+        return {this,
+                [](void* context, u32 method, u32& value) {
+                    value = static_cast<MethodHost*>(context)->registers.at(method);
+                    return true;
+                },
+                [](void* context, u32 method, u32 value) {
+                    auto& self = *static_cast<MethodHost*>(context);
+                    if (self.reject_write)
+                        return false;
+                    self.registers.at(method) = value;
+                    self.writes.emplace_back(method, value);
+                    return true;
+                },
+                nullptr,
+                [](void* context) { return static_cast<MethodHost*>(context)->cancelled; }};
+    }
+};
+std::array<Inst, 3> SumProgram(u32 method) {
+    auto set_method = Method();
+    set_method.immediate[0] = static_cast<u16>(0x1000 | method);
+    Inst sum;
+    sum.alu[0] = {Op::Add, 0, L0, L1};
+    sum.output[0].emit = 1;
+    sum.end_next = true;
+    return {set_method, sum, Inst{}};
+}
+void Upload(Processor& processor, std::span<const Inst> program, MethodHost& host, u32 start = 7,
+            u32 slot = 5) {
+    REQUIRE(processor.CallMethod(0x45, start, true, host.Bind()) == Processor::Status::Accepted);
+    for (const auto& instruction : program) {
+        for (u32 word : Encode(instruction)) {
+            REQUIRE(processor.CallMethod(0x46, word, true, host.Bind()) ==
+                    Processor::Status::Accepted);
+        }
+    }
+    REQUIRE(processor.CallMethod(0x47, slot, true, host.Bind()) == Processor::Status::Accepted);
+    REQUIRE(processor.CallMethod(0x48, start, true, host.Bind()) == Processor::Status::Accepted);
+}
+} // namespace
+
+TEST_CASE("Native macro methods retain parameters across command fragments and share uploads",
+          "[ipc][video_core]") {
+    auto state = std::make_shared<Tegra::Control::AmpereGraphicsState>();
+    Processor first{state}, second{state};
+    MethodHost host;
+    Upload(first, SumProgram(0xd00), host);
+    REQUIRE(first.CallMethod(0xe0a, 8, false, host.Bind()) == Processor::Status::Accepted);
+    REQUIRE(first.HasPendingInvocation());
+    REQUIRE(second.CallMethod(0xe0a, 2, false, host.Bind()) == Processor::Status::Accepted);
+    REQUIRE(first.CallMethod(0xe0b, 9, true, host.Bind()) == Processor::Status::Accepted);
+    REQUIRE_FALSE(first.HasPendingInvocation());
+    REQUIRE(second.CallMethod(0xe0b, 3, true, host.Bind()) == Processor::Status::Accepted);
+    REQUIRE(host.writes == std::vector<std::pair<u32, u32>>{{0xd00, 17}, {0xd00, 5}});
+    REQUIRE(first.GetExecutionResult().parameters == 2);
+    REQUIRE(first.GetExecutionResult().instructions == 3);
+    REQUIRE(first.CallMethod(0x202, 99, true, host.Bind()) == Processor::Status::Unhandled);
+    REQUIRE(host.registers[0x202] == 0);
+    host.reject_write = true;
+    REQUIRE(first.CallMethod(0xe0a, 1, false, host.Bind()) == Processor::Status::Accepted);
+    REQUIRE(first.CallMethod(0xe0b, 2, true, host.Bind()) == Processor::Status::Failed);
+    REQUIRE(first.GetExecutionResult().error == Engine::Error::MethodEmitFailed);
+    host.reject_write = false;
+    REQUIRE(first.CallMethod(0x45, 0, true, host.Bind()) == Processor::Status::Failed);
+    REQUIRE(host.writes.size() == 2);
+}
+
+TEST_CASE("Native macro methods reject unbound calls, bad RAM pointers and interleaved writes",
+          "[ipc][video_core]") {
+    MethodHost host;
+    for (const auto [method, value] :
+         std::array<std::pair<u32, u32>, 4>{{{0x45, static_cast<u32>(Engine::InstructionCount)},
+                                             {0x47, 0x80},
+                                             {0x48, static_cast<u32>(Engine::InstructionCount)},
+                                             {0xe00, 1}}}) {
+        auto state = std::make_shared<Tegra::Control::AmpereGraphicsState>();
+        Processor processor{state};
+        REQUIRE(processor.CallMethod(method, value, true, host.Bind()) ==
+                Processor::Status::Failed);
+        REQUIRE(processor.CallMethod(0x45, 0, true, host.Bind()) == Processor::Status::Failed);
+    }
+    auto state = std::make_shared<Tegra::Control::AmpereGraphicsState>();
+    Processor odd{state};
+    Upload(odd, SumProgram(0xd00), host);
+    REQUIRE(odd.CallMethod(0xe0b, 0, true, host.Bind()) == Processor::Status::Failed);
+    Processor interleaved{state};
+    REQUIRE(interleaved.CallMethod(0xe0a, 1, false, host.Bind()) == Processor::Status::Accepted);
+    REQUIRE(interleaved.CallMethod(0xd00, 2, true, host.Bind()) == Processor::Status::Failed);
+    REQUIRE(host.writes.empty());
+    Processor bounded{state};
+    REQUIRE(bounded.CallMethod(0xe0a, 0, false, host.Bind()) == Processor::Status::Accepted);
+    for (size_t index = 1; index < Processor::MaxParameters; ++index)
+        REQUIRE(bounded.CallMethod(0xe0b, 0, false, host.Bind()) == Processor::Status::Accepted);
+    REQUIRE(bounded.CallMethod(0xe0b, 0, true, host.Bind()) == Processor::Status::Failed);
+    REQUIRE(bounded.GetError() == Processor::Error::ParameterLimit);
+    Processor cancelled{state};
+    host.cancelled = true;
+    REQUIRE(cancelled.CallMethod(0x45, 0, true, host.Bind()) == Processor::Status::Failed);
+    REQUIRE(cancelled.GetError() == Processor::Error::Cancelled);
+}
+
+TEST_CASE("The graphics engine executes native macros without using legacy macro code",
+          "[ipc][video_core]") {
+    Core::System system;
+    Core::DeviceMemory memory;
+    Tegra::MaxwellDeviceMemoryManager backing{memory};
+    Tegra::MemoryManager space{system, backing, 32, 1ULL << 32, 16, 12};
+    Tegra::Engines::Maxwell3D engine{space};
+    auto state = std::make_shared<Tegra::Control::AmpereGraphicsState>();
+    engine.SetNativeMacroState(state);
+    engine.CallMethod(system, 0x45, 7, true);
+    std::vector<u32> words;
+    for (const auto& instruction : SumProgram(0xd00))
+        for (u32 word : Encode(instruction))
+            words.push_back(word);
+    engine.CallMultiMethod(system, 0x46, words.data(), static_cast<u32>(words.size()),
+                           static_cast<u32>(words.size()));
+    engine.CallMethod(system, 0x47, 5, true);
+    engine.CallMethod(system, 0x48, 7, true);
+    engine.CallMethod(system, MAXWELL3D_REG_INDEX(shadow_ram_control), 1, true);
+    REQUIRE_FALSE(engine.HasNativeMacroFailure());
+    engine.CallMethod(system, 0xe0a, 8, false);
+    const u32 last = 9;
+    engine.CallMultiMethod(system, 0xe0b, &last, 1, 1);
+    REQUIRE_FALSE(engine.HasNativeMacroFailure());
+    REQUIRE(engine.GetRegisterValue(0xd00) == 17);
+    engine.CallMethod(system, 0xe1f, 1, true);
+    REQUIRE(engine.HasNativeMacroFailure());
+    engine.CallMethod(system, 0xd00, 99, true);
+    REQUIRE(engine.GetRegisterValue(0xd00) == 17);
+}
+
+TEST_CASE("Native graphics macro input cannot bypass pending invocation or action guards",
+          "[ipc][video_core]") {
+    Core::System system;
+    Core::DeviceMemory memory;
+    Tegra::MaxwellDeviceMemoryManager backing{memory};
+    Tegra::MemoryManager space{system, backing, 32, 1ULL << 32, 16, 12};
+    auto state = std::make_shared<Tegra::Control::AmpereGraphicsState>();
+    MethodHost host;
+    Processor uploader{state};
+    Upload(uploader, SumProgram(0xd00), host);
+    for (u32 method : {0xd00U, u32(MAXWELL3D_REG_INDEX(clear_surface)), 0x157U}) {
+        Tegra::Engines::Maxwell3D engine{space};
+        engine.SetNativeMacroState(state);
+        REQUIRE(engine.execution_mask[0xd00]);
+        engine.CallMethod(system, 0xe0a, 1, false);
+        engine.CallMethod(system, method, 99, true);
+        REQUIRE(engine.HasNativeMacroFailure());
+        engine.CallMethod(system, 0xe0b, 2, true);
+        REQUIRE(engine.GetRegisterValue(0xd00) == 0);
+    }
+    for (u32 method : {u32(MAXWELL3D_REG_INDEX(clear_surface)), 0x157U}) {
+        Tegra::Engines::Maxwell3D engine{space};
+        engine.SetNativeMacroState(state);
+        const u32 before = engine.GetRegisterValue(method);
+        engine.CallMethod(system, method, 99, true);
+        REQUIRE(engine.HasNativeMacroFailure());
+        REQUIRE(engine.GetRegisterValue(method) == before);
+        engine.SetNativeMacroState(nullptr);
+        REQUIRE_FALSE(engine.HasNativeMacroFailure());
+        REQUIRE_FALSE(engine.execution_mask[0xd00]);
+    }
+}
+
+TEST_CASE("Native macro calls latch their entry and forward finite instruction budgets",
+          "[ipc][video_core]") {
+    auto state = std::make_shared<Tegra::Control::AmpereGraphicsState>();
+    Processor first{state}, rebinder{state};
+    MethodHost host;
+    Upload(first, SumProgram(0xd00), host);
+    REQUIRE(first.CallMethod(0xe0a, 4, false, host.Bind()) == Processor::Status::Accepted);
+    REQUIRE(rebinder.CallMethod(0x47, 5, true, host.Bind()) == Processor::Status::Accepted);
+    REQUIRE(rebinder.CallMethod(0x48, 10, true, host.Bind()) == Processor::Status::Accepted);
+    REQUIRE(first.CallMethod(0xe0b, 6, true, host.Bind()) == Processor::Status::Accepted);
+    REQUIRE(host.writes.back() == std::pair<u32, u32>{0xd00, 10});
+    Processor incomplete{state};
+    REQUIRE(incomplete.CallMethod(0xe0a, 1, false, host.Bind()) == Processor::Status::Accepted);
+    REQUIRE(incomplete.CallMethod(0xe0b, 2, true, host.Bind()) == Processor::Status::Failed);
+    REQUIRE(incomplete.GetExecutionResult().error == Engine::Error::IncompleteInstruction);
+    REQUIRE(rebinder.CallMethod(0x47, 5, true, host.Bind()) == Processor::Status::Accepted);
+    REQUIRE(rebinder.CallMethod(0x48, 7, true, host.Bind()) == Processor::Status::Accepted);
+    Processor budget{state};
+    REQUIRE(budget.CallMethod(0xe0a, 1, false, host.Bind()) == Processor::Status::Accepted);
+    REQUIRE(budget.CallMethod(0xe0b, 2, true, host.Bind(), 2) == Processor::Status::Failed);
+    REQUIRE(budget.GetExecutionResult().error == Engine::Error::InstructionLimit);
+    REQUIRE(host.writes.back() == std::pair<u32, u32>{0xd00, 3});
 }

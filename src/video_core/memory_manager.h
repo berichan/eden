@@ -114,6 +114,7 @@ public:
     bool ReadBlockChecked(GPUVAddr address, std::span<u8> output) const;
     bool WriteBlockChecked(GPUVAddr address, std::span<const u8> input);
     bool IsReadableRange(GPUVAddr address, size_t size) const;
+    bool IsWritableRange(GPUVAddr address, size_t size) const;
 
     /**
      * Checks if a gpu region can be simply read with a pointer.

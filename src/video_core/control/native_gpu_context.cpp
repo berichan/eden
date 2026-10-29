@@ -3,6 +3,8 @@
 
 #include "common/assert.h"
 #include "video_core/control/native_gpu_context.h"
+#include "video_core/control/native_qmd.h"
+#include "video_core/memory_manager.h"
 
 namespace Tegra::Control {
 
@@ -23,6 +25,54 @@ const std::shared_ptr<AmpereGraphicsState>& NativeGpuGraphicsContext::GetState()
 
 const std::shared_ptr<MemoryManager>& NativeGpuGraphicsContext::GetAddressSpace() const {
     return address_space;
+}
+
+NativeQmdScheduler::Result NativeGpuGraphicsContext::SignalQmd(GPUVAddr address, u32 argument,
+                                                               const QmdBackend& backend) const {
+    std::scoped_lock lock{qmd_mutex};
+    struct Adapter {
+        const NativeGpuGraphicsContext& owner;
+        const QmdBackend& backend;
+    } adapter{*this, backend};
+    const NativeQmdScheduler::Host host{
+        &adapter,
+        [](void* context, GPUVAddr address, NativeQmdScheduler::Descriptor& descriptor) {
+            const auto& self = *static_cast<Adapter*>(context);
+            return self.owner.address_space->ReadBlockChecked(
+                address, {reinterpret_cast<u8*>(descriptor.data()), sizeof(descriptor)});
+        },
+        [](void* context, const NativeQmdScheduler::Release& release) {
+            const auto& self = *static_cast<Adapter*>(context);
+            return !(release.address & 3) &&
+                   self.owner.address_space->IsWritableRange(release.address,
+                                                             release.SizeBytes()) &&
+                   self.backend.validate_release &&
+                   self.backend.validate_release(self.backend.context, release);
+        },
+        [](void* context, const NativeQmdScheduler::Descriptor& descriptor) {
+            const auto& backend = static_cast<Adapter*>(context)->backend;
+            return backend.dispatch && backend.dispatch(backend.context, descriptor);
+        },
+        [](void* context, const NativeQmdScheduler::Release& release) {
+            const auto& backend = static_cast<Adapter*>(context)->backend;
+            return backend.release && backend.release(backend.context, release);
+        },
+        [](void* context) {
+            const auto& backend = static_cast<Adapter*>(context)->backend;
+            return backend.should_stop && backend.should_stop(backend.context);
+        },
+    };
+    return qmd_scheduler.Signal(address, argument, host);
+}
+
+bool NativeGpuGraphicsContext::HasPendingQmd() const {
+    std::scoped_lock lock{qmd_mutex};
+    return qmd_scheduler.HasPendingDispatch();
+}
+
+bool NativeGpuGraphicsContext::HasQmdFailure() const {
+    std::scoped_lock lock{qmd_mutex};
+    return qmd_scheduler.HasFailed();
 }
 
 bool NativeGpuGraphicsContext::BindZCull(u64 address, u32 mode) {

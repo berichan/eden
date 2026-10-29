@@ -139,10 +139,15 @@ TEST_CASE("Native graphics state follows scheduling groups and retains address s
         retained = channels.Get(4, owner)->GetGraphicsContext();
         weak_state = retained->GetState();
         REQUIRE(channels.Get(5, owner)->GetGraphicsContext() == retained);
+        REQUIRE_FALSE(retained->HasQmdFailure());
         const auto alternate = channels.Get(6, owner)->GetGraphicsContext();
         REQUIRE(alternate != retained);
         REQUIRE(alternate->GetState() == retained->GetState());
         REQUIRE(alternate->GetAddressSpace() == second_space);
+        REQUIRE(retained->SignalQmd(0x1000, 3, {}).error ==
+                Tegra::Control::NativeQmdScheduler::Error::ReadFault);
+        REQUIRE(channels.Get(5, owner)->GetGraphicsContext()->HasQmdFailure());
+        REQUIRE_FALSE(alternate->HasQmdFailure());
         REQUIRE(channels.Get(7, owner)->GetGraphicsContext()->GetState() != retained->GetState());
         retained->GetState()->registers[0x202] = 2560;
         REQUIRE(alternate->GetState()->registers[0x202] == 2560);

@@ -34,6 +34,10 @@ add_library(video_core STATIC
     control/channel_state_cache.h
     control/native_gpu_context.cpp
     control/native_gpu_context.h
+    control/native_qmd.cpp
+    control/native_qmd.h
+    control/native_macro_processor.cpp
+    control/native_macro_processor.h
     control/scheduler.cpp
     control/scheduler.h
     delayed_destruction_ring.h

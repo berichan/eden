@@ -296,6 +296,7 @@ TEST_CASE("Checked GPU transfers distinguish sparse holes from faults and read-o
     std::memcpy(&value, bytes.data(), sizeof(value));
     REQUIRE(value == 2);
     REQUIRE_FALSE(manager.WriteBlockChecked(shim, word));
+    REQUIRE_FALSE(manager.IsWritableRange(shim, word.size()));
     bytes.fill(0xcc);
     REQUIRE_FALSE(manager.ReadBlockChecked(shim, bytes));
     REQUIRE(bytes.front() == 0xcc);

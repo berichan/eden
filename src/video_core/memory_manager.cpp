@@ -596,6 +596,11 @@ bool MemoryManager::IsReadableRange(GPUVAddr address, size_t size) const {
     return IsValidAccessRange(address, size, false);
 }
 
+bool MemoryManager::IsWritableRange(GPUVAddr address, size_t size) const {
+    std::scoped_lock lock{mapping_guard};
+    return IsValidAccessRange(address, size, true);
+}
+
 bool MemoryManager::WriteBlockChecked(GPUVAddr address, std::span<const u8> input) {
     std::scoped_lock lock{mapping_guard};
     if (!IsValidAccessRange(address, input.size(), true)) {

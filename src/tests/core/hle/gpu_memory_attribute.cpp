@@ -28,6 +28,7 @@
 #include "shader_recompiler/frontend/ampere/lower_to_maxwell.h"
 #include "shader_recompiler/frontend/maxwell/translate_program.h"
 #include "shader_recompiler/host_translate_info.h"
+#include "video_core/control/native_gpu_context.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/gpu.h"
 #include "video_core/memory_manager.h"
@@ -689,6 +690,68 @@ TEST_CASE("GPU pins retain real heap pages until partial unlock or process table
             VideoCommon::ComputeEnvironment split_b{split_compute, split, split_code, 0};
             REQUIRE(split_b.CalculateHash() != split_a.CalculateHash());
             REQUIRE(split.WriteBlockChecked(split_code, saved_source));
+            using GraphicsContext = Tegra::Control::NativeGpuGraphicsContext;
+            using Qmd = Tegra::Control::NativeQmdScheduler;
+            struct ReleaseHost {
+                Tegra::MemoryManager& memory;
+                Tegra::Engines::KeplerCompute& compute;
+                u32 releases{};
+                GraphicsContext::QmdBackend Bind() {
+                    return {
+                        this,
+                        [](void*, const Qmd::Release& release) { return release.SizeBytes() == 4; },
+                        [](void* context, const Qmd::Descriptor& descriptor) {
+                            return static_cast<ReleaseHost*>(context)
+                                ->compute.DispatchNativeCompute(descriptor);
+                        },
+                        [](void* context, const Qmd::Release& release) {
+                            auto& self = *static_cast<ReleaseHost*>(context);
+                            const u32 value = static_cast<u32>(release.payload);
+                            if (!self.memory.WriteBlockChecked(
+                                    release.address,
+                                    {reinterpret_cast<const u8*>(&value), sizeof(value)}))
+                                return false;
+                            ++self.releases;
+                            return true;
+                        }};
+                }
+            } release_host{*view, compute};
+            const auto graphics_state = std::make_shared<Tegra::Control::AmpereGraphicsState>();
+            GraphicsContext rejected_release{graphics_state, spaces.Acquire(space)};
+            auto qmd = descriptor;
+            qmd[12] = 0;
+            qmd[24] = static_cast<u32>(va + 0x900);
+            qmd[25] = (1U << 30) | (1U << 23);
+            qmd[26] = 99;
+            qmd[28] = static_cast<u32>(va + size);
+            qmd[29] = qmd[25];
+            const auto write_qmd = [&] {
+                return view->WriteBlockChecked(
+                    va + 0x800, {reinterpret_cast<const u8*>(qmd.data()), sizeof(qmd)});
+            };
+            view->Write<u32>(va + 0x900, 77);
+            REQUIRE(write_qmd());
+            REQUIRE(rejected_release.SignalQmd(va + 0x800, 3, release_host.Bind()).error ==
+                    Qmd::Error::InvalidRelease);
+            REQUIRE(view->Read<u32>(va + 0x900) == 77);
+            REQUIRE(release_host.releases == 0);
+            GraphicsContext accepted_release{graphics_state, spaces.Acquire(space)};
+            qmd[29] = 0;
+            REQUIRE(write_qmd());
+            const auto empty_qmd = accepted_release.SignalQmd(va + 0x800, 3, release_host.Bind());
+            REQUIRE(empty_qmd.Succeeded());
+            REQUIRE(empty_qmd.dispatches == 0);
+            REQUIRE(empty_qmd.releases == 1);
+            REQUIRE(view->Read<u32>(va + 0x900) == 99);
+            REQUIRE_FALSE(accepted_release.HasPendingQmd());
+            qmd[12] = 1;
+            REQUIRE(write_qmd());
+            view->Write<u32>(va + 0x900, 77);
+            REQUIRE(accepted_release.SignalQmd(va + 0x800, 3, release_host.Bind()).error ==
+                    Qmd::Error::DispatchFailed);
+            REQUIRE(view->Read<u32>(va + 0x900) == 77);
+            REQUIRE(release_host.releases == 1);
+            REQUIRE(accepted_release.HasQmdFailure());
         }
         selected = 0xfe;
         REQUIRE(pool.Map(&selected, spaces, backing, space, va + PageSize, va + 2 * PageSize - 1,
