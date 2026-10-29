@@ -8,6 +8,7 @@
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "core/core.h"
+#include "core/device_memory.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/kernel.h"
@@ -22,6 +23,8 @@
 #include "core/hle/service/hle_ipc.h"
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/vi/native_layer_pool.h"
+#include "video_core/host1x/gpu_device_memory_manager.h"
+#include "video_core/memory_manager.h"
 
 namespace {
 
@@ -209,6 +212,34 @@ TEST_CASE("GSV address space verification rejects malformed or absent contexts",
             Kernel::ResultInvalidSize);
     REQUIRE(RequestWords(caller, service, 434, std::array<u32, 1>{0x02000000}).first ==
             Service::GSV::GpuAddressSpacePool::InvalidAddressSpace);
+}
+
+TEST_CASE("Native GPU sessions verify the same address spaces shared with their driver",
+          "[core][ipc]") {
+    Caller caller;
+    Core::DeviceMemory memory;
+    Tegra::MaxwellDeviceMemoryManager backing{memory};
+    auto pool = std::make_shared<Service::GSV::GpuAddressSpacePool>();
+    auto manager =
+        std::make_unique<Tegra::MemoryManager>(caller.system, backing, 32, 1ULL << 32, 16, 12);
+    const auto id = manager->GetID();
+    u32 handle{};
+    REQUIRE(pool->Add(&handle, std::move(manager), 0).IsSuccess());
+    Service::GSV::GpuSession gpu{caller.system, &caller.process, pool};
+    Service::GSV::GpuSession foreign{caller.system, &caller.process};
+    for (auto* session : {&gpu, &foreign}) {
+        REQUIRE(session->CreateContext().IsSuccess());
+        REQUIRE(session->InitializeContext().IsSuccess());
+    }
+    REQUIRE(gpu.ExistsAddressSpace(handle).IsSuccess());
+    REQUIRE(foreign.ExistsAddressSpace(handle) ==
+            Service::GSV::GpuAddressSpacePool::InvalidAddressSpace);
+    auto driver_binding = pool->Acquire(handle);
+    REQUIRE(driver_binding != nullptr);
+    REQUIRE(driver_binding->GetID() == id);
+    const auto range = RequestWords(caller, gpu, 201, std::array<u32, 1>{handle}, 5);
+    REQUIRE(range.first.IsSuccess());
+    REQUIRE(range.second == 0x8000000ULL);
 }
 
 TEST_CASE("TIPC arguments follow handle and buffer descriptors", "[core][ipc]") {

@@ -28,6 +28,10 @@ namespace Kernel {
 class KEvent;
 }
 
+namespace Service::GSV {
+class GpuAddressSpacePool;
+}
+
 namespace Service::Nvidia {
 
 namespace NvCore {
@@ -59,7 +63,8 @@ private:
 
 class Module final {
 public:
-    explicit Module(Core::System& system_);
+    explicit Module(Core::System& system_,
+                    std::shared_ptr<GSV::GpuAddressSpacePool> native_address_spaces = {});
     ~Module();
 
     /// Returns a pointer to one of the available devices, identified by its name.
@@ -94,11 +99,16 @@ public:
         return container;
     }
 
+    const std::shared_ptr<GSV::GpuAddressSpacePool>& GetNativeAddressSpaces() const {
+        return native_address_spaces;
+    }
+
 private:
     friend class EventInterface;
 
     /// Manages syncpoints on the host
     NvCore::Container container;
+    const std::shared_ptr<GSV::GpuAddressSpacePool> native_address_spaces;
 
     /// Id to use for the next open file descriptor.
     DeviceFD next_fd = 1;

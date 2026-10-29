@@ -123,8 +123,10 @@ void LoopProcess(Core::System& system) {
     ServerManager::RunServer(std::move(server_manager));
 }
 
-Module::Module(Core::System& system)
-    : container{system.Host1x()}, service_context{system, "nvdrv"}, events_interface{*this} {
+Module::Module(Core::System& system,
+                std::shared_ptr<GSV::GpuAddressSpacePool> native_address_spaces_)
+    : container{system.Host1x()}, native_address_spaces{std::move(native_address_spaces_)},
+      service_context{system, "nvdrv"}, events_interface{*this} {
     builders["/dev/nvhost-as-gpu"] = [this, &system](DeviceFD fd) {
         auto device = std::make_shared<Devices::nvhost_as_gpu>(system, *this, container);
         return open_files.emplace(fd, std::move(device)).first;

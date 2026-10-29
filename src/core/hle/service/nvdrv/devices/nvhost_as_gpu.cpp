@@ -13,6 +13,7 @@
 #include "common/common_types.h"
 #include "common/logging.h"
 #include "core/core.h"
+#include "core/hle/service/gsv/gpu_address_space_pool.h"
 #include "core/hle/service/nvdrv/core/container.h"
 #include "core/hle/service/nvdrv/core/nvmap.h"
 #include "core/hle/service/nvdrv/devices/ioctl_serialization.h"
@@ -34,6 +35,12 @@ nvhost_as_gpu::~nvhost_as_gpu() = default;
 
 NvResult nvhost_as_gpu::Ioctl1(DeviceFD fd, Ioctl command, std::span<const u8> input,
                                std::span<u8> output) {
+    // Native mapping commands use GSV. Do not reinterpret their handles or page sizes as Maxwell
+    // requests while the native driver-side mappings and region queries are being implemented.
+    if (module.GetNativeAddressSpaces() && command.group == 'A' && command.cmd != 0x9 &&
+        command.cmd != 0xb) {
+        return NvResult::NotSupported;
+    }
     switch (command.group) {
     case 'A':
         switch (command.cmd) {
@@ -50,6 +57,9 @@ NvResult nvhost_as_gpu::Ioctl1(DeviceFD fd, Ioctl command, std::span<const u8> i
         case 0x8:
             return WrapFixed(this, &nvhost_as_gpu::GetVARegions1, input, output);
         case 0x9:
+            if (command.length != sizeof(IoctlAllocAsEx) || input.size() < sizeof(IoctlAllocAsEx)) {
+                return NvResult::InvalidSize;
+            }
             return WrapFixed(this, &nvhost_as_gpu::AllocAsEx, input, output);
         case 0x14:
             return WrapVariable(this, &nvhost_as_gpu::Remap, input, output);
@@ -73,6 +83,9 @@ NvResult nvhost_as_gpu::Ioctl2(DeviceFD fd, Ioctl command, std::span<const u8> i
 
 NvResult nvhost_as_gpu::Ioctl3(DeviceFD fd, Ioctl command, std::span<const u8> input,
                                std::span<u8> output, std::span<u8> inline_output) {
+    if (module.GetNativeAddressSpaces()) {
+        return NvResult::NotSupported;
+    }
     switch (command.group) {
     case 'A':
         switch (command.cmd) {
@@ -101,6 +114,14 @@ NvResult nvhost_as_gpu::AllocAsEx(IoctlAllocAsEx& params) {
     if (vm.initialised) {
         ASSERT_MSG(false, "Cannot initialise an address space twice!");
         return NvResult::InvalidState;
+    }
+
+    std::shared_ptr<Tegra::MemoryManager> native_gmmu;
+    if (const auto& native_spaces = module.GetNativeAddressSpaces()) {
+        native_gmmu = native_spaces->Acquire(static_cast<u32>(params.as_fd));
+        if (!native_gmmu) {
+            return NvResult::BadValue;
+        }
     }
 
     if (params.big_page_size) {
@@ -138,8 +159,14 @@ NvResult nvhost_as_gpu::AllocAsEx(IoctlAllocAsEx& params) {
         static_cast<u32>((vm.va_range_end - vm.va_range_split) >> vm.big_page_size_bits)};
     vm.big_page_allocator.emplace(start_big_pages, end_big_pages);
 
-    gmmu = std::make_unique<Tegra::MemoryManager>(system, max_big_page_bits, vm.va_range_split, vm.big_page_size_bits, VM::PAGE_SIZE_BITS);
-    system.GPU().InitAddressSpace(*gmmu);
+    if (native_gmmu) {
+        gmmu = std::move(native_gmmu);
+        LOG_DEBUG(Service_NVDRV, "Native GPU address space bound: handle={:#x}, address_space_id={}",
+                  static_cast<u32>(params.as_fd), gmmu->GetID());
+    } else {
+        gmmu = std::make_shared<Tegra::MemoryManager>(system, max_big_page_bits, vm.va_range_split, vm.big_page_size_bits, VM::PAGE_SIZE_BITS);
+        system.GPU().InitAddressSpace(*gmmu);
+    }
     vm.initialised = true;
 
     return NvResult::Success;

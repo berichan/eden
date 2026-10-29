@@ -76,6 +76,36 @@ TEST_CASE("Native GPU address space handles retain independent memory managers",
     REQUIRE(weak_pool.expired());
 }
 
+TEST_CASE("Native driver bindings keep the canonical address space alive after context release",
+          "[core][ipc]") {
+    Core::System system;
+    Core::DeviceMemory memory;
+    Tegra::MaxwellDeviceMemoryManager backing{memory};
+    auto pool = std::make_shared<Service::GSV::GpuAddressSpacePool>();
+    auto manager = std::make_unique<Tegra::MemoryManager>(system, backing, 32, 1ULL << 32, 16, 12);
+    const auto id = manager->GetID();
+    u32 handle{};
+    REQUIRE(pool->Add(&handle, std::move(manager), 0).IsSuccess());
+    auto first_binding = pool->Acquire(handle);
+    auto second_binding = pool->Acquire(handle);
+    REQUIRE(first_binding != nullptr);
+    REQUIRE(first_binding.get() == pool->Get(handle));
+    REQUIRE(second_binding.get() == first_binding.get());
+    Service::GSV::GpuAddressSpacePool foreign;
+    REQUIRE(foreign.Acquire(handle) == nullptr);
+    REQUIRE(pool->Acquire(handle + 1) == nullptr);
+    REQUIRE(pool->Acquire(0xffffffff) == nullptr);
+    const std::weak_ptr weak_manager{first_binding};
+    pool.reset();
+    REQUIRE(first_binding->GetID() == id);
+    REQUIRE(second_binding->GetID() == id);
+    REQUIRE_FALSE(first_binding->GpuToCpuAddress(0x8000000));
+    first_binding.reset();
+    REQUIRE_FALSE(weak_manager.expired());
+    second_binding.reset();
+    REQUIRE(weak_manager.expired());
+}
+
 TEST_CASE("Native GPU page tables cover the full 40-bit address range without initial mappings",
           "[core][ipc]") {
     Core::System system;

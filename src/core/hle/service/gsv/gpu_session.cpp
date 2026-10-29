@@ -53,11 +53,13 @@ private:
 
 } // namespace
 
-GpuSession::GpuSession(Core::System& system, Kernel::KProcess* process)
+GpuSession::GpuSession(Core::System& system, Kernel::KProcess* process,
+                       std::shared_ptr<GpuAddressSpacePool> address_spaces)
     : ServiceFramework{system, "GsvGpuSession"}, m_process{system.Kernel(), process},
       m_service_context{system, "GsvGpuSession"}, m_worker_client{system.Kernel()},
       m_graphics_devices{std::make_shared<GraphicsDeviceTable>()},
-      m_address_spaces{std::make_shared<GpuAddressSpacePool>()} {
+      m_address_spaces{address_spaces ? std::move(address_spaces)
+                                      : std::make_shared<GpuAddressSpacePool>()} {
     static const FunctionInfo functions[] = {
         {11, &GpuSession::GetEventIdRange, "GetEventIdRange"},
         {12, &GpuSession::CreateEvent, "CreateEvent"},

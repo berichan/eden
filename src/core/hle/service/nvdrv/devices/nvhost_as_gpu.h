@@ -75,7 +75,7 @@ public:
 private:
     struct IoctlAllocAsEx {
         u32_le flags{}; // usually passes 1
-        s32_le as_fd{}; // ignored; passes 0
+        s32_le as_fd{}; // Native GSV address-space handle; ignored by the legacy ABI.
         u32_le big_page_size{};
         u32_le reserved{}; // ignored; passes 0
         u64_le va_range_start{};
@@ -219,7 +219,7 @@ private:
 
         bool initialised{};
     } vm;
-    std::unique_ptr<Tegra::MemoryManager> gmmu;
+    std::shared_ptr<Tegra::MemoryManager> gmmu;
 };
 
 } // namespace Service::Nvidia::Devices

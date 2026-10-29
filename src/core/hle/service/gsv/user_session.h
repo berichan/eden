@@ -21,6 +21,7 @@ namespace Service::GSV {
 class SyncptSession;
 class GpuSession;
 class DisplaySession;
+class GpuAddressSpacePool;
 
 class UserSession final : public ServiceFramework<UserSession> {
 public:
@@ -58,6 +59,7 @@ private:
     u64 m_work_memory_size{};
     bool m_process_bound{};
     bool m_context_created{};
+    std::shared_ptr<GpuAddressSpacePool> m_address_spaces;
     std::shared_ptr<Nvidia::Module> m_nvdrv;
     std::weak_ptr<Nvidia::NVDRV> m_nvdrv_user;
     std::shared_ptr<SyncptSession> m_syncpt;

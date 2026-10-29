@@ -43,7 +43,8 @@ void Reply(HLERequestContext& ctx, Result result) {
 
 UserSession::UserSession(Core::System& system, Kernel::KProcess* process, u64 aruid)
     : ServiceFramework{system, "GsvUserSession"}, m_process{system.Kernel(), process},
-      m_transfer_memory{system.Kernel()}, m_aruid{aruid} {
+      m_transfer_memory{system.Kernel()}, m_aruid{aruid},
+      m_address_spaces{std::make_shared<GpuAddressSpacePool>()} {
     static const FunctionInfo functions[] = {
         {1, &UserSession::BootWithTransferMemory, "BootWithTransferMemory"},
         {4, &UserSession::BootWithRemoteMemory, "BootWithRemoteMemory"},
@@ -201,7 +202,8 @@ void UserSession::CreateGpuSessionWithRemoteMemory(HLERequestContext& ctx) {
         const auto version = rp.Pop<u64>();
         R_UNLESS(version == 2 || version == 3, Kernel::ResultNotImplemented);
         R_UNLESS(!m_gpu_session, Result{0x200f3});
-        auto gpu = std::make_shared<GpuSession>(system, m_process.GetPointerUnsafe());
+        auto gpu =
+            std::make_shared<GpuSession>(system, m_process.GetPointerUnsafe(), m_address_spaces);
         R_TRY(ctx.TryAddCopyInterface(gpu));
         m_gpu_session = std::move(gpu);
         LOG_DEBUG(Service, "Native GPU session created: aruid={:#x}, version={}", m_aruid, version);
@@ -305,7 +307,7 @@ void UserSession::CreateNvDrv2UserSessionWithRemoteMemory(HLERequestContext& ctx
         R_UNLESS(m_nvdrv_user.expired(), Result{0x200f3});
         if (!m_nvdrv) {
             // Keep native device state local to this graphics context, including across reopen.
-            m_nvdrv = std::make_shared<Nvidia::Module>(system);
+            m_nvdrv = std::make_shared<Nvidia::Module>(system, m_address_spaces);
         }
         auto user = std::make_shared<Nvidia::NVDRV>(system, m_nvdrv, "nvdrv2:user",
                                                     m_process.GetPointerUnsafe());

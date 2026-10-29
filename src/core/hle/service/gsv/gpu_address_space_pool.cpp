@@ -34,11 +34,15 @@ Result GpuAddressSpacePool::Add(u32* out_handle,
 }
 
 Tegra::MemoryManager* GpuAddressSpacePool::Get(u32 handle) const {
+    return Acquire(handle).get();
+}
+
+std::shared_ptr<Tegra::MemoryManager> GpuAddressSpacePool::Acquire(u32 handle) const {
     if (handle < HandleBase || handle - HandleBase >= m_address_spaces.size()) {
         return nullptr;
     }
     std::scoped_lock lock{m_mutex};
-    return m_address_spaces[handle - HandleBase].memory_manager.get();
+    return m_address_spaces[handle - HandleBase].memory_manager;
 }
 
 std::optional<s32> GpuAddressSpacePool::GetFlags(u32 handle) const {

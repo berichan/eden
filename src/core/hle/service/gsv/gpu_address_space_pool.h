@@ -34,13 +34,14 @@ public:
     bool HasCapacity() const;
     Result Add(u32* out_handle, std::unique_ptr<Tegra::MemoryManager> memory_manager, s32 flags);
     Tegra::MemoryManager* Get(u32 handle) const;
+    std::shared_ptr<Tegra::MemoryManager> Acquire(u32 handle) const;
     std::optional<s32> GetFlags(u32 handle) const;
     Result QueryPartitionRange(u64* out_first, u64* out_last, u32 handle,
                                Partition partition) const;
 
 private:
     struct AddressSpace {
-        std::unique_ptr<Tegra::MemoryManager> memory_manager;
+        std::shared_ptr<Tegra::MemoryManager> memory_manager;
         s32 flags{};
     };
     // Native address spaces remain cached until the last main/worker endpoint releases the pool.

@@ -21,7 +21,8 @@ class GpuAddressSpacePool;
 
 class GpuSession final : public ServiceFramework<GpuSession> {
 public:
-    explicit GpuSession(Core::System& system, Kernel::KProcess* process);
+    explicit GpuSession(Core::System& system, Kernel::KProcess* process,
+                        std::shared_ptr<GpuAddressSpacePool> address_spaces = {});
     ~GpuSession() override;
 
     Result CreateContext();
