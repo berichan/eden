@@ -9,6 +9,7 @@
 #include <mutex>
 #include <new>
 #include <optional>
+#include "common/assert.h"
 #include "common/common_types.h"
 #include "common/logging.h"
 #include "core/hle/kernel/svc_results.h"
@@ -22,6 +23,7 @@ public:
     static constexpr Result InvalidArgument{0x100f3};
     static constexpr Result InvalidHandle{0x280f3};
     static constexpr Result OutOfMemory{0x80f3};
+    static constexpr Result Busy{0x180f3};
 
     struct Binding {
         u64 address;
@@ -74,6 +76,7 @@ public:
         const std::scoped_lock lock{m_mutex};
         const auto it = m_descriptions.find(handle);
         R_UNLESS(it != m_descriptions.end(), InvalidHandle);
+        R_UNLESS(!it->second.image_attached, Busy);
         if (it->second.pool) {
             R_TRY(it->second.pool->ReleaseReference(it->second.description.binding->memory_handle));
         }
@@ -105,10 +108,32 @@ public:
         return it != m_descriptions.end() ? std::optional{it->second.description} : std::nullopt;
     }
 
+    Result AcquireImage(Description* out, u32 handle, u64 size) {
+        R_UNLESS(size != 0, InvalidArgument);
+        const std::scoped_lock lock{m_mutex};
+        const auto it = m_descriptions.find(handle);
+        R_UNLESS(it != m_descriptions.end(), InvalidHandle);
+        auto& record = it->second;
+        R_UNLESS(record.description.binding && !record.image_attached &&
+                     size <= record.description.size,
+                 Busy);
+        record.image_attached = true;
+        *out = record.description;
+        R_SUCCEED();
+    }
+
+    void ReleaseImage(u32 handle) {
+        const std::scoped_lock lock{m_mutex};
+        const auto it = m_descriptions.find(handle);
+        ASSERT(it != m_descriptions.end() && it->second.image_attached);
+        it->second.image_attached = false;
+    }
+
 private:
     struct Record {
         Description description;
         std::shared_ptr<GpuMemoryPool> pool;
+        bool image_attached{};
     };
 
     // Unbound descriptions own no address. Bound records retain the registered allocation's

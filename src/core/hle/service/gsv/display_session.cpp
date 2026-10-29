@@ -10,6 +10,7 @@
 #include "core/hle/kernel/k_readable_event.h"
 #include "core/hle/kernel/svc_results.h"
 #include "core/hle/service/gsv/display_session.h"
+#include "core/hle/service/gsv/native_image_pool.h"
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/sm/sm.h"
 #include "core/hle/service/vi/container.h"
@@ -39,9 +40,10 @@ void Reply(HLERequestContext& ctx, Result result) {
 
 } // namespace
 
-DisplaySession::DisplaySession(Core::System& system, Kernel::KProcess* process)
+DisplaySession::DisplaySession(Core::System& system, Kernel::KProcess* process,
+                               std::shared_ptr<NativeImagePool> images)
     : ServiceFramework{system, "GsvDisplaySession"}, m_process{system.Kernel(), process},
-      m_service_context{system, "GsvDisplaySession"} {
+      m_images{std::move(images)}, m_service_context{system, "GsvDisplaySession"} {
     static const FunctionInfo functions[] = {
         {1, &DisplaySession::GetMaxEventId, "GetMaxEventId"},
         {3, &DisplaySession::GetMaxSemaphoreId, "GetMaxSemaphoreId"},
@@ -72,6 +74,9 @@ DisplaySession::~DisplaySession() {
         if (layer) {
             m_container->DestroyNativeLayer(layer->layer_id, m_process->GetProcessId());
         }
+    }
+    if (m_images) {
+        m_images->ClearAliases();
     }
     m_service_context.CloseEvent(m_notification_event);
     for (auto* event : m_semaphores) {

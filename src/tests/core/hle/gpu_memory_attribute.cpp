@@ -17,6 +17,7 @@
 #include "core/hle/service/gsv/gpu_memory_pool.h"
 #include "core/hle/service/gsv/graphics_device_table.h"
 #include "core/hle/service/gsv/native_memory_descriptions.h"
+#include "core/hle/service/gsv/native_image_pool.h"
 #include "core/memory.h"
 #include "video_core/gpu.h"
 #include "video_core/memory_manager.h"
@@ -344,6 +345,129 @@ TEST_CASE("GPU pins retain real heap pages until partial unlock or process table
         Svc::PageInfo page;
         REQUIRE(table.QueryInfo(&info, &page, address).IsSuccess());
         REQUIRE(info.GetAttribute() == KMemoryAttribute::GpuSharable);
+        REQUIRE(devices->Destroy(device).IsSuccess());
+    }
+    SECTION("native images validate real backing and keep it alive through external consumers") {
+        using namespace Service::GSV;
+        auto devices = std::make_shared<GraphicsDeviceTable>();
+        u8 device{};
+        REQUIRE(devices->Create(&device, 1, 0, 0).IsSuccess());
+        auto pool = std::make_shared<GpuMemoryPool>(kernel, &process, devices);
+        REQUIRE(table
+                    .SetGpuMemoryAttribute(address, 4 * PageSize, KMemoryAttribute::GpuSharable,
+                                           KMemoryAttribute::GpuSharable)
+                    .IsSuccess());
+        u32 memory{};
+        const u64 base = GetInteger(address);
+        REQUIRE(pool->Register(&memory, base, base + 4 * PageSize - 1, 0, device).IsSuccess());
+        auto descriptions = std::make_shared<NativeMemoryDescriptions>();
+        u32 description{}, small{};
+        REQUIRE(descriptions->Create(&description, 3, PageSize).IsSuccess());
+        REQUIRE(descriptions->Create(&small, 3, 256).IsSuccess());
+        NativeImagePreference preference{};
+        preference.type = 1;
+        preference.row_alignment_log2 = 3;
+        preference.format = 1;
+        preference.options = 1;
+        std::shared_ptr<const NativeImage> consumer;
+        {
+            NativeImagePool images{descriptions};
+            u32 handle{0xfeed};
+            REQUIRE(images.Create(&handle, preference, 1, 0) ==
+                    NativeMemoryDescriptions::InvalidHandle);
+            REQUIRE(handle == 0xfeed);
+            REQUIRE(images.Create(&handle, preference, 1, description) ==
+                    NativeMemoryDescriptions::Busy);
+            REQUIRE(handle == 0xfeed);
+            REQUIRE(descriptions->Bind(small, pool, base, 256, memory, 0).IsSuccess());
+            REQUIRE(images.Create(&handle, preference, 1, small) == NativeMemoryDescriptions::Busy);
+            REQUIRE(handle == 0xfeed);
+            REQUIRE(descriptions->Destroy(small).IsSuccess());
+            REQUIRE(
+                descriptions->Bind(description, pool, base + PageSize, PageSize, memory, PageSize)
+                    .IsSuccess());
+            REQUIRE(images.Create(&handle, preference, 0, description) ==
+                    NativeMemoryDescriptions::InvalidArgument);
+            REQUIRE(images.Create(&handle, preference, 2, description) == ResultNotImplemented);
+            auto invalid = preference;
+            invalid.packed_extent = 255;
+            invalid.pitch_gobs = 1;
+            REQUIRE(images.Create(&handle, invalid, 1, description) ==
+                    NativeMemoryDescriptions::InvalidArgument);
+            REQUIRE(handle == 0xfeed);
+            REQUIRE(images.Create(&handle, preference, 1, description).IsSuccess());
+            REQUIRE(handle == 1);
+            REQUIRE_FALSE(images.AcquireAlias(handle));
+            REQUIRE(images.RegisterAlias(0, 1) == NativeMemoryDescriptions::InvalidHandle);
+            for (const u32 count : {0U, 2U, 0xffffffffU}) {
+                REQUIRE(images.RegisterAlias(handle, count) ==
+                        NativeMemoryDescriptions::InvalidArgument);
+            }
+            REQUIRE(images.UnregisterAlias(handle) == NativeMemoryDescriptions::InvalidHandle);
+            for (size_t i = 0; i < 255; ++i) {
+                REQUIRE(images.RegisterAlias(handle, 1).IsSuccess());
+            }
+            REQUIRE(images.RegisterAlias(handle, 1) == NativeMemoryDescriptions::OutOfMemory);
+            REQUIRE(images.Destroy(handle) == NativeMemoryDescriptions::Busy);
+            for (size_t i = 0; i < 254; ++i) {
+                REQUIRE(images.UnregisterAlias(handle).IsSuccess());
+            }
+            auto alias = images.AcquireAlias(handle);
+            REQUIRE(alias != nullptr);
+            REQUIRE(images.UnregisterAlias(handle).IsSuccess());
+            REQUIRE_FALSE(images.AcquireAlias(handle));
+            REQUIRE(images.Destroy(handle) == NativeMemoryDescriptions::Busy);
+            alias.reset();
+            REQUIRE(descriptions->Destroy(description) == NativeMemoryDescriptions::Busy);
+            u32 duplicate{0xbeef};
+            REQUIRE(images.Create(&duplicate, preference, 1, description) ==
+                    NativeMemoryDescriptions::Busy);
+            REQUIRE(duplicate == 0xbeef);
+            REQUIRE_FALSE(images.Acquire(0));
+            REQUIRE(images.Destroy(0) == NativeMemoryDescriptions::InvalidHandle);
+            consumer = images.Acquire(handle);
+            REQUIRE(consumer != nullptr);
+            REQUIRE(consumer->layout.size == 512);
+            REQUIRE(consumer->layout.row_pitch == 64);
+            REQUIRE(consumer->preference.format == 1);
+            REQUIRE(consumer->Memory().binding->address == base + PageSize);
+            REQUIRE(consumer->Memory().binding->offset == PageSize);
+            REQUIRE(consumer->Memory().binding->memory_handle == memory);
+            REQUIRE(images.Destroy(handle) == NativeMemoryDescriptions::Busy);
+            consumer.reset();
+            REQUIRE(images.Destroy(handle).IsSuccess());
+            REQUIRE_FALSE(images.Acquire(handle));
+            REQUIRE(images.Destroy(handle) == NativeMemoryDescriptions::InvalidHandle);
+            REQUIRE(images.Create(&handle, preference, 1, description).IsSuccess());
+            REQUIRE(handle == 2);
+            REQUIRE(images.RegisterAlias(handle, 1).IsSuccess());
+            consumer = images.AcquireAlias(handle);
+            images.ClearAliases();
+            REQUIRE_FALSE(images.AcquireAlias(handle));
+        }
+        REQUIRE(consumer->Memory().binding->address == base + PageSize);
+        REQUIRE(descriptions->Destroy(description) == NativeMemoryDescriptions::Busy);
+        auto* event = KEvent::Create(kernel);
+        REQUIRE(event != nullptr);
+        event->Initialize(kernel, nullptr);
+        KEvent::Register(kernel, event);
+        SCOPE_EXIT {
+            event->GetReadableEvent().Close(kernel);
+            event->Close(kernel);
+        };
+        REQUIRE(pool->Unregister(memory, event).IsSuccess());
+        std::weak_ptr<GpuMemoryPool> retained_pool = pool;
+        std::weak_ptr<NativeMemoryDescriptions> retained_descriptions = descriptions;
+        pool.reset();
+        descriptions.reset();
+        REQUIRE_FALSE(retained_pool.expired());
+        REQUIRE_FALSE(retained_descriptions.expired());
+        REQUIRE_FALSE(event->GetReadableEvent().IsSignaled(kernel));
+        REQUIRE(devices->Destroy(device) == GraphicsDeviceTable::InvalidDevice);
+        consumer.reset();
+        REQUIRE(retained_pool.expired());
+        REQUIRE(retained_descriptions.expired());
+        REQUIRE(event->GetReadableEvent().IsSignaled(kernel));
         REQUIRE(devices->Destroy(device).IsSuccess());
     }
     SECTION("GPU mappings share the retained CPU pages and delay release completion") {

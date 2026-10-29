@@ -20,9 +20,12 @@ class Container;
 
 namespace Service::GSV {
 
+class NativeImagePool;
+
 class DisplaySession final : public ServiceFramework<DisplaySession> {
 public:
-    explicit DisplaySession(Core::System& system, Kernel::KProcess* process);
+    explicit DisplaySession(Core::System& system, Kernel::KProcess* process,
+                            std::shared_ptr<NativeImagePool> images = {});
     ~DisplaySession() override;
 
 private:
@@ -61,6 +64,7 @@ private:
     };
 
     Kernel::KScopedAutoObject<Kernel::KProcess> m_process;
+    std::shared_ptr<NativeImagePool> m_images;
     KernelHelpers::ServiceContext m_service_context;
     DisplayEventQueue m_event_queue;
     Kernel::KEvent* m_notification_event{};

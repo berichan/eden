@@ -23,6 +23,7 @@ class SyncptSession;
 class GpuSession;
 class DisplaySession;
 class GpuAddressSpacePool;
+class NativeImagePool;
 
 class UserSession final : public ServiceFramework<UserSession> {
 public:
@@ -51,8 +52,12 @@ private:
     void InitializeGpuContext(HLERequestContext& ctx);
     void ExistsAddressSpace(HLERequestContext& ctx);
     void CalculateNativeImageSize(HLERequestContext& ctx);
+    void CreateNativeImage(HLERequestContext& ctx);
+    void DestroyNativeImage(HLERequestContext& ctx);
     void CreateDisplayContext(HLERequestContext& ctx);
     void InitializeDisplayContext(HLERequestContext& ctx);
+    void RegisterNativeImageAlias(HLERequestContext& ctx);
+    void UnregisterNativeImageAlias(HLERequestContext& ctx);
     void CreateSyncptContext(HLERequestContext& ctx);
     void InitializeSyncptContext(HLERequestContext& ctx);
     void CreateNvDrv2UserSessionWithRemoteMemory(HLERequestContext& ctx);
@@ -64,7 +69,8 @@ private:
     u64 m_work_memory_size{};
     bool m_process_bound{};
     bool m_context_created{};
-    NativeMemoryDescriptions m_memory_descriptions;
+    std::shared_ptr<NativeMemoryDescriptions> m_memory_descriptions;
+    std::shared_ptr<NativeImagePool> m_images;
     std::shared_ptr<GpuAddressSpacePool> m_address_spaces;
     std::shared_ptr<Nvidia::Module> m_nvdrv;
     std::weak_ptr<Nvidia::NVDRV> m_nvdrv_user;

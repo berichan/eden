@@ -37,7 +37,7 @@ public:
     Result QueryBufferState(u64* out_state, u64 id, u64 owner_process_id) {
         const auto* layer = Find(id, owner_process_id);
         R_UNLESS(layer != nullptr, (Result{ErrorModule::VI, 7}));
-        *out_state = layer->buffer_state;
+        *out_state = layer->available_buffers;
         R_SUCCEED();
     }
 
@@ -88,7 +88,8 @@ private:
     struct Layer {
         u64 id;
         u64 owner_process_id;
-        u64 buffer_state{};
+        // The mask reports reusable queue slots, including slots with no registered image yet.
+        u32 available_buffers{std::numeric_limits<u32>::max()};
         std::optional<u64> display_id{};
         bool selected{};
     };

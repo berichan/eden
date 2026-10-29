@@ -306,6 +306,49 @@ TEST_CASE("Native memory description TIPC validates context, byte type, size and
             Kernel::ResultInvalidState);
 }
 
+TEST_CASE("Native image creation and destruction reject malformed packets and missing GPU state",
+          "[core][ipc][gsv]") {
+    Caller caller;
+    Service::GSV::UserSession root{caller.system, &caller.process, 0x55};
+    std::array<u32, 19> words{};
+    words[1] = 1;
+    words[4] = 3;
+    words[6] = 1;
+    words[7] = 1;
+    words[16] = 1;
+    words[17] = 1;
+    for (const size_t count : {0U, 17U, 19U}) {
+        const auto [result, output] = RequestWords(caller, root, 429, std::span{words}.first(count), 2);
+        REQUIRE(result == Kernel::ResultInvalidSize);
+        REQUIRE(static_cast<u32>(output) == 0);
+    }
+    const auto [result, output] = RequestWords(caller, root, 429, std::span{words}.first(18), 2);
+    REQUIRE(result == Kernel::ResultInvalidState);
+    REQUIRE(static_cast<u32>(output) == 0);
+    REQUIRE(RequestWords(caller, root, 430, {}).first == Kernel::ResultInvalidSize);
+    REQUIRE(RequestWords(caller, root, 430, std::span{words}.first(2)).first ==
+            Kernel::ResultInvalidSize);
+    REQUIRE(RequestWords(caller, root, 430, std::span{words}.first(1)).first ==
+            Kernel::ResultInvalidState);
+}
+
+TEST_CASE("Native image alias packets require an initialized display context", "[core][ipc][gsv]") {
+    Caller caller;
+    Service::GSV::UserSession root{caller.system, &caller.process, 0x55};
+    const std::array<u32, 3> words{1, 1, 0};
+    for (const size_t count : {0U, 1U, 3U}) {
+        REQUIRE(RequestWords(caller, root, 315, std::span{words}.first(count)).first ==
+                Kernel::ResultInvalidSize);
+    }
+    REQUIRE(RequestWords(caller, root, 315, std::span{words}.first(2)).first ==
+            Kernel::ResultInvalidState);
+    REQUIRE(RequestWords(caller, root, 314, {}).first == Kernel::ResultInvalidSize);
+    REQUIRE(RequestWords(caller, root, 314, std::span{words}.first(2)).first ==
+            Kernel::ResultInvalidSize);
+    REQUIRE(RequestWords(caller, root, 314, std::span{words}.first(1)).first ==
+            Kernel::ResultInvalidState);
+}
+
 TEST_CASE("Native graphics device commands enforce initialization, packet sizes and lifetime",
           "[core][ipc]") {
     Caller caller;
@@ -876,7 +919,7 @@ TEST_CASE("Native display layer creation validates tokens and both notification 
     REQUIRE(RequestWords(caller, service, 252, absent_token).first.IsSuccess());
 }
 
-TEST_CASE("Empty native layers retain their buffer state across display binding",
+TEST_CASE("Empty native layers expose all 32 reusable buffer slots across display binding",
           "[core][ipc][gsv]") {
     Service::VI::NativeLayerPool pool;
     u64 id{};
@@ -885,7 +928,7 @@ TEST_CASE("Empty native layers retain their buffer state across display binding"
     REQUIRE(pool.QueryBufferState(&state, id, 5) == Result{ErrorModule::VI, 7});
     REQUIRE(state == 0xfeed);
     REQUIRE(pool.QueryBufferState(&state, id, 4).IsSuccess());
-    REQUIRE(state == 0);
+    REQUIRE(state == 0xffffffffULL);
     REQUIRE(pool.Bind(id, 5, 0) == Result{ErrorModule::VI, 7});
     REQUIRE(pool.Bind(id, 4, 0).IsSuccess());
     REQUIRE(pool.Bind(id, 4, 0) == Result{ErrorModule::VI, 1});
@@ -895,7 +938,7 @@ TEST_CASE("Empty native layers retain their buffer state across display binding"
     REQUIRE(pool.Unbind(id, 4).IsSuccess());
     REQUIRE(pool.Bind(id, 4, 1).IsSuccess());
     REQUIRE(pool.QueryBufferState(&state, id, 4).IsSuccess());
-    REQUIRE(state == 0);
+    REQUIRE(state == 0xffffffffULL);
     REQUIRE(pool.Destroy(id, 4).IsSuccess());
     REQUIRE(pool.Bind(id, 4, 1) == Result{ErrorModule::VI, 7});
     REQUIRE(pool.Unbind(id, 4) == Result{ErrorModule::VI, 7});
