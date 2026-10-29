@@ -50,9 +50,25 @@ public:
     Result Map(u8* out_kind, GpuAddressSpacePool& address_spaces,
                Tegra::MaxwellDeviceMemoryManager& backing, u32 address_space, u64 gpu_address,
                u64 last_address, u32 memory_handle, u64 offset, MapOptions options);
-    Result Unmap(u32 address_space, u64 gpu_address, u64 last_address);
+    Result MapSparseMemory(u8* out_kind, GpuAddressSpacePool& address_spaces,
+                           Tegra::MaxwellDeviceMemoryManager& backing, u32 address_space,
+                           u64 gpu_address, u64 last_address, u32 memory_handle, u64 offset,
+                           MapOptions options);
+    Result Unmap(u32 address_space, u64 gpu_address, u64 last_address, u64* out_unmapped = nullptr);
+    Result UnmapSparseMemory(u32 address_space, u64 gpu_address, u64 last_address,
+                             u64* out_unmapped = nullptr);
+    Result CreateSparseRegion(GpuAddressSpacePool& address_spaces, u32 address_space,
+                              u64 gpu_address, u64 last_address, u8 page_bits, u8 alloc_mode,
+                              u8 device_id);
+    Result DestroySparseRegion(u32 address_space, u64 gpu_address, u64 last_address);
 
 private:
+    Result MapImpl(u8* out_kind, GpuAddressSpacePool& address_spaces,
+                   Tegra::MaxwellDeviceMemoryManager& backing, u32 address_space, u64 gpu_address,
+                   u64 last_address, u32 memory_handle, u64 offset, MapOptions options,
+                   bool sparse);
+    Result UnmapImpl(u32 address_space, u64 gpu_address, u64 last_address, u64* out_unmapped,
+                     bool sparse);
     struct Memory {
         explicit Memory(Kernel::KernelCore& kernel) : release_event{kernel} {}
         u64 address{};
@@ -72,8 +88,19 @@ private:
         u32 memory_handle{};
     };
 
+    struct SparseRegion {
+        std::shared_ptr<Tegra::MemoryManager> manager;
+        u64 size;
+        u8 page_bits;
+        u8 alloc_mode;
+        u8 device_id;
+    };
+    using SparseRegions = std::map<std::pair<u32, u64>, SparseRegion>;
+    SparseRegions::iterator FindSparseRegion(u32 address_space, u64 address);
+
     Result ReleaseMemory(std::map<u32, Memory>::iterator it, Kernel::KEvent* completion = nullptr);
-    void RemoveMapping(std::map<std::pair<u32, u64>, Mapping>::iterator it);
+    void RemoveMapping(std::map<std::pair<u32, u64>, Mapping>::iterator it,
+                       bool restore_sparse = true);
 
     Kernel::KernelCore& m_kernel;
     Kernel::KScopedAutoObject<Kernel::KProcess> m_process;
@@ -81,6 +108,7 @@ private:
     std::mutex m_mutex;
     std::map<u32, Memory> m_memory;
     std::map<std::pair<u32, u64>, Mapping> m_mappings;
+    SparseRegions m_sparse_regions;
     Tegra::MaxwellDeviceMemoryManager* m_backing{};
     std::optional<Core::Asid> m_asid;
     u32 m_next_handle{};

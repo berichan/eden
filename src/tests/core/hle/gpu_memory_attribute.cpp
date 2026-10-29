@@ -16,8 +16,8 @@
 #include "core/hle/service/gsv/gpu_address_space_pool.h"
 #include "core/hle/service/gsv/gpu_memory_pool.h"
 #include "core/hle/service/gsv/graphics_device_table.h"
-#include "core/hle/service/gsv/native_memory_descriptions.h"
 #include "core/hle/service/gsv/native_image_pool.h"
+#include "core/hle/service/gsv/native_memory_descriptions.h"
 #include "core/memory.h"
 #include "video_core/gpu.h"
 #include "video_core/memory_manager.h"
@@ -580,6 +580,175 @@ TEST_CASE("GPU pins retain real heap pages until partial unlock or process table
         REQUIRE(event->GetReadableEvent().IsSignaled(kernel));
         REQUIRE(devices->Destroy(device).IsSuccess());
         REQUIRE(pool.Unregister(handle) == Result{0x280f3});
+    }
+    SECTION("sparse GPU regions own virtual holes and resident overlays independently") {
+        using namespace Service::GSV;
+        Tegra::GPU gpu{system, false, false};
+        Null::RasterizerNull rasterizer{gpu};
+        Tegra::MaxwellDeviceMemoryManager backing{system.DeviceMemory()};
+        backing.BindInterface(&rasterizer);
+        GpuAddressSpacePool spaces;
+        auto manager =
+            std::make_unique<Tegra::MemoryManager>(system, backing, 40, 1ULL << 40, 16, 12);
+        manager->BindRasterizer(&rasterizer);
+        u32 space{};
+        REQUIRE(spaces.Add(&space, std::move(manager), 0).IsSuccess());
+        const auto view = spaces.Acquire(space);
+        auto devices = std::make_shared<GraphicsDeviceTable>();
+        u8 device{}, other_device{};
+        REQUIRE(devices->Create(&device, 1, 0, 0).IsSuccess());
+        REQUIRE(devices->Create(&other_device, 2, 0, 0).IsSuccess());
+        constexpr u64 va = 0x8000000000;
+        constexpr u64 size = 250ULL << 20;
+        constexpr u64 last = va + size - 1;
+        const auto ram_before = kernel.MemoryManager().GetFreeSize();
+        {
+            GpuMemoryPool pool{kernel, &process, devices};
+            REQUIRE(pool.CreateSparseRegion(spaces, space, va, last, 11, 1, device).IsError());
+            REQUIRE(pool.CreateSparseRegion(spaces, space, va, last, 12, 2, device).IsError());
+            REQUIRE(pool.CreateSparseRegion(spaces, space, va, last, 12, 1, 8).IsError());
+            REQUIRE(pool.CreateSparseRegion(spaces, space + 8, va, last, 12, 1, device).IsError());
+            REQUIRE(pool.CreateSparseRegion(spaces, space, va + 1, last, 12, 1, device).IsError());
+            REQUIRE(pool.CreateSparseRegion(spaces, space, va, last - 1, 12, 1, device).IsError());
+            REQUIRE(pool.CreateSparseRegion(spaces, space, va, va - 1, 12, 1, device).IsError());
+            REQUIRE(
+                pool.CreateSparseRegion(spaces, space, 0, PageSize - 1, 12, 1, device).IsError());
+            REQUIRE(
+                pool.CreateSparseRegion(spaces, space, va, 1ULL << 40, 12, 1, device).IsError());
+            REQUIRE(devices->Get(device)->memory_references == 0);
+            REQUIRE(pool.CreateSparseRegion(spaces, space, va, last, 12, 1, device).IsSuccess());
+            REQUIRE(kernel.MemoryManager().GetFreeSize() == ram_before);
+            REQUIRE(devices->Destroy(device).IsError());
+            REQUIRE(devices->Get(device)->memory_references == 1);
+            REQUIRE_FALSE(view->GpuToCpuAddress(va));
+            REQUIRE_FALSE(view->GpuToCpuAddress(last));
+            REQUIRE(view->GetPointer(va) == nullptr);
+            REQUIRE(view->GetSubmappedRange(va, size).empty());
+            REQUIRE(view->Read<u32>(va) == 0);
+            view->Write<u32>(va, 0xffffffff);
+            REQUIRE(view->Read<u32>(va) == 0);
+            REQUIRE(view->Read<u64>(last - sizeof(u64) + 1) == 0);
+            REQUIRE(pool.CreateSparseRegion(spaces, space, va, last, 12, 1, device).IsError());
+            REQUIRE(pool.CreateSparseRegion(spaces, space, va + PageSize, last, 12, 1, device)
+                        .IsError());
+            REQUIRE(pool.CreateSparseRegion(spaces, space, va - PageSize, va + PageSize - 1, 12, 1,
+                                            device)
+                        .IsError());
+            GpuMemoryPool foreign{kernel, &process, devices};
+            REQUIRE(foreign.CreateSparseRegion(spaces, space, va, last, 12, 1, device).IsError());
+            REQUIRE(devices->Get(device)->memory_references == 1);
+
+            REQUIRE(table
+                        .SetGpuMemoryAttribute(address, 4 * PageSize, KMemoryAttribute::GpuSharable,
+                                               KMemoryAttribute::GpuSharable)
+                        .IsSuccess());
+            u32 handle{}, foreign_handle{};
+            REQUIRE(foreign
+                        .Register(&foreign_handle, GetInteger(address),
+                                  GetInteger(address) + 4 * PageSize - 1, 0, device)
+                        .IsSuccess());
+            const GpuMemoryPool::MapOptions options{0, 0, 6, 6, 0, device, 1};
+            u8 kind{0xff};
+            REQUIRE(foreign
+                        .Map(&kind, spaces, backing, space, va, va + PageSize - 1, foreign_handle,
+                             0, options)
+                        .IsError());
+            REQUIRE(kind == 0xff);
+            REQUIRE(foreign.Unregister(foreign_handle).IsSuccess());
+            REQUIRE(pool.Register(&handle, GetInteger(address),
+                                  GetInteger(address) + 4 * PageSize - 1, 0, device)
+                        .IsSuccess());
+            REQUIRE(
+                pool.Map(&kind, spaces, backing, space, va, va + PageSize - 1, handle, 0, options)
+                    .IsError());
+            REQUIRE(kind == 0xff);
+            REQUIRE(pool.CreateSparseRegion(spaces, space, va + size, va + size + PageSize - 1, 12,
+                                            1, other_device)
+                        .IsSuccess());
+            REQUIRE(pool.MapSparseMemory(&kind, spaces, backing, space, va + size,
+                                         va + size + PageSize - 1, handle, 0, options)
+                        .IsError());
+            process.GetMemory().Write32(address, 0x12345678);
+            REQUIRE(pool.MapSparseMemory(&kind, spaces, backing, space, va + PageSize,
+                                         va + 3 * PageSize - 1, handle, 0, options)
+                        .IsSuccess());
+            REQUIRE(kind == 6);
+            REQUIRE(view->Read<u32>(va + PageSize) == 0x12345678);
+            REQUIRE(view->Read<u32>(va + PageSize - 2) == 0x56780000);
+            view->Write<u32>(va + PageSize - 2, 0xabcdef01);
+            REQUIRE(process.GetMemory().Read32(address) == 0x1234abcd);
+            REQUIRE(view->Read<u16>(va + PageSize - 2) == 0);
+            REQUIRE(view->Read<u32>(va + 3 * PageSize) == 0);
+            REQUIRE(view->GetSubmappedRange(va, 4 * PageSize).size() == 1);
+            REQUIRE(
+                pool.Map(&kind, spaces, backing, space, va - PageSize, va - 1, handle, 0, options)
+                    .IsSuccess());
+            u64 ordinary_unmapped{};
+            REQUIRE(pool.Unmap(space, va - PageSize, va + size + PageSize - 1, &ordinary_unmapped)
+                        .IsSuccess());
+            REQUIRE(ordinary_unmapped == PageSize);
+            REQUIRE_FALSE(view->GpuToCpuAddress(va - PageSize));
+            REQUIRE(view->Read<u32>(va + PageSize) == 0x1234abcd);
+            REQUIRE_FALSE(view->MapIfFree(va, 0, PageSize, Tegra::PTEKind::PITCH));
+            REQUIRE_FALSE(view->ReserveSparseIfFree(va + PageSize, PageSize));
+            REQUIRE(pool.DestroySparseRegion(space, va, last - PageSize).IsError());
+            REQUIRE(pool.DestroySparseRegion(space, va + PageSize, last).IsError());
+            REQUIRE(view->Read<u32>(va + PageSize) == 0x1234abcd);
+
+            u64 unmapped{~u64{0}};
+            REQUIRE(pool.Unmap(space, va, va + 4 * PageSize - 1, &unmapped).IsSuccess());
+            REQUIRE(unmapped == 0);
+            REQUIRE(view->Read<u32>(va + PageSize) == 0x1234abcd);
+            REQUIRE(
+                pool.UnmapSparseMemory(space, va, va + 4 * PageSize - 1, &unmapped).IsSuccess());
+            REQUIRE(unmapped == 2 * PageSize);
+            REQUIRE(
+                pool.UnmapSparseMemory(space, va, va + 4 * PageSize - 1, &unmapped).IsSuccess());
+            REQUIRE(unmapped == 0);
+            REQUIRE(view->GetSubmappedRange(va, size).empty());
+            REQUIRE_FALSE(view->ReserveSparseIfFree(va, PageSize));
+            REQUIRE(view->Read<u32>(va + PageSize) == 0);
+            REQUIRE(pool.MapSparseMemory(&kind, spaces, backing, space, va, va + 4 * PageSize - 1,
+                                         handle, 0, options)
+                        .IsSuccess());
+            REQUIRE(pool.UnmapSparseMemory(space, va + PageSize, va + 3 * PageSize - 1, &unmapped)
+                        .IsSuccess());
+            REQUIRE(unmapped == 2 * PageSize);
+            REQUIRE(view->GpuToCpuAddress(va).has_value());
+            REQUIRE_FALSE(view->GpuToCpuAddress(va + PageSize));
+            REQUIRE(view->GpuToCpuAddress(va + 3 * PageSize).has_value());
+            REQUIRE(pool.MapSparseMemory(&kind, spaces, backing, space, va + PageSize,
+                                         va + 2 * PageSize - 1, handle, PageSize, options)
+                        .IsSuccess());
+            REQUIRE(pool.Unregister(handle).IsSuccess());
+            REQUIRE(pool.DestroySparseRegion(space, va, last).IsSuccess());
+            REQUIRE_FALSE(view->GpuToCpuAddress(va));
+            REQUIRE_FALSE(view->GpuToCpuAddress(va + 3 * PageSize));
+            REQUIRE(pool.Unregister(handle).IsError());
+            REQUIRE(pool.DestroySparseRegion(space, va, last).IsError());
+            REQUIRE(devices->Get(device)->memory_references == 0);
+            REQUIRE(view->ReserveSparseIfFree(va, size));
+            view->Unmap(va, size);
+
+            constexpr u64 large_size = 1ULL << 16;
+            REQUIRE(pool.CreateSparseRegion(spaces, space, va + PageSize, va + large_size - 1, 16,
+                                            0, device)
+                        .IsError());
+            REQUIRE(pool.CreateSparseRegion(spaces, space, va, va + large_size - 1, 16, 0, device)
+                        .IsSuccess());
+            REQUIRE(view->Read<u64>(va) == 0);
+            REQUIRE(pool.UnmapSparseMemory(space, va, va + PageSize - 1).IsError());
+            REQUIRE(pool.UnmapSparseMemory(space, va, va + large_size - 1, &unmapped).IsSuccess());
+            REQUIRE(unmapped == 0);
+            REQUIRE(pool.DestroySparseRegion(space, va, va + large_size - 1).IsSuccess());
+            REQUIRE(pool.CreateSparseRegion(spaces, space, va, last, 12, 0, device).IsSuccess());
+        }
+        REQUIRE(kernel.MemoryManager().GetFreeSize() == ram_before);
+        REQUIRE(view->GetSubmappedRange(va, size).empty());
+        REQUIRE(view->ReserveSparseIfFree(va, size));
+        view->Unmap(va, size);
+        REQUIRE(devices->Destroy(device).IsSuccess());
+        REQUIRE(devices->Destroy(other_device).IsSuccess());
     }
     SECTION("fragmented backing returns and pins only its physical prefix") {
         const auto physical = kernel.MemoryManager().AllocateAndOpenContinuous(

@@ -25,7 +25,11 @@ GpuMemoryPool::GpuMemoryPool(Kernel::KernelCore& kernel, Kernel::KProcess* proce
 
 GpuMemoryPool::~GpuMemoryPool() {
     while (!m_mappings.empty()) {
-        RemoveMapping(m_mappings.begin());
+        RemoveMapping(m_mappings.begin(), false);
+    }
+    for (const auto& [key, region] : m_sparse_regions) {
+        region.manager->Unmap(key.second, region.size);
+        m_devices->ReleaseMemory(region.device_id);
     }
     while (!m_memory.empty()) {
         const auto it = m_memory.begin();
@@ -180,6 +184,22 @@ Result GpuMemoryPool::Map(u8* out_kind, GpuAddressSpacePool& address_spaces,
                           Tegra::MaxwellDeviceMemoryManager& backing, u32 address_space,
                           u64 gpu_address, u64 last_address, u32 memory_handle, u64 offset,
                           MapOptions options) {
+    R_RETURN(MapImpl(out_kind, address_spaces, backing, address_space, gpu_address, last_address,
+                     memory_handle, offset, options, false));
+}
+
+Result GpuMemoryPool::MapSparseMemory(u8* out_kind, GpuAddressSpacePool& address_spaces,
+                                      Tegra::MaxwellDeviceMemoryManager& backing, u32 address_space,
+                                      u64 gpu_address, u64 last_address, u32 memory_handle,
+                                      u64 offset, MapOptions options) {
+    R_RETURN(MapImpl(out_kind, address_spaces, backing, address_space, gpu_address, last_address,
+                     memory_handle, offset, options, true));
+}
+
+Result GpuMemoryPool::MapImpl(u8* out_kind, GpuAddressSpacePool& address_spaces,
+                              Tegra::MaxwellDeviceMemoryManager& backing, u32 address_space,
+                              u64 gpu_address, u64 last_address, u32 memory_handle, u64 offset,
+                              MapOptions options, bool sparse_map) {
     R_UNLESS(last_address >= gpu_address && last_address < (1ULL << 40) &&
                  Common::IsAligned(gpu_address, Kernel::PageSize) &&
                  Common::IsAligned(last_address + 1, Kernel::PageSize) &&
@@ -207,7 +227,18 @@ Result GpuMemoryPool::Map(u8* out_kind, GpuAddressSpacePool& address_spaces,
                  size <= memory->second.pinned_size - offset,
              InvalidArgument);
     R_UNLESS(!m_backing || m_backing == &backing, Kernel::ResultInvalidState);
-    // Include sparse reservations and driver-owned apertures in the collision check below.
+    const auto sparse = FindSparseRegion(address_space, gpu_address);
+    R_UNLESS(sparse_map == (sparse != m_sparse_regions.end()), Result{0x200f3});
+    if (sparse != m_sparse_regions.end()) {
+        const auto& region = sparse->second;
+        R_UNLESS(last_address < sparse->first.second + region.size &&
+                     options.device_id == region.device_id,
+                 InvalidArgument);
+        const u64 granularity = 1ULL << region.page_bits;
+        R_UNLESS(Common::IsAligned(gpu_address, granularity) &&
+                     Common::IsAligned(size, granularity) && Common::IsAligned(offset, granularity),
+                 InvalidArgument);
+    }
     const auto key = std::pair{address_space, gpu_address};
     auto next = m_mappings.lower_bound(key);
     R_UNLESS(next == m_mappings.end() || next->first.first != address_space ||
@@ -256,7 +287,11 @@ Result GpuMemoryPool::Map(u8* out_kind, GpuAddressSpacePool& address_spaces,
             keep = true;
         };
         try {
-            R_UNLESS(manager->MapIfFree(gpu_address, device_address, size, kind), Result{0x200f3});
+            const bool mapped =
+                sparse != m_sparse_regions.end()
+                    ? manager->MapIntoSparse(gpu_address, device_address, size, kind)
+                    : manager->MapIfFree(gpu_address, device_address, size, kind);
+            R_UNLESS(mapped, Result{0x200f3});
         } catch (const std::bad_alloc&) {
             // GMMU metadata allocation can fail after installing some page entries. Keep their
             // backing owned until unmap/teardown rather than freeing a still-referenced address.
@@ -275,9 +310,12 @@ Result GpuMemoryPool::Map(u8* out_kind, GpuAddressSpacePool& address_spaces,
     }
 }
 
-void GpuMemoryPool::RemoveMapping(std::map<std::pair<u32, u64>, Mapping>::iterator it) {
+void GpuMemoryPool::RemoveMapping(std::map<std::pair<u32, u64>, Mapping>::iterator it,
+                                  bool restore_sparse) {
     const auto& mapping = it->second;
-    mapping.manager->Unmap(it->first.second, mapping.size);
+    mapping.manager->Unmap(it->first.second, mapping.size,
+                           restore_sparse && FindSparseRegion(it->first.first, it->first.second) !=
+                                                 m_sparse_regions.end());
     const auto memory = m_memory.find(mapping.memory_handle);
     ASSERT(memory != m_memory.end() && memory->second.mapping_count != 0);
     --memory->second.mapping_count;
@@ -291,7 +329,18 @@ void GpuMemoryPool::RemoveMapping(std::map<std::pair<u32, u64>, Mapping>::iterat
     }
 }
 
-Result GpuMemoryPool::Unmap(u32 address_space, u64 gpu_address, u64 last_address) {
+Result GpuMemoryPool::Unmap(u32 address_space, u64 gpu_address, u64 last_address,
+                            u64* out_unmapped) {
+    R_RETURN(UnmapImpl(address_space, gpu_address, last_address, out_unmapped, false));
+}
+
+Result GpuMemoryPool::UnmapSparseMemory(u32 address_space, u64 gpu_address, u64 last_address,
+                                        u64* out_unmapped) {
+    R_RETURN(UnmapImpl(address_space, gpu_address, last_address, out_unmapped, true));
+}
+
+Result GpuMemoryPool::UnmapImpl(u32 address_space, u64 gpu_address, u64 last_address,
+                                u64* out_unmapped, bool sparse_unmap) {
     R_UNLESS(last_address >= gpu_address && last_address < (1ULL << 40) &&
                  Common::IsAligned(gpu_address, Kernel::PageSize) &&
                  Common::IsAligned(last_address + 1, Kernel::PageSize),
@@ -310,12 +359,41 @@ Result GpuMemoryPool::Unmap(u32 address_space, u64 gpu_address, u64 last_address
     // Validate coverage before removing anything, including requests crossing adjacent mappings.
     for (u64 cursor = gpu_address; cursor < end;) {
         const auto it = containing(cursor);
-        R_UNLESS(it != m_mappings.end(), InvalidMemory);
-        cursor = std::min(end, it->first.second + it->second.size);
+        const auto sparse = FindSparseRegion(address_space, cursor);
+        if (sparse != m_sparse_regions.end()) {
+            const u64 region_end = sparse->first.second + sparse->second.size;
+            const u64 removed_end = std::min(end, region_end);
+            const u64 granularity = 1ULL << sparse->second.page_bits;
+            R_UNLESS(!sparse_unmap || (Common::IsAligned(cursor, granularity) &&
+                                       Common::IsAligned(removed_end, granularity)),
+                     InvalidArgument);
+            cursor = removed_end;
+        } else {
+            R_UNLESS(!sparse_unmap, InvalidMemory);
+            R_UNLESS(it != m_mappings.end(), InvalidMemory);
+            cursor = std::min(end, it->first.second + it->second.size);
+        }
     }
+    u64 unmapped{};
     try {
         for (u64 cursor = gpu_address; cursor < end;) {
+            const auto sparse = FindSparseRegion(address_space, cursor);
+            if (!sparse_unmap && sparse != m_sparse_regions.end()) {
+                // NormalUnmap walks ordinary allocations; sparse parents and their resident
+                // children belong to ExecuteSparseMapRequests instead.
+                cursor = std::min(end, sparse->first.second + sparse->second.size);
+                continue;
+            }
             auto it = containing(cursor);
+            if (it == m_mappings.end()) {
+                ASSERT(sparse != m_sparse_regions.end());
+                auto next = m_mappings.lower_bound({address_space, cursor});
+                cursor = std::min(end, sparse->first.second + sparse->second.size);
+                if (next != m_mappings.end() && next->first.first == address_space) {
+                    cursor = std::min(cursor, next->first.second);
+                }
+                continue;
+            }
             const auto start = it->first.second;
             const auto mapping_end = start + it->second.size;
             const auto removed_end = std::min(end, mapping_end);
@@ -323,29 +401,150 @@ Result GpuMemoryPool::Unmap(u32 address_space, u64 gpu_address, u64 last_address
             if (cursor == start && removed_end == mapping_end) {
                 RemoveMapping(it);
             } else {
+                auto right = m_mappings.end();
+                bool keep_right{};
+                SCOPE_EXIT {
+                    if (right != m_mappings.end() && !keep_right) {
+                        m_mappings.erase(right);
+                    }
+                };
+                if (cursor != start && removed_end < mapping_end) {
+                    auto mapping = it->second;
+                    mapping.size = mapping_end - removed_end;
+                    right = m_mappings
+                                .emplace(std::pair{address_space, removed_end}, std::move(mapping))
+                                .first;
+                }
+                // Keep the original ownership record until the GMMU operation finishes. A
+                // metadata allocation failure can leave some PTEs installed or removed.
+                manager->Unmap(cursor, removed_end - cursor,
+                               FindSparseRegion(address_space, cursor) != m_sparse_regions.end());
                 if (cursor == start) {
                     auto node = m_mappings.extract(it);
                     node.key().second = removed_end;
                     node.mapped().size = mapping_end - removed_end;
                     m_mappings.insert(std::move(node));
                 } else {
-                    if (removed_end < mapping_end) {
-                        // A middle split is the sole mapping in this request. Allocate its new
-                        // record before changing the original range or the GPU page table.
-                        auto right = it->second;
-                        right.size = mapping_end - removed_end;
-                        m_mappings.emplace(std::pair{address_space, removed_end}, std::move(right));
+                    if (right != m_mappings.end()) {
                         ++m_memory.at(it->second.memory_handle).mapping_count;
                     }
                     it->second.size = cursor - start;
                 }
-                manager->Unmap(cursor, removed_end - cursor);
+                keep_right = true;
             }
+            unmapped += removed_end - cursor;
             cursor = removed_end;
         }
     } catch (const std::bad_alloc&) {
         R_RETURN(OutOfMemory);
     }
+    if (out_unmapped) {
+        *out_unmapped = unmapped;
+    }
+    R_SUCCEED();
+}
+
+GpuMemoryPool::SparseRegions::iterator GpuMemoryPool::FindSparseRegion(u32 address_space,
+                                                                       u64 address) {
+    auto it = m_sparse_regions.upper_bound({address_space, address});
+    if (it == m_sparse_regions.begin()) {
+        return m_sparse_regions.end();
+    }
+    --it;
+    return it->first.first == address_space && address < it->first.second + it->second.size
+               ? it
+               : m_sparse_regions.end();
+}
+
+Result GpuMemoryPool::CreateSparseRegion(GpuAddressSpacePool& address_spaces, u32 address_space,
+                                         u64 gpu_address, u64 last_address, u8 page_bits,
+                                         u8 alloc_mode, u8 device_id) {
+    R_UNLESS((page_bits == 12 || page_bits == 16) && alloc_mode <= 1 &&
+                 device_id < GraphicsDeviceTable::Capacity && last_address >= gpu_address &&
+                 last_address < (1ULL << 40),
+             InvalidArgument);
+    const u64 size = last_address - gpu_address + 1;
+    const u64 granularity = 1ULL << page_bits;
+    R_UNLESS(Common::IsAligned(gpu_address, granularity) && Common::IsAligned(size, granularity),
+             InvalidArgument);
+    const auto manager = address_spaces.Acquire(address_space);
+    R_UNLESS(manager, InvalidMemory);
+    u64 first, last;
+    R_TRY(address_spaces.QueryPartitionRange(&first, &last, address_space,
+                                             GpuAddressSpacePool::Partition::User));
+    R_UNLESS(gpu_address >= first && last_address <= last, InvalidArgument);
+    const std::scoped_lock lock{m_mutex};
+    const auto overlaps = [&](const auto& ranges) {
+        const auto next = ranges.lower_bound(std::pair{address_space, gpu_address});
+        if (next != ranges.end() && next->first.first == address_space &&
+            next->first.second <= last_address) {
+            return true;
+        }
+        if (next != ranges.begin()) {
+            const auto previous = std::prev(next);
+            return previous->first.first == address_space &&
+                   previous->first.second + previous->second.size > gpu_address;
+        }
+        return false;
+    };
+    R_UNLESS(!overlaps(m_sparse_regions) && !overlaps(m_mappings), Result{0x200f3});
+    R_TRY(m_devices->RetainMemory(device_id));
+    bool keep{};
+    SCOPE_EXIT {
+        if (!keep) {
+            m_devices->ReleaseMemory(device_id);
+        }
+    };
+    try {
+        const auto [it, inserted] = m_sparse_regions.try_emplace(
+            std::pair{address_space, gpu_address},
+            SparseRegion{manager, size, page_bits, alloc_mode, device_id});
+        R_UNLESS(inserted, Result{0x200f3});
+        SCOPE_EXIT {
+            if (!keep) {
+                m_sparse_regions.erase(it);
+            }
+        };
+        try {
+            R_UNLESS(manager->ReserveSparseIfFree(gpu_address, size), Result{0x200f3});
+        } catch (const std::bad_alloc&) {
+            // Retain ownership if page-table metadata allocation failed after installing entries.
+            keep = true;
+            throw;
+        }
+        keep = true;
+        LOG_DEBUG(Service,
+                  "Native GPU sparse region created: as={:#x}, gpu={:#x}, size={:#x}, "
+                  "page_bits={}, alloc_mode={}, device={}",
+                  address_space, gpu_address, size, page_bits, alloc_mode, device_id);
+        R_SUCCEED();
+    } catch (const std::bad_alloc&) {
+        R_RETURN(OutOfMemory);
+    }
+}
+
+Result GpuMemoryPool::DestroySparseRegion(u32 address_space, u64 gpu_address, u64 last_address) {
+    R_UNLESS(last_address >= gpu_address && last_address < (1ULL << 40) &&
+                 Common::IsAligned(gpu_address, Kernel::PageSize) &&
+                 Common::IsAligned(last_address + 1, Kernel::PageSize),
+             InvalidArgument);
+    const std::scoped_lock lock{m_mutex};
+    const auto region = m_sparse_regions.find({address_space, gpu_address});
+    R_UNLESS(region != m_sparse_regions.end() &&
+                 region->second.size == last_address - gpu_address + 1,
+             InvalidMemory);
+    try {
+        auto it = m_mappings.lower_bound({address_space, gpu_address});
+        while (it != m_mappings.end() && it->first.first == address_space &&
+               it->first.second <= last_address) {
+            RemoveMapping(it++, false);
+        }
+        region->second.manager->Unmap(gpu_address, region->second.size);
+    } catch (const std::bad_alloc&) {
+        R_RETURN(OutOfMemory);
+    }
+    m_devices->ReleaseMemory(region->second.device_id);
+    m_sparse_regions.erase(region);
     R_SUCCEED();
 }
 

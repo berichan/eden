@@ -135,8 +135,10 @@ public:
     GPUVAddr Map(GPUVAddr gpu_addr, DAddr dev_addr, std::size_t size,
                  PTEKind kind = PTEKind::INVALID, bool is_big_pages = true);
     bool MapIfFree(GPUVAddr gpu_addr, DAddr dev_addr, std::size_t size, PTEKind kind);
+    bool ReserveSparseIfFree(GPUVAddr gpu_addr, std::size_t size);
+    bool MapIntoSparse(GPUVAddr gpu_addr, DAddr dev_addr, std::size_t size, PTEKind kind);
     GPUVAddr MapSparse(GPUVAddr gpu_addr, std::size_t size, bool is_big_pages = true);
-    void Unmap(GPUVAddr gpu_addr, std::size_t size);
+    void Unmap(GPUVAddr gpu_addr, std::size_t size, bool preserve_sparse = false);
 
     bool MapSyncpointShim(GPUVAddr gpu_addr, Host1x::SyncpointManager& syncpoints);
     std::optional<GPUVAddr> GetSyncpointShimAddress() const;
@@ -167,6 +169,8 @@ public:
     u8* GetSpan(const GPUVAddr src_addr, const std::size_t size);
 
 private:
+    bool IsPageRange(GPUVAddr address, size_t size) const;
+    bool MapChecked(GPUVAddr gpu_addr, DAddr dev_addr, size_t size, PTEKind kind, bool sparse);
     bool OverlapsSyncpointShim(GPUVAddr address, size_t size) const;
     bool ReadSyncpointShim(GPUVAddr address, std::span<u8> output) const;
 

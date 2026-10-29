@@ -188,13 +188,39 @@ GPUVAddr MemoryManager::Map(GPUVAddr gpu_addr, DAddr dev_addr, std::size_t size,
 }
 
 bool MemoryManager::MapIfFree(GPUVAddr gpu_addr, DAddr dev_addr, std::size_t size, PTEKind kind) {
+    return MapChecked(gpu_addr, dev_addr, size, kind, false);
+}
+
+bool MemoryManager::MapIntoSparse(GPUVAddr gpu_addr, DAddr dev_addr, size_t size, PTEKind kind) {
+    return MapChecked(gpu_addr, dev_addr, size, kind, true);
+}
+
+bool MemoryManager::IsPageRange(GPUVAddr address, size_t size) const {
+    return size != 0 && Common::IsAligned(address, page_size) &&
+           Common::IsAligned(size, page_size) && address < address_space_size &&
+           size <= address_space_size - address && !OverlapsSyncpointShim(address, size);
+}
+
+bool MemoryManager::MapChecked(GPUVAddr gpu_addr, DAddr dev_addr, size_t size, PTEKind kind,
+                               bool sparse) {
     std::scoped_lock lock{mapping_guard};
-    if (size == 0 || !Common::IsAligned(gpu_addr, page_size) ||
-        !Common::IsAligned(dev_addr, page_size) || !Common::IsAligned(size, page_size) ||
-        gpu_addr >= address_space_size || size > address_space_size - gpu_addr ||
+    if (!IsPageRange(gpu_addr, size) || !Common::IsAligned(dev_addr, page_size) ||
         dev_addr >= (1ULL << MaxwellDeviceMemoryManager::AS_BITS) ||
-        size > (1ULL << MaxwellDeviceMemoryManager::AS_BITS) - dev_addr ||
-        OverlapsSyncpointShim(gpu_addr, size)) {
+        size > (1ULL << MaxwellDeviceMemoryManager::AS_BITS) - dev_addr) {
+        return false;
+    }
+    for (auto address = gpu_addr; address < gpu_addr + size; address += page_size) {
+        if (GetEntry(address, true) != EntryType::Free ||
+            GetEntry(address, false) != (sparse ? EntryType::Reserved : EntryType::Free)) {
+            return false;
+        }
+    }
+    return PageTableOp(gpu_addr, dev_addr, size, kind, EntryType::Mapped) == gpu_addr;
+}
+
+bool MemoryManager::ReserveSparseIfFree(GPUVAddr gpu_addr, size_t size) {
+    std::scoped_lock lock{mapping_guard};
+    if (!IsPageRange(gpu_addr, size)) {
         return false;
     }
     for (auto address = gpu_addr; address < gpu_addr + size; address += page_size) {
@@ -203,7 +229,9 @@ bool MemoryManager::MapIfFree(GPUVAddr gpu_addr, DAddr dev_addr, std::size_t siz
             return false;
         }
     }
-    return PageTableOp(gpu_addr, dev_addr, size, kind, EntryType::Mapped) == gpu_addr;
+    // Use small HLE entries for either native page size so resident overlays never sit
+    // underneath a large reserved entry that would hide their translations.
+    return PageTableOp(gpu_addr, 0, size, PTEKind::INVALID, EntryType::Reserved) == gpu_addr;
 }
 
 GPUVAddr MemoryManager::MapSparse(GPUVAddr gpu_addr, std::size_t size, bool is_big_pages) {
@@ -217,7 +245,7 @@ GPUVAddr MemoryManager::MapSparse(GPUVAddr gpu_addr, std::size_t size, bool is_b
     return PageTableOp(gpu_addr, 0, size, PTEKind::INVALID, EntryType::Reserved);
 }
 
-void MemoryManager::Unmap(GPUVAddr gpu_addr, std::size_t size) {
+void MemoryManager::Unmap(GPUVAddr gpu_addr, std::size_t size, bool preserve_sparse) {
     std::scoped_lock lock{mapping_guard};
     if (size == 0) {
         return;
@@ -234,7 +262,8 @@ void MemoryManager::Unmap(GPUVAddr gpu_addr, std::size_t size) {
     page_stash.clear();
 
     BigPageTableOp(gpu_addr, 0, size, PTEKind::INVALID, EntryType::Free);
-    PageTableOp(gpu_addr, 0, size, PTEKind::INVALID, EntryType::Free);
+    PageTableOp(gpu_addr, 0, size, PTEKind::INVALID,
+                preserve_sparse ? EntryType::Reserved : EntryType::Free);
 }
 
 bool MemoryManager::MapSyncpointShim(GPUVAddr gpu_addr, Host1x::SyncpointManager& syncpoints) {
@@ -318,6 +347,12 @@ T MemoryManager::Read(GPUVAddr addr) const {
     if (ReadSyncpointShim(addr, std::span{reinterpret_cast<u8*>(&value), sizeof(value)})) {
         return value;
     }
+    if (addr < address_space_size && sizeof(T) <= address_space_size - addr &&
+        (GetEntry(addr, true) == EntryType::Reserved ||
+         GetEntry(addr, false) == EntryType::Reserved)) {
+        ReadBlockUnsafe(addr, &value, sizeof(value));
+        return value;
+    }
     ASSERT(false);
 
     return {};
@@ -333,6 +368,12 @@ void MemoryManager::Write(GPUVAddr addr, T data) {
 
     if (OverlapsSyncpointShim(addr, sizeof(T))) {
         LOG_ERROR(HW_GPU, "Write to read-only syncpoint mapping at {:#x}", addr);
+        return;
+    }
+    if (addr < address_space_size && sizeof(T) <= address_space_size - addr &&
+        (GetEntry(addr, true) == EntryType::Reserved ||
+         GetEntry(addr, false) == EntryType::Reserved)) {
+        WriteBlockUnsafe(addr, &data, sizeof(data));
         return;
     }
     ASSERT(false);

@@ -66,6 +66,8 @@ public:
             {102, &KUserWorkerSession::UnregisterMemory, "UnregisterMemory"},
             {211, &KUserWorkerSession::MapMemory, "NormalMapGpuMemory4K"},
             {213, &KUserWorkerSession::UnmapMemory, "NormalUnmapGpuMemory4K"},
+            {214, &KUserWorkerSession::CreateSparseRegion, "CreateSparseRegion"},
+            {215, &KUserWorkerSession::DestroySparseRegion, "DestroySparseRegion"},
         };
         RegisterHandlersTipc(functions);
     }
@@ -148,13 +150,54 @@ private:
             const std::scoped_lock lock{m_events->mutex};
             R_UNLESS(event_id < m_events->events.size() && m_events->events[event_id],
                      GraphicsDeviceTable::InvalidArgument);
-            R_TRY(m_memory->Unmap(address_space, address, last));
-            unmapped = last - address + 1;
+            R_TRY(m_memory->Unmap(address_space, address, last, &unmapped));
             R_RETURN(m_events->events[event_id]->Signal(system.Kernel()));
         }();
         IPC::ResponseBuilder rb{ctx, 4};
         rb.Push(result);
         rb.Push<u64>(unmapped);
+    }
+
+    void CreateSparseRegion(HLERequestContext& ctx) {
+        const auto result = [&]() -> Result {
+            R_UNLESS(HasInputWords(ctx, 10), Kernel::ResultInvalidSize);
+            IPC::RequestParser rp{ctx};
+            const auto address_space = rp.Pop<u32>();
+            const auto address = rp.Pop<u64>();
+            const auto last = rp.Pop<u64>();
+            const auto page_bits = static_cast<u8>(rp.Pop<u32>());
+            const auto alloc_mode = static_cast<u8>(rp.Pop<u32>());
+            const auto device_id = static_cast<u8>(rp.Pop<u32>());
+            const auto sync = static_cast<u8>(rp.Pop<u32>());
+            const auto event_id = rp.Pop<u32>();
+            R_UNLESS(sync <= 1, GraphicsDeviceTable::InvalidArgument);
+            const std::scoped_lock lock{m_events->mutex};
+            R_UNLESS(event_id < m_events->events.size() && m_events->events[event_id],
+                     GraphicsDeviceTable::InvalidArgument);
+            R_TRY(m_memory->CreateSparseRegion(*m_address_spaces, address_space, address, last,
+                                               page_bits, alloc_mode, device_id));
+            R_RETURN(m_events->events[event_id]->Signal(system.Kernel()));
+        }();
+        Reply(ctx, result);
+    }
+
+    void DestroySparseRegion(HLERequestContext& ctx) {
+        const auto result = [&]() -> Result {
+            R_UNLESS(HasInputWords(ctx, 7), Kernel::ResultInvalidSize);
+            IPC::RequestParser rp{ctx};
+            const auto address_space = rp.Pop<u32>();
+            const auto address = rp.Pop<u64>();
+            const auto last = rp.Pop<u64>();
+            const auto sync = static_cast<u8>(rp.Pop<u32>());
+            const auto event_id = rp.Pop<u32>();
+            R_UNLESS(sync <= 1, GraphicsDeviceTable::InvalidArgument);
+            const std::scoped_lock lock{m_events->mutex};
+            R_UNLESS(event_id < m_events->events.size() && m_events->events[event_id],
+                     GraphicsDeviceTable::InvalidArgument);
+            R_TRY(m_memory->DestroySparseRegion(address_space, address, last));
+            R_RETURN(m_events->events[event_id]->Signal(system.Kernel()));
+        }();
+        Reply(ctx, result);
     }
 
     Kernel::KScopedAutoObject<Kernel::KProcess> m_process;

@@ -159,6 +159,15 @@ TEST_CASE("GPU syncpoint mappings reserve a read-only aperture backed by live co
     REQUIRE(manager.GetPointer(base) == nullptr);
     REQUIRE(manager.Map(base, 0, 0x1000, Tegra::PTEKind::INVALID, false) == 0);
     REQUIRE(manager.MapSparse(base, 0x1000, false) == 0);
+    REQUIRE_FALSE(manager.ReserveSparseIfFree(base, 0x1000));
+    REQUIRE_FALSE(manager.ReserveSparseIfFree(base - 0x1000, 0x2000));
+    REQUIRE_FALSE(manager.ReserveSparseIfFree(0, 0));
+    REQUIRE_FALSE(manager.ReserveSparseIfFree(base + 1, 0x1000));
+    REQUIRE_FALSE(manager.ReserveSparseIfFree(1ULL << 32, 0x1000));
+    REQUIRE_FALSE(manager.ReserveSparseIfFree((1ULL << 32) - 0x1000, 0x2000));
+    REQUIRE_FALSE(manager.ReserveSparseIfFree(~u64{0xfff}, 0x2000));
+    REQUIRE_FALSE(manager.MapIntoSparse(base, 0, 0x1000, Tegra::PTEKind::PITCH));
+    REQUIRE_FALSE(manager.MapIntoSparse(base + 0x200000, 0, 0x1000, Tegra::PTEKind::PITCH));
     manager.Unmap(base, Tegra::Host1x::SyncpointShim::Size);
     REQUIRE(manager.GetSyncpointShimAddress() == base);
     for (const u32 id : {0U, 191U, 192U, 447U}) {
