@@ -869,6 +869,7 @@ add_library(core STATIC
     hle/service/nvdrv/devices/nvhost_ctrl.h
     hle/service/nvdrv/devices/nvhost_ctrl_gpu.cpp
     hle/service/nvdrv/devices/native_gpu_characteristics.h
+    hle/service/nvdrv/devices/native_gpu_va_range.h
     hle/service/nvdrv/devices/nvhost_ctrl_gpu.h
     hle/service/nvdrv/devices/nvhost_gpu.cpp
     hle/service/nvdrv/devices/nvhost_gpu.h

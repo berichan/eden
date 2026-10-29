@@ -146,6 +146,7 @@ private:
                   "IoctlGetVaRegions is incorrect size");
 
     NvResult AllocAsEx(IoctlAllocAsEx& params);
+    NvResult GetSyncpointRoMap(std::span<u8> output);
     NvResult AllocateSpace(IoctlAllocSpace& params);
     NvResult Remap(std::span<IoctlRemapEntry> params);
     NvResult MapBufferEx(IoctlMapBufferEx& params);
@@ -220,6 +221,7 @@ private:
         bool initialised{};
     } vm;
     std::shared_ptr<Tegra::MemoryManager> gmmu;
+    u32 native_as_handle{};
 };
 
 } // namespace Service::Nvidia::Devices

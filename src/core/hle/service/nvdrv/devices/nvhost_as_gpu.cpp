@@ -6,6 +6,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <cstring>
+#include <new>
 #include <utility>
 
 #include "common/alignment.h"
@@ -17,11 +18,14 @@
 #include "core/hle/service/nvdrv/core/container.h"
 #include "core/hle/service/nvdrv/core/nvmap.h"
 #include "core/hle/service/nvdrv/devices/ioctl_serialization.h"
+#include "core/hle/service/nvdrv/devices/native_gpu_va_range.h"
 #include "core/hle/service/nvdrv/devices/nvhost_as_gpu.h"
 #include "core/hle/service/nvdrv/devices/nvhost_gpu.h"
 #include "core/hle/service/nvdrv/nvdrv.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/gpu.h"
+#include "video_core/host1x/host1x.h"
+#include "video_core/host1x/syncpoint_shim.h"
 #include "video_core/memory_manager.h"
 #include "video_core/rasterizer_interface.h"
 
@@ -37,8 +41,8 @@ NvResult nvhost_as_gpu::Ioctl1(DeviceFD fd, Ioctl command, std::span<const u8> i
                                std::span<u8> output) {
     // Native mapping commands use GSV. Do not reinterpret their handles or page sizes as Maxwell
     // requests while the native driver-side mappings and region queries are being implemented.
-    if (module.GetNativeAddressSpaces() && command.group == 'A' && command.cmd != 0x9 &&
-        command.cmd != 0xb) {
+    if (module.GetNativeAddressSpaces() && command.group == 'A' && command.cmd != 0x8 &&
+        command.cmd != 0x9 && command.cmd != 0xb) {
         return NvResult::NotSupported;
     }
     switch (command.group) {
@@ -55,12 +59,26 @@ NvResult nvhost_as_gpu::Ioctl1(DeviceFD fd, Ioctl command, std::span<const u8> i
         case 0x6:
             return WrapFixed(this, &nvhost_as_gpu::MapBufferEx, input, output);
         case 0x8:
+            if (module.GetNativeAddressSpaces() &&
+                (command.length != sizeof(IoctlGetVaRegions) ||
+                 input.size() < sizeof(IoctlGetVaRegions) ||
+                 output.size() < sizeof(IoctlGetVaRegions))) {
+                return NvResult::InvalidSize;
+            }
             return WrapFixed(this, &nvhost_as_gpu::GetVARegions1, input, output);
         case 0x9:
             if (command.length != sizeof(IoctlAllocAsEx) || input.size() < sizeof(IoctlAllocAsEx)) {
                 return NvResult::InvalidSize;
             }
             return WrapFixed(this, &nvhost_as_gpu::AllocAsEx, input, output);
+        case 0xb:
+            if (command.length != 16 || output.size() < 16) {
+                return NvResult::InvalidSize;
+            }
+            if (command.is_in != 0 || command.is_out == 0) {
+                return NvResult::BadParameter;
+            }
+            return GetSyncpointRoMap(output);
         case 0x14:
             return WrapVariable(this, &nvhost_as_gpu::Remap, input, output);
         default:
@@ -83,13 +101,19 @@ NvResult nvhost_as_gpu::Ioctl2(DeviceFD fd, Ioctl command, std::span<const u8> i
 
 NvResult nvhost_as_gpu::Ioctl3(DeviceFD fd, Ioctl command, std::span<const u8> input,
                                std::span<u8> output, std::span<u8> inline_output) {
-    if (module.GetNativeAddressSpaces()) {
+    if (module.GetNativeAddressSpaces() && (command.group != 'A' || command.cmd != 0x8)) {
         return NvResult::NotSupported;
     }
     switch (command.group) {
     case 'A':
         switch (command.cmd) {
         case 0x8:
+            if (module.GetNativeAddressSpaces() &&
+                (command.length != sizeof(IoctlGetVaRegions) ||
+                 input.size() < sizeof(IoctlGetVaRegions) ||
+                 output.size() < sizeof(IoctlGetVaRegions))) {
+                return NvResult::InvalidSize;
+            }
             return WrapFixedInlOut(this, &nvhost_as_gpu::GetVARegions3, input, output,
                                    inline_output);
         default:
@@ -122,6 +146,34 @@ NvResult nvhost_as_gpu::AllocAsEx(IoctlAllocAsEx& params) {
         if (!native_gmmu) {
             return NvResult::BadValue;
         }
+        if (params.big_page_size != 0 || params.va_range_split != 0) {
+            return NvResult::NotSupported;
+        }
+        u64 first{};
+        u64 last{};
+        if (native_spaces->QueryPartitionRange(&first, &last, static_cast<u32>(params.as_fd),
+                                               GSV::GpuAddressSpacePool::Partition::User).IsError()) {
+            return NvResult::BadValue;
+        }
+        const auto range = NativeGpuVaRange::Create(first, last, params.va_range_start,
+                                                    params.va_range_end);
+        if (!range) {
+            return NvResult::BadValue;
+        }
+        const auto [start, end] = *range;
+        vm.va_range_start = start;
+        vm.va_range_end = end;
+        vm.va_range_split = end;
+        vm.big_page_size = 0;
+        vm.small_page_allocator.emplace(static_cast<u32>(start >> VM::PAGE_SIZE_BITS),
+                                         static_cast<u32>(end >> VM::PAGE_SIZE_BITS));
+        gmmu = std::move(native_gmmu);
+        native_as_handle = static_cast<u32>(params.as_fd);
+        vm.initialised = true;
+        LOG_DEBUG(Service_NVDRV,
+                  "Native GPU address space bound: handle={:#x}, address_space_id={}, "
+                  "user_start={:#x}, user_end={:#x}", native_as_handle, gmmu->GetID(), start, end);
+        return NvResult::Success;
     }
 
     if (params.big_page_size) {
@@ -159,16 +211,54 @@ NvResult nvhost_as_gpu::AllocAsEx(IoctlAllocAsEx& params) {
         static_cast<u32>((vm.va_range_end - vm.va_range_split) >> vm.big_page_size_bits)};
     vm.big_page_allocator.emplace(start_big_pages, end_big_pages);
 
-    if (native_gmmu) {
-        gmmu = std::move(native_gmmu);
-        LOG_DEBUG(Service_NVDRV, "Native GPU address space bound: handle={:#x}, address_space_id={}",
-                  static_cast<u32>(params.as_fd), gmmu->GetID());
-    } else {
-        gmmu = std::make_shared<Tegra::MemoryManager>(system, max_big_page_bits, vm.va_range_split, vm.big_page_size_bits, VM::PAGE_SIZE_BITS);
-        system.GPU().InitAddressSpace(*gmmu);
-    }
+    gmmu = std::make_shared<Tegra::MemoryManager>(system, max_big_page_bits, vm.va_range_split, vm.big_page_size_bits, VM::PAGE_SIZE_BITS);
+    system.GPU().InitAddressSpace(*gmmu);
     vm.initialised = true;
 
+    return NvResult::Success;
+}
+
+NvResult nvhost_as_gpu::GetSyncpointRoMap(std::span<u8> output) {
+    const auto& pool = module.GetNativeAddressSpaces();
+    if (!pool) {
+        return NvResult::NotSupported;
+    }
+    std::scoped_lock lock{mutex};
+    if (!vm.initialised || !gmmu) {
+        return NvResult::NotInitialized;
+    }
+    auto base = gmmu->GetSyncpointShimAddress();
+    if (!base) {
+        u64 first{};
+        u64 last{};
+        if (pool->QueryPartitionRange(&first, &last, native_as_handle,
+                                      GSV::GpuAddressSpacePool::Partition::Driver).IsError() ||
+            first > last || Tegra::Host1x::SyncpointShim::Size - 1 > last - first) {
+            return NvResult::BadValue;
+        }
+        try {
+            if (!gmmu->MapSyncpointShim(first, system.Host1x().GetSyncpointManager())) {
+                base = gmmu->GetSyncpointShimAddress();
+                if (!base) {
+                    return NvResult::InsufficientMemory;
+                }
+            }
+        } catch (const std::bad_alloc&) {
+            return NvResult::InsufficientMemory;
+        }
+        base = gmmu->GetSyncpointShimAddress();
+    }
+    struct Reply {
+        u64_le address;
+        u32_le stride;
+        u32_le count;
+    };
+    static_assert(sizeof(Reply) == 16);
+    const Reply reply{*base, Tegra::Host1x::SyncpointShim::Stride, Tegra::Host1x::SyncpointShim::Count};
+    std::memcpy(output.data(), &reply, sizeof(reply));
+    LOG_DEBUG(Service_NVDRV,
+              "Native read-only syncpoint mapping: address={:#x}, count={}, stride={:#x}", *base,
+              Tegra::Host1x::SyncpointShim::Count, Tegra::Host1x::SyncpointShim::Stride);
     return NvResult::Success;
 }
 
@@ -447,6 +537,19 @@ NvResult nvhost_as_gpu::BindChannel(IoctlBindChannel& params) {
 }
 
 void nvhost_as_gpu::GetVARegionsImpl(IoctlGetVaRegions& params) {
+    if (native_as_handle != 0) {
+        const auto capacity = params.buf_size;
+        params.buf_size = sizeof(VaRegion);
+        if (capacity >= sizeof(VaRegion)) {
+            params.regions[0] = {
+                .offset = vm.va_range_start,
+                .page_size = VM::YUZU_PAGESIZE,
+                ._pad0_ = 0,
+                .pages = (vm.va_range_end - vm.va_range_start) >> VM::PAGE_SIZE_BITS,
+            };
+        }
+        return;
+    }
     params.buf_size = 2 * sizeof(VaRegion);
 
     params.regions = std::array<VaRegion, 2>{
@@ -489,9 +592,13 @@ NvResult nvhost_as_gpu::GetVARegions3(IoctlGetVaRegions& params, std::span<VaReg
         return NvResult::BadValue;
     }
 
+    if (native_as_handle != 0) {
+        params.buf_size = static_cast<u32>((std::min)(regions.size(), size_t{1}) * sizeof(VaRegion));
+    }
     GetVARegionsImpl(params);
 
-    const size_t num_regions = (std::min)(params.regions.size(), regions.size());
+    const size_t count = native_as_handle != 0 ? 1 : params.regions.size();
+    const size_t num_regions = (std::min)(count, regions.size());
     for (size_t i = 0; i < num_regions; i++) {
         regions[i] = params.regions[i];
     }

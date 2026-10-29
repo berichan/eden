@@ -61,6 +61,9 @@ Result GpuAddressSpacePool::QueryPartitionRange(u64* out_first, u64* out_last, u
     if (partition == Partition::User) {
         *out_first = 0x8000000;
         *out_last = 0xbfffffffff;
+    } else if (partition == Partition::Driver) {
+        *out_first = 0xc000000000;
+        *out_last = 0xc0ffffffff;
     } else if (*flags >= 0) {
         *out_first = 0xc800000000;
         *out_last = 0xc8ffffffff;

@@ -7,7 +7,9 @@
 #include "core/core.h"
 #include "core/device_memory.h"
 #include "core/hle/service/gsv/gpu_address_space_pool.h"
+#include "core/hle/service/nvdrv/devices/native_gpu_va_range.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
+#include "video_core/host1x/syncpoint_shim.h"
 #include "video_core/memory_manager.h"
 
 TEST_CASE("Native GPU address space handles retain independent memory managers", "[core][ipc]") {
@@ -41,6 +43,11 @@ TEST_CASE("Native GPU address space handles retain independent memory managers",
                     .IsSuccess());
         REQUIRE(first == 0x8000000ULL);
         REQUIRE(last == 0xbfffffffffULL);
+        REQUIRE(pool->QueryPartitionRange(&first, &last, handle,
+                                          Service::GSV::GpuAddressSpacePool::Partition::Driver)
+                    .IsSuccess());
+        REQUIRE(first == 0xc000000000ULL);
+        REQUIRE(last == 0xc0ffffffffULL);
         REQUIRE(pool->QueryPartitionRange(&first, &last, handle,
                                           Service::GSV::GpuAddressSpacePool::Partition::Gsv)
                     .IsSuccess());
@@ -120,4 +127,35 @@ TEST_CASE("Native GPU page tables cover the full 40-bit address range without in
     }
     REQUIRE_FALSE(manager.IsWithinGPUAddressRange(1ULL << 40));
     REQUIRE_FALSE(manager.GpuToCpuAddress(1ULL << 40));
+    Tegra::Host1x::SyncpointManager syncpoints;
+    constexpr GPUVAddr high = 0xc000000000;
+    REQUIRE(manager.MapSyncpointShim(high, syncpoints));
+    syncpoints.IncrementHost(447);
+    REQUIRE(manager.Read<u32>(high + u64{447} * 0x10000) == 1);
+    REQUIRE(manager.GetPointer(high) == nullptr);
+    REQUIRE(manager.GetSyncpointShimAddress() == high);
+}
+
+TEST_CASE("Native driver VA ranges preserve full-width partition limits and reject invalid bounds",
+          "[core][ipc]") {
+    using Service::Nvidia::Devices::NativeGpuVaRange;
+    constexpr u64 first = 0x8000000;
+    constexpr u64 last = 0xbfffffffff;
+    const auto full = NativeGpuVaRange::Create(first, last, 0, 0);
+    REQUIRE(full.has_value());
+    REQUIRE(full->first == first);
+    REQUIRE(full->end == 0xc000000000);
+    REQUIRE((full->end - full->first) / 0x1000 == 0xbff8000ULL);
+    const auto partial = NativeGpuVaRange::Create(first, last, first + 0x1000, last - 0xfff);
+    REQUIRE(partial.has_value());
+    REQUIRE(partial->first == first + 0x1000);
+    REQUIRE(partial->end == last - 0xfff);
+    REQUIRE_FALSE(NativeGpuVaRange::Create(first, last, first - 0x1000, 0));
+    REQUIRE_FALSE(NativeGpuVaRange::Create(first, last, 0, last + 0x1001));
+    REQUIRE_FALSE(NativeGpuVaRange::Create(first, last, first + 1, 0));
+    REQUIRE_FALSE(NativeGpuVaRange::Create(first, last, 0, last));
+    REQUIRE_FALSE(NativeGpuVaRange::Create(first, last, first + 0x1000, first));
+    REQUIRE_FALSE(NativeGpuVaRange::Create(first, last, first, first));
+    REQUIRE_FALSE(NativeGpuVaRange::Create(last, first, 0, 0));
+    REQUIRE_FALSE(NativeGpuVaRange::Create(first, ~u64{0}, 0, 0));
 }

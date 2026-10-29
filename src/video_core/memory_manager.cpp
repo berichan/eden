@@ -15,6 +15,7 @@
 #include "memory_manager.h"
 #include "video_core/guest_memory.h"
 #include "video_core/host1x/host1x.h"
+#include "video_core/host1x/syncpoint_shim.h"
 #include "video_core/invalidation_accumulator.h"
 #include "video_core/memory_manager.h"
 #include "video_core/rasterizer_interface.h"
@@ -176,19 +177,34 @@ void MemoryManager::BindRasterizer(VideoCore::RasterizerInterface* rasterizer_) 
 }
 
 GPUVAddr MemoryManager::Map(GPUVAddr gpu_addr, DAddr dev_addr, std::size_t size, PTEKind kind, bool is_big_pages) {
+    std::scoped_lock lock{mapping_guard};
+    if (OverlapsSyncpointShim(gpu_addr, size)) {
+        LOG_ERROR(HW_GPU, "Cannot overwrite read-only syncpoint mapping at {:#x}", gpu_addr);
+        return 0;
+    }
     if (is_big_pages)
         return BigPageTableOp(gpu_addr, dev_addr, size, kind, EntryType::Mapped);
     return PageTableOp(gpu_addr, dev_addr, size, kind, EntryType::Mapped);
 }
 
 GPUVAddr MemoryManager::MapSparse(GPUVAddr gpu_addr, std::size_t size, bool is_big_pages) {
+    std::scoped_lock lock{mapping_guard};
+    if (OverlapsSyncpointShim(gpu_addr, size)) {
+        LOG_ERROR(HW_GPU, "Cannot overwrite read-only syncpoint mapping at {:#x}", gpu_addr);
+        return 0;
+    }
     if (is_big_pages)
         return BigPageTableOp(gpu_addr, 0, size, PTEKind::INVALID, EntryType::Reserved);
     return PageTableOp(gpu_addr, 0, size, PTEKind::INVALID, EntryType::Reserved);
 }
 
 void MemoryManager::Unmap(GPUVAddr gpu_addr, std::size_t size) {
+    std::scoped_lock lock{mapping_guard};
     if (size == 0) {
+        return;
+    }
+    if (OverlapsSyncpointShim(gpu_addr, size)) {
+        LOG_ERROR(HW_GPU, "Cannot unmap driver-owned syncpoint mapping at {:#x}", gpu_addr);
         return;
     }
     GetSubmappedRangeImpl<false>(gpu_addr, size, page_stash);
@@ -200,6 +216,47 @@ void MemoryManager::Unmap(GPUVAddr gpu_addr, std::size_t size) {
 
     BigPageTableOp(gpu_addr, 0, size, PTEKind::INVALID, EntryType::Free);
     PageTableOp(gpu_addr, 0, size, PTEKind::INVALID, EntryType::Free);
+}
+
+bool MemoryManager::MapSyncpointShim(GPUVAddr gpu_addr, Host1x::SyncpointManager& syncpoints) {
+    std::scoped_lock lock{mapping_guard};
+    if (syncpoint_shim || !Common::IsAligned(gpu_addr, Host1x::SyncpointShim::Stride) ||
+        gpu_addr >= address_space_size || Host1x::SyncpointShim::Size > address_space_size - gpu_addr) {
+        return false;
+    }
+    for (GPUVAddr address = gpu_addr; address < gpu_addr + Host1x::SyncpointShim::Size;
+         address += page_size) {
+        if (GetEntry(address, true) != EntryType::Free ||
+            GetEntry(address, false) != EntryType::Free) {
+            return false;
+        }
+    }
+    // Counter I/O has no RAM translation: reads sample completion atomics and cannot expose a
+    // writable host pointer or a cached snapshot of the counters.
+    syncpoint_shim = std::make_unique<Host1x::SyncpointShim>(syncpoints);
+    syncpoint_shim_address = gpu_addr;
+    syncpoint_shim_ready.store(true, std::memory_order_release);
+    return true;
+}
+
+std::optional<GPUVAddr> MemoryManager::GetSyncpointShimAddress() const {
+    return syncpoint_shim_ready.load(std::memory_order_acquire)
+               ? std::optional{syncpoint_shim_address}
+               : std::nullopt;
+}
+
+bool MemoryManager::OverlapsSyncpointShim(GPUVAddr address, size_t size) const {
+    if (!syncpoint_shim_ready.load(std::memory_order_acquire) || size == 0) {
+        return false;
+    }
+    return address < syncpoint_shim_address + Host1x::SyncpointShim::Size &&
+           (address >= syncpoint_shim_address || size > syncpoint_shim_address - address);
+}
+
+bool MemoryManager::ReadSyncpointShim(GPUVAddr address, std::span<u8> output) const {
+    return syncpoint_shim_ready.load(std::memory_order_acquire) &&
+           address >= syncpoint_shim_address &&
+           syncpoint_shim->Read(address - syncpoint_shim_address, output);
 }
 
 std::optional<DAddr> MemoryManager::GpuToCpuAddress(GPUVAddr gpu_addr) const {
@@ -238,6 +295,10 @@ T MemoryManager::Read(GPUVAddr addr) const {
         return value;
     }
 
+    T value{};
+    if (ReadSyncpointShim(addr, std::span{reinterpret_cast<u8*>(&value), sizeof(value)})) {
+        return value;
+    }
     ASSERT(false);
 
     return {};
@@ -251,6 +312,10 @@ void MemoryManager::Write(GPUVAddr addr, T data) {
         return;
     }
 
+    if (OverlapsSyncpointShim(addr, sizeof(T))) {
+        LOG_ERROR(HW_GPU, "Write to read-only syncpoint mapping at {:#x}", addr);
+        return;
+    }
     ASSERT(false);
 }
 
@@ -352,6 +417,29 @@ inline void MemoryManager::MemoryOperation(GPUVAddr gpu_src_addr, std::size_t si
 }
 
 void MemoryManager::ReadBlockImpl(GPUVAddr gpu_src_addr, void* dest_buffer, std::size_t size, [[maybe_unused]] VideoCommon::CacheType which, bool unsafe) const {
+    if (OverlapsSyncpointShim(gpu_src_addr, size)) {
+        const auto end = syncpoint_shim_address + Host1x::SyncpointShim::Size;
+        if (gpu_src_addr < syncpoint_shim_address) {
+            const size_t prefix = syncpoint_shim_address - gpu_src_addr;
+            ReadBlockImpl(gpu_src_addr, dest_buffer, prefix, which, unsafe);
+            ReadBlockImpl(syncpoint_shim_address, static_cast<u8*>(dest_buffer) + prefix,
+                          size - prefix, which, unsafe);
+        } else {
+            const size_t amount = (std::min)(size, static_cast<size_t>(end - gpu_src_addr));
+            const bool read = ReadSyncpointShim(
+                gpu_src_addr, std::span{static_cast<u8*>(dest_buffer), amount});
+            if (!read) {
+                LOG_ERROR(HW_GPU, "Unsupported syncpoint register read at {:#x}, size={:#x}",
+                          gpu_src_addr, amount);
+                std::memset(dest_buffer, 0, amount);
+            }
+            if (amount < size) {
+                ReadBlockImpl(end, static_cast<u8*>(dest_buffer) + amount, size - amount, which,
+                              unsafe);
+            }
+        }
+        return;
+    }
     auto set_to_zero = [&]([[maybe_unused]] std::size_t page_index, [[maybe_unused]] std::size_t offset, std::size_t copy_amount) {
         std::memset(dest_buffer, 0, copy_amount);
         dest_buffer = static_cast<u8*>(dest_buffer) + copy_amount;
@@ -394,6 +482,10 @@ void MemoryManager::ReadBlockUnsafe(GPUVAddr gpu_src_addr, void* dest_buffer, co
 }
 
 void MemoryManager::WriteBlockImpl(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size, [[maybe_unused]] VideoCommon::CacheType which, bool unsafe) {
+    if (OverlapsSyncpointShim(gpu_dest_addr, size)) {
+        LOG_ERROR(HW_GPU, "Write to read-only syncpoint mapping at {:#x}, size={:#x}",
+                  gpu_dest_addr, size);
+    }
     auto just_advance = [&]([[maybe_unused]] std::size_t page_index, [[maybe_unused]] std::size_t offset, std::size_t copy_amount) {
         src_buffer = static_cast<const u8*>(src_buffer) + copy_amount;
     };

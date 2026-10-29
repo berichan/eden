@@ -8,8 +8,10 @@
 
 #include <atomic>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <vector>
 #include <boost/container/small_vector.hpp>
 
@@ -32,6 +34,11 @@ class System;
 } // namespace Core
 
 namespace Tegra {
+
+namespace Host1x {
+class SyncpointManager;
+class SyncpointShim;
+}
 
 class MemoryManager final {
 public:
@@ -130,6 +137,9 @@ public:
     GPUVAddr MapSparse(GPUVAddr gpu_addr, std::size_t size, bool is_big_pages = true);
     void Unmap(GPUVAddr gpu_addr, std::size_t size);
 
+    bool MapSyncpointShim(GPUVAddr gpu_addr, Host1x::SyncpointManager& syncpoints);
+    std::optional<GPUVAddr> GetSyncpointShimAddress() const;
+
     void FlushRegion(GPUVAddr gpu_addr, size_t size,
                      VideoCommon::CacheType which = VideoCommon::CacheType::All) const;
 
@@ -156,6 +166,9 @@ public:
     u8* GetSpan(const GPUVAddr src_addr, const std::size_t size);
 
 private:
+    bool OverlapsSyncpointShim(GPUVAddr address, size_t size) const;
+    bool ReadSyncpointShim(GPUVAddr address, std::span<u8> output) const;
+
     template <typename FuncMapped, typename FuncReserved, typename FuncUnmapped>
     inline void MemoryOperation(GPUVAddr gpu_src_addr, std::size_t size, bool is_big_page, FuncMapped&& func_mapped, FuncReserved&& func_reserved, FuncUnmapped&& func_unmapped) const;
 
@@ -180,6 +193,9 @@ private:
 
     Core::System& system;
     MaxwellDeviceMemoryManager& memory;
+    std::unique_ptr<Host1x::SyncpointShim> syncpoint_shim;
+    GPUVAddr syncpoint_shim_address{};
+    std::atomic_bool syncpoint_shim_ready{};
 
     const u64 address_space_bits;
     GPUVAddr split_address;
@@ -221,6 +237,7 @@ private:
     boost::container::small_vector<std::pair<DAddr, std::size_t>, 32> page_stash2{};
 
     mutable std::mutex guard;
+    std::mutex mapping_guard;
 
     static constexpr size_t continuous_bits = 64;
 

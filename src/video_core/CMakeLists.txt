@@ -86,6 +86,7 @@ add_library(video_core STATIC
     host1x/nvdec_common.h
     host1x/syncpoint_manager.cpp
     host1x/syncpoint_manager.h
+    host1x/syncpoint_shim.h
     host1x/vic.cpp
     host1x/vic.h
     macro.cpp

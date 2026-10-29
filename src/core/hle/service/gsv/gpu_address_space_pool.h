@@ -20,6 +20,7 @@ class GpuAddressSpacePool {
 public:
     enum class Partition {
         User,
+        Driver,
         Gsv,
     };
     static constexpr size_t Capacity = 8;
