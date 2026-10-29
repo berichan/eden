@@ -1,9 +1,13 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
+#include <array>
+#include <cstring>
 #include <catch2/catch_test_macros.hpp>
 #include "common/scope_exit.h"
 #include "common/settings.h"
+#include "common/swap.h"
 #include "core/core.h"
 #include "core/device_memory.h"
 #include "core/hle/kernel/k_memory_block_manager.h"
@@ -749,6 +753,184 @@ TEST_CASE("GPU pins retain real heap pages until partial unlock or process table
         view->Unmap(va, size);
         REQUIRE(devices->Destroy(device).IsSuccess());
         REQUIRE(devices->Destroy(other_device).IsSuccess());
+    }
+    SECTION("sparse batches validate the whole packet and preserve native kind aliases") {
+        using namespace Service::GSV;
+        Tegra::GPU gpu{system, false, false};
+        Null::RasterizerNull rasterizer{gpu};
+        Tegra::MaxwellDeviceMemoryManager backing{system.DeviceMemory()};
+        backing.BindInterface(&rasterizer);
+        GpuAddressSpacePool spaces;
+        auto manager =
+            std::make_unique<Tegra::MemoryManager>(system, backing, 40, 1ULL << 40, 16, 12);
+        manager->BindRasterizer(&rasterizer);
+        u32 space{};
+        REQUIRE(spaces.Add(&space, std::move(manager), 0).IsSuccess());
+        const auto view = spaces.Acquire(space);
+        auto devices = std::make_shared<GraphicsDeviceTable>();
+        u8 device{};
+        REQUIRE(devices->Create(&device, 1, 0, 0).IsSuccess());
+        GpuMemoryPool pool{kernel, &process, devices};
+        constexpr u64 va = 0x8800000000;
+        constexpr u64 region_size = 16 * PageSize;
+        REQUIRE(pool.CreateSparseRegion(spaces, space, va, va + region_size - 1, 12, 1, device)
+                    .IsSuccess());
+        REQUIRE(table
+                    .SetGpuMemoryAttribute(address, 4 * PageSize, KMemoryAttribute::GpuSharable,
+                                           KMemoryAttribute::GpuSharable)
+                    .IsSuccess());
+        u32 handle{};
+        REQUIRE(pool.Register(&handle, GetInteger(address), GetInteger(address) + 4 * PageSize - 1,
+                              0, device)
+                    .IsSuccess());
+        process.GetMemory().Write32(address, 0xabcdef01);
+        process.GetMemory().Write32(address + PageSize, 0x12345678);
+        const auto request = [](u64 gpu_address, u64 size, u32 memory_handle, u64 offset = 0,
+                                u8 kind = 6, u8 fallback = 6) {
+            std::array<u8, 40> bytes{};
+            const auto put = [&](size_t index, const auto& value) {
+                std::memcpy(bytes.data() + index, &value, sizeof(value));
+            };
+            put(0, u64_le{gpu_address});
+            put(8, u64_le{size});
+            put(24, u32_le{memory_handle});
+            put(32, u64_le{offset});
+            if (memory_handle != 0) {
+                bytes[17] = 1;
+                bytes[19] = kind;
+                bytes[20] = fallback;
+            }
+            return bytes;
+        };
+        u64 processed{~u64{0}};
+        bool accepted{};
+        const auto execute = [&](std::span<const u8> input, std::span<u8> kinds, u64 version = 1,
+                                 u64 stride = 40, u8 sync = 1) {
+            return pool.ExecuteSparseMapRequests(&processed, kinds, spaces, backing, space, input,
+                                                 version, stride, sync, &accepted);
+        };
+        std::vector<u8> batch;
+        constexpr std::array<u8, 6> requested{6, 8, 11, 12, 9, 13};
+        constexpr std::array<u8, 6> fallback{6, 6, 1, 3, 6, 4};
+        constexpr std::array layouts{Tegra::PTEKind::GENERIC_16BX2, Tegra::PTEKind::GENERIC_16BX2,
+                                     Tegra::PTEKind::Z16,           Tegra::PTEKind::S8Z24,
+                                     Tegra::PTEKind::GENERIC_16BX2, Tegra::PTEKind::ZF32_X24S8};
+        for (size_t i = 0; i < requested.size(); ++i) {
+            const auto bytes =
+                request(va + i * PageSize, PageSize, handle, 0, requested[i], fallback[i]);
+            batch.insert(batch.end(), bytes.begin(), bytes.end());
+        }
+        std::array<u8, 8> kinds;
+        kinds.fill(0xcc);
+        REQUIRE(execute(batch, kinds).IsSuccess());
+        REQUIRE(accepted);
+        REQUIRE(processed == 6);
+        for (size_t i = 0; i < requested.size(); ++i) {
+            REQUIRE(kinds[i] == fallback[i]);
+            REQUIRE(view->GetPageKind(va + i * PageSize) == layouts[i]);
+            REQUIRE(view->GpuToCpuAddress(va + i * PageSize) == view->GpuToCpuAddress(va));
+            REQUIRE(view->Read<u32>(va + i * PageSize) == 0xabcdef01);
+        }
+        REQUIRE(kinds[6] == 0xcc);
+        REQUIRE(kinds[7] == 0xcc);
+        view->Write<u32>(va + 3 * PageSize, 0xfedcba98);
+        REQUIRE(process.GetMemory().Read32(address) == 0xfedcba98);
+        REQUIRE(view->Read<u32>(va + 5 * PageSize) == 0xfedcba98);
+        REQUIRE(process.GetMemory().Read32(address + PageSize) == 0x12345678);
+        REQUIRE(execute(batch, std::span{kinds}.first(2)).IsSuccess());
+        REQUIRE(processed == 6);
+        auto aliased = batch;
+        REQUIRE(execute(aliased, std::span{aliased}.first(6)).IsSuccess());
+        REQUIRE(processed == 6);
+        REQUIRE(std::equal(aliased.begin(), aliased.begin() + 6, fallback.begin()));
+
+        const auto unmap = request(va, PageSize, 0);
+        auto invalid = request(va + PageSize, PageSize, handle);
+        const auto rejected = [&](std::span<const u8> input, u64 version = 1, u64 stride = 40,
+                                  u8 sync = 1) {
+            processed = ~u64{0};
+            accepted = true;
+            kinds.fill(0xcc);
+            REQUIRE(execute(input, kinds, version, stride, sync).IsError());
+            REQUIRE_FALSE(accepted);
+            REQUIRE(processed == ~u64{0});
+            REQUIRE(kinds[0] == 0xcc);
+            REQUIRE(view->Read<u32>(va) == 0xfedcba98);
+            REQUIRE(view->Read<u32>(va + PageSize) == 0xfedcba98);
+        };
+        kinds.fill(0xcc);
+        REQUIRE(execute({}, kinds).IsSuccess());
+        REQUIRE(accepted);
+        REQUIRE(processed == 0);
+        REQUIRE(kinds[0] == 0xcc);
+        rejected(std::span{invalid}.first(39));
+        rejected(invalid, 0);
+        rejected(invalid, 1, 0);
+        rejected(invalid, 1, 41);
+        rejected(invalid, 1, 40, 2);
+        for (const auto index : {12U, 16U, 17U, 18U, 21U, 22U, 24U, 28U, 36U}) {
+            auto malformed = invalid;
+            malformed[index] = 0xff;
+            std::vector<u8> two{unmap.begin(), unmap.end()};
+            two.insert(two.end(), malformed.begin(), malformed.end());
+            rejected(two);
+        }
+        auto bad_unmap = unmap;
+        bad_unmap[17] = 1;
+        rejected(bad_unmap);
+        auto bad_kind = invalid;
+        bad_kind[19] = 7;
+        rejected(bad_kind);
+        bad_kind[19] = 8;
+        bad_kind[20] = 8;
+        rejected(bad_kind);
+        rejected(request(va + region_size, PageSize, handle));
+        rejected(request(va, PageSize, handle, 4 * PageSize));
+        rejected(request(va, PageSize + 1, handle));
+        rejected(request(va + 1, PageSize, handle));
+        rejected(request((1ULL << 40) - PageSize, 2 * PageSize, handle));
+        rejected(request(va, PageSize, handle, 1ULL << 37));
+
+        const auto retained = *view->GpuToCpuAddress(va + PageSize);
+        REQUIRE(view->Map(va + 12 * PageSize, retained, PageSize, Tegra::PTEKind::GENERIC_16BX2,
+                          false) == va + 12 * PageSize);
+        const auto first = request(va + 10 * PageSize, PageSize, handle);
+        const auto collision = request(va + 12 * PageSize, PageSize, handle);
+        std::vector<u8> partial{first.begin(), first.end()};
+        partial.insert(partial.end(), collision.begin(), collision.end());
+        kinds.fill(0xcc);
+        REQUIRE(execute(partial, kinds).IsError());
+        REQUIRE(accepted);
+        REQUIRE(processed == 1);
+        REQUIRE(kinds[0] == 6);
+        REQUIRE(kinds[1] == 0xcc);
+        REQUIRE(view->Read<u32>(va + 10 * PageSize) == 0xfedcba98);
+        REQUIRE(view->GpuToCpuAddress(va + 12 * PageSize) == retained);
+        view->Unmap(va + 12 * PageSize, PageSize, true);
+
+        for (u8 kind = 0; kind <= 6; ++kind) {
+            const auto bytes = request(va + 8 * PageSize, PageSize, handle, PageSize, kind, 7);
+            REQUIRE(execute(bytes, {}).IsSuccess());
+            REQUIRE(processed == 1);
+            REQUIRE(view->Read<u32>(va + 8 * PageSize) == 0x12345678);
+        }
+        const auto remap = request(va, PageSize, handle, PageSize);
+        REQUIRE(execute(remap, kinds).IsSuccess());
+        REQUIRE(view->Read<u32>(va) == 0x12345678);
+        REQUIRE(view->Read<u32>(va + PageSize) == 0xfedcba98);
+        REQUIRE(execute(unmap, kinds).IsSuccess());
+        REQUIRE(processed == 1);
+        REQUIRE(kinds[0] == 0);
+        REQUIRE_FALSE(view->GpuToCpuAddress(va));
+        REQUIRE(view->Read<u32>(va) == 0);
+        REQUIRE(view->Read<u32>(va + PageSize) == 0xfedcba98);
+        REQUIRE(execute(unmap, kinds).IsSuccess());
+        REQUIRE(processed == 1);
+        REQUIRE(pool.Unregister(handle).IsSuccess());
+        REQUIRE(pool.DestroySparseRegion(space, va, va + region_size - 1).IsSuccess());
+        REQUIRE(pool.Unregister(handle).IsError());
+        REQUIRE(view->GetSubmappedRange(va, region_size).empty());
+        REQUIRE(devices->Destroy(device).IsSuccess());
     }
     SECTION("fragmented backing returns and pins only its physical prefix") {
         const auto physical = kernel.MemoryManager().AllocateAndOpenContinuous(

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <cstring>
 #include <new>
 
@@ -68,6 +69,7 @@ public:
             {213, &KUserWorkerSession::UnmapMemory, "NormalUnmapGpuMemory4K"},
             {214, &KUserWorkerSession::CreateSparseRegion, "CreateSparseRegion"},
             {215, &KUserWorkerSession::DestroySparseRegion, "DestroySparseRegion"},
+            {216, &KUserWorkerSession::ExecuteSparseMapRequests, "ExecuteSparseMapRequests"},
         };
         RegisterHandlersTipc(functions);
     }
@@ -118,7 +120,7 @@ private:
             options.permission = static_cast<u8>(rp.Pop<u32>());
             options.cacheability = static_cast<u8>(rp.Pop<u32>());
             options.kind = static_cast<u8>(rp.Pop<u32>());
-            options.compressed_kind = static_cast<u8>(rp.Pop<u32>());
+            options.incompressible_kind = static_cast<u8>(rp.Pop<u32>());
             options.raw_texture = static_cast<u8>(rp.Pop<u32>());
             options.device_id = static_cast<u8>(rp.Pop<u32>());
             options.sync = static_cast<u8>(rp.Pop<u32>());
@@ -198,6 +200,60 @@ private:
             R_RETURN(m_events->events[event_id]->Signal(system.Kernel()));
         }();
         Reply(ctx, result);
+    }
+
+    void ExecuteSparseMapRequests(HLERequestContext& ctx) {
+        u64 processed{};
+        std::vector<u8> kinds;
+        const auto result = [&]() -> Result {
+            R_UNLESS(HasInputWords(ctx, 7), Kernel::ResultInvalidSize);
+            IPC::CommandHeader header{};
+            std::memcpy(&header, ctx.CommandBuffer(), sizeof(header));
+            R_UNLESS(header.num_buf_a_descriptors == 1 && header.num_buf_b_descriptors == 1 &&
+                         header.num_buf_x_descriptors == 0 && header.num_buf_w_descriptors == 0 &&
+                         header.enable_handle_descriptor == 0 &&
+                         header.buf_c_descriptor_flags ==
+                             IPC::CommandHeader::BufferDescriptorCFlag::Disabled,
+                     Kernel::ResultInvalidSize);
+            IPC::RequestParser rp{ctx};
+            const auto version = rp.Pop<u64>();
+            const auto address_space = rp.Pop<u32>();
+            const auto stride = rp.Pop<u64>();
+            const auto sync = static_cast<u8>(rp.Pop<u32>());
+            const auto event_id = rp.Pop<u32>();
+            const std::scoped_lock lock{m_events->mutex};
+            R_UNLESS(event_id < m_events->events.size() && m_events->events[event_id],
+                     GraphicsDeviceTable::InvalidArgument);
+            try {
+                const auto input_size = ctx.BufferDescriptorA().front().Size();
+                const auto output_size = ctx.BufferDescriptorB().front().Size();
+                R_UNLESS(version == 1 && stride == 40 && sync <= 1 && input_size % stride == 0,
+                         GraphicsDeviceTable::InvalidArgument);
+                kinds.resize(std::min(input_size / stride, output_size));
+                bool accepted{};
+                const auto mapping_result = m_memory->ExecuteSparseMapRequests(
+                    &processed, kinds, *m_address_spaces, system.Host1x().MemoryManager(),
+                    address_space, input_size != 0 ? ctx.ReadBufferA() : std::span<const u8>{},
+                    version, stride, sync, &accepted);
+                if (accepted) {
+                    // A failed execution may have completed a prefix. Publish its kinds and
+                    // signal completion after the final page-table change, retaining the error.
+                    const auto written = std::min<u64>(processed, kinds.size());
+                    if (written != 0) {
+                        ctx.WriteBufferB(kinds.data(), written);
+                    }
+                    const auto completion = m_events->events[event_id]->Signal(system.Kernel());
+                    R_UNLESS(mapping_result.IsSuccess(), mapping_result);
+                    R_RETURN(completion);
+                }
+                R_RETURN(mapping_result);
+            } catch (const std::bad_alloc&) {
+                R_RETURN(Result{0x80f3});
+            }
+        }();
+        IPC::ResponseBuilder rb{ctx, 4};
+        rb.Push(result);
+        rb.Push<u64>(result.IsSuccess() ? processed : 0);
     }
 
     Kernel::KScopedAutoObject<Kernel::KProcess> m_process;

@@ -7,6 +7,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <vector>
 #include "core/hle/kernel/k_auto_object.h"
 #include "core/hle/kernel/k_event.h"
@@ -42,7 +43,7 @@ public:
         u8 permission;
         u8 cacheability;
         u8 kind;
-        u8 compressed_kind;
+        u8 incompressible_kind;
         u8 raw_texture;
         u8 device_id;
         u8 sync;
@@ -61,6 +62,12 @@ public:
                               u64 gpu_address, u64 last_address, u8 page_bits, u8 alloc_mode,
                               u8 device_id);
     Result DestroySparseRegion(u32 address_space, u64 gpu_address, u64 last_address);
+    // Accepted batches notify completion even if execution fails after completing a prefix.
+    Result ExecuteSparseMapRequests(u64* out_processed, std::span<u8> out_kinds,
+                                    GpuAddressSpacePool& address_spaces,
+                                    Tegra::MaxwellDeviceMemoryManager& backing, u32 address_space,
+                                    std::span<const u8> requests, u64 version, u64 stride, u8 sync,
+                                    bool* out_accepted = nullptr);
 
 private:
     Result MapImpl(u8* out_kind, GpuAddressSpacePool& address_spaces,

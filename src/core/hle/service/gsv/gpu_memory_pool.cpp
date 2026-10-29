@@ -1,10 +1,14 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <array>
+#include <cstddef>
+#include <cstring>
 #include <limits>
 #include <new>
 #include "common/alignment.h"
 #include "common/scope_exit.h"
+#include "common/swap.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/svc_results.h"
 #include "core/hle/service/gsv/gpu_address_space_pool.h"
@@ -17,6 +21,40 @@ namespace {
 constexpr Result InvalidArgument{0x100f3};
 constexpr Result InvalidMemory{0x280f3};
 constexpr Result OutOfMemory{0x80f3};
+
+struct SparseMapRequest {
+    u64_le address;
+    u64_le size;
+    u8 permission;
+    u8 cacheability;
+    u8 reserved_12;
+    u8 kind;
+    u8 incompressible_kind;
+    u8 raw_texture;
+    u16_le reserved_16;
+    u32_le memory_handle;
+    u32_le reserved_1c;
+    u64_le offset;
+};
+static_assert(sizeof(SparseMapRequest) == 40);
+static_assert(offsetof(SparseMapRequest, memory_handle) == 24);
+static_assert(offsetof(SparseMapRequest, offset) == 32);
+
+Result SelectMemoryKind(u8* out_kind, Tegra::PTEKind* out_layout, u8 requested, u8 fallback) {
+    // Native kinds use the Turing MMU encoding, not the legacy enum's numeric values.
+    // https://github.com/NVIDIA/open-gpu-doc/blob/master/manuals/turing/tu104/dev_mmu.ref.txt
+    constexpr std::array layouts{Tegra::PTEKind::PITCH,        Tegra::PTEKind::Z16,
+                                 Tegra::PTEKind::S8,           Tegra::PTEKind::S8Z24,
+                                 Tegra::PTEKind::ZF32_X24S8,   Tegra::PTEKind::Z24S8,
+                                 Tegra::PTEKind::GENERIC_16BX2};
+    R_UNLESS(requested <= 6 || (requested >= 8 && requested <= 14), InvalidArgument);
+    // Host renderers store uncompressed images, so expose the caller's uncompressed fallback.
+    const u8 selected = requested >= 8 ? fallback : requested;
+    R_UNLESS(selected < layouts.size(), Kernel::ResultNotImplemented);
+    *out_kind = selected;
+    *out_layout = layouts[selected];
+    R_SUCCEED();
+}
 } // namespace
 
 GpuMemoryPool::GpuMemoryPool(Kernel::KernelCore& kernel, Kernel::KProcess* process,
@@ -184,6 +222,7 @@ Result GpuMemoryPool::Map(u8* out_kind, GpuAddressSpacePool& address_spaces,
                           Tegra::MaxwellDeviceMemoryManager& backing, u32 address_space,
                           u64 gpu_address, u64 last_address, u32 memory_handle, u64 offset,
                           MapOptions options) {
+    const std::scoped_lock lock{m_mutex};
     R_RETURN(MapImpl(out_kind, address_spaces, backing, address_space, gpu_address, last_address,
                      memory_handle, offset, options, false));
 }
@@ -192,6 +231,7 @@ Result GpuMemoryPool::MapSparseMemory(u8* out_kind, GpuAddressSpacePool& address
                                       Tegra::MaxwellDeviceMemoryManager& backing, u32 address_space,
                                       u64 gpu_address, u64 last_address, u32 memory_handle,
                                       u64 offset, MapOptions options) {
+    const std::scoped_lock lock{m_mutex};
     R_RETURN(MapImpl(out_kind, address_spaces, backing, address_space, gpu_address, last_address,
                      memory_handle, offset, options, true));
 }
@@ -207,11 +247,10 @@ Result GpuMemoryPool::MapImpl(u8* out_kind, GpuAddressSpacePool& address_spaces,
                  options.cacheability <= 1 && options.raw_texture <= 1 && options.sync <= 1 &&
                  options.device_id < GraphicsDeviceTable::Capacity,
              InvalidArgument);
-    // Read-only PTEs and compressed/raw texture mappings need their own access/layout support.
-    R_UNLESS(options.permission == 0 && options.raw_texture == 0 &&
-                 options.kind == options.compressed_kind &&
-                 (options.kind == 0 || options.kind == 6),
-             Kernel::ResultNotImplemented);
+    R_UNLESS(options.permission == 0 && options.raw_texture == 0, Kernel::ResultNotImplemented);
+    u8 selected_kind{};
+    Tegra::PTEKind kind{};
+    R_TRY(SelectMemoryKind(&selected_kind, &kind, options.kind, options.incompressible_kind));
     const auto manager = address_spaces.Acquire(address_space);
     R_UNLESS(manager, InvalidMemory);
     u64 first, last;
@@ -219,7 +258,6 @@ Result GpuMemoryPool::MapImpl(u8* out_kind, GpuAddressSpacePool& address_spaces,
                                              GpuAddressSpacePool::Partition::User));
     R_UNLESS(gpu_address >= first && last_address <= last, InvalidArgument);
     const u64 size = last_address - gpu_address + 1;
-    const std::scoped_lock lock{m_mutex};
     const auto memory = m_memory.find(memory_handle);
     R_UNLESS(memory != m_memory.end() && !memory->second.release_pending, InvalidMemory);
     R_UNLESS(memory->second.device_id == options.device_id &&
@@ -279,8 +317,6 @@ Result GpuMemoryPool::MapImpl(u8* out_kind, GpuAddressSpacePool& address_spaces,
                         memory->second.pinned_size, *m_asid, true);
         }
         const auto device_address = memory->second.device_address + offset;
-        // Native generic memory (6) is not the legacy Z16 kind at that numeric value.
-        const auto kind = options.kind == 0 ? Tegra::PTEKind::PITCH : Tegra::PTEKind::GENERIC_16BX2;
         const auto retain_mapping = [&] {
             it->second = Mapping{manager, size, memory_handle};
             ++memory->second.mapping_count;
@@ -299,11 +335,11 @@ Result GpuMemoryPool::MapImpl(u8* out_kind, GpuAddressSpacePool& address_spaces,
             throw;
         }
         retain_mapping();
-        *out_kind = options.kind;
+        *out_kind = selected_kind;
         LOG_DEBUG(
             Service,
             "Native GPU memory mapped: as={:#x}, gpu={:#x}, size={:#x}, memory={:#x}, kind={}",
-            address_space, gpu_address, size, memory_handle, options.kind);
+            address_space, gpu_address, size, memory_handle, selected_kind);
         R_SUCCEED();
     } catch (const std::bad_alloc&) {
         R_RETURN(OutOfMemory);
@@ -331,11 +367,13 @@ void GpuMemoryPool::RemoveMapping(std::map<std::pair<u32, u64>, Mapping>::iterat
 
 Result GpuMemoryPool::Unmap(u32 address_space, u64 gpu_address, u64 last_address,
                             u64* out_unmapped) {
+    const std::scoped_lock lock{m_mutex};
     R_RETURN(UnmapImpl(address_space, gpu_address, last_address, out_unmapped, false));
 }
 
 Result GpuMemoryPool::UnmapSparseMemory(u32 address_space, u64 gpu_address, u64 last_address,
                                         u64* out_unmapped) {
+    const std::scoped_lock lock{m_mutex};
     R_RETURN(UnmapImpl(address_space, gpu_address, last_address, out_unmapped, true));
 }
 
@@ -345,7 +383,6 @@ Result GpuMemoryPool::UnmapImpl(u32 address_space, u64 gpu_address, u64 last_add
                  Common::IsAligned(gpu_address, Kernel::PageSize) &&
                  Common::IsAligned(last_address + 1, Kernel::PageSize),
              InvalidArgument);
-    const std::scoped_lock lock{m_mutex};
     auto containing = [&](u64 address) {
         auto it = m_mappings.upper_bound({address_space, address});
         if (it == m_mappings.begin())
@@ -454,6 +491,123 @@ GpuMemoryPool::SparseRegions::iterator GpuMemoryPool::FindSparseRegion(u32 addre
     return it->first.first == address_space && address < it->first.second + it->second.size
                ? it
                : m_sparse_regions.end();
+}
+
+Result GpuMemoryPool::ExecuteSparseMapRequests(u64* out_processed, std::span<u8> out_kinds,
+                                               GpuAddressSpacePool& address_spaces,
+                                               Tegra::MaxwellDeviceMemoryManager& backing,
+                                               u32 address_space, std::span<const u8> bytes,
+                                               u64 version, u64 stride, u8 sync,
+                                               bool* out_accepted) {
+    if (out_accepted) {
+        *out_accepted = false;
+    }
+    R_UNLESS(version == 1 && stride == sizeof(SparseMapRequest) && sync <= 1 &&
+                 bytes.size() % sizeof(SparseMapRequest) == 0,
+             InvalidArgument);
+    if (bytes.empty()) {
+        *out_processed = 0;
+        if (out_accepted) {
+            *out_accepted = true;
+        }
+        R_SUCCEED();
+    }
+    try {
+        // Snapshot every request before writing kinds; guest input and output buffers may alias.
+        std::vector<SparseMapRequest> requests(bytes.size() / sizeof(SparseMapRequest));
+        std::memcpy(requests.data(), bytes.data(), bytes.size());
+        for (const auto& request : requests) {
+            const u64 address = request.address;
+            const u64 size = request.size;
+            const u64 offset = request.offset;
+            R_UNLESS(address < (1ULL << 40) && size != 0 && size <= (1ULL << 40) - address &&
+                         Common::IsAligned(address, Kernel::PageSize) &&
+                         Common::IsAligned(size, Kernel::PageSize) && request.reserved_12 == 0 &&
+                         request.reserved_16 == 0 && request.reserved_1c == 0,
+                     InvalidArgument);
+            if (request.memory_handle == 0) {
+                R_UNLESS(request.permission == 0 && request.cacheability == 0 &&
+                             request.kind == 0 && request.incompressible_kind == 0 &&
+                             request.raw_texture == 0 && offset == 0,
+                         InvalidArgument);
+            } else {
+                R_UNLESS(request.permission <= 1 && request.cacheability <= 1 &&
+                             request.raw_texture <= 1 && offset < (1ULL << 37) &&
+                             size <= (1ULL << 37) - offset &&
+                             Common::IsAligned(offset, Kernel::PageSize),
+                         InvalidArgument);
+                R_UNLESS(request.permission == 0 && request.raw_texture == 0,
+                         Kernel::ResultNotImplemented);
+                u8 selected{};
+                Tegra::PTEKind layout{};
+                R_TRY(SelectMemoryKind(&selected, &layout, request.kind,
+                                       request.incompressible_kind));
+            }
+        }
+
+        const auto manager = address_spaces.Acquire(address_space);
+        R_UNLESS(manager, InvalidMemory);
+        const std::scoped_lock lock{m_mutex};
+        R_UNLESS(!m_backing || m_backing == &backing, Kernel::ResultInvalidState);
+        const auto region = FindSparseRegion(address_space, requests.front().address);
+        R_UNLESS(region != m_sparse_regions.end() && region->second.manager == manager,
+                 InvalidMemory);
+        const auto device = region->second.device_id;
+        const u64 granularity = 1ULL << region->second.page_bits;
+        // Native batches operate on one sparse parent. Validate all handles and ranges before
+        // replacing any residents, including handles used again later in the same batch.
+        for (const auto& request : requests) {
+            const u64 address = request.address;
+            const u64 size = request.size;
+            const u64 offset = request.offset;
+            R_UNLESS(address >= region->first.second &&
+                         address + size <= region->first.second + region->second.size &&
+                         Common::IsAligned(address, granularity) &&
+                         Common::IsAligned(size, granularity) &&
+                         Common::IsAligned(offset, granularity),
+                     InvalidArgument);
+            if (request.memory_handle != 0) {
+                const auto memory = m_memory.find(request.memory_handle);
+                R_UNLESS(memory != m_memory.end() && !memory->second.release_pending,
+                         InvalidMemory);
+                R_UNLESS(memory->second.device_id == device &&
+                             offset <= memory->second.pinned_size &&
+                             size <= memory->second.pinned_size - offset,
+                         InvalidArgument);
+            }
+        }
+
+        *out_processed = 0;
+        if (out_accepted) {
+            *out_accepted = true;
+        }
+        for (const auto& request : requests) {
+            const u64 address = request.address;
+            const u64 last = address + request.size - 1;
+            u8 kind{};
+            R_TRY(UnmapImpl(address_space, address, last, nullptr, true));
+            if (request.memory_handle != 0) {
+                const MapOptions options{request.permission,
+                                         request.cacheability,
+                                         request.kind,
+                                         request.incompressible_kind,
+                                         request.raw_texture,
+                                         device,
+                                         sync};
+                R_TRY(MapImpl(&kind, address_spaces, backing, address_space, address, last,
+                              request.memory_handle, request.offset, options, true));
+            }
+            if (*out_processed < out_kinds.size()) {
+                out_kinds[*out_processed] = kind;
+            }
+            ++*out_processed;
+        }
+        LOG_DEBUG(Service, "Native GPU sparse batch completed: as={:#x}, requests={}",
+                  address_space, *out_processed);
+        R_SUCCEED();
+    } catch (const std::bad_alloc&) {
+        R_RETURN(OutOfMemory);
+    }
 }
 
 Result GpuMemoryPool::CreateSparseRegion(GpuAddressSpacePool& address_spaces, u32 address_space,
