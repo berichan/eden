@@ -50,6 +50,8 @@ add_library(video_core STATIC
     control/native_inline_upload.h
     control/native_indexed_draw.cpp
     control/native_indexed_draw.h
+    control/native_texture_descriptor.cpp
+    control/native_texture_descriptor.h
     control/native_gpu_context.cpp
     control/native_gpu_context.h
     control/native_graphics_config.cpp

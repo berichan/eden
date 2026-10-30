@@ -180,6 +180,73 @@ TEST_CASE("Native graphics capture separates source headers, code and constant s
                                        Environment::NativeProgram{header_address, {}, &lease}}),
                           Shader::RuntimeError);
     }
+    // Fixed ISA with changing descriptor metadata must not share specialization.
+    using Words = Tegra::Control::NativeDescriptorWords;
+    Words texture{};
+    texture[0] = 8;
+    for (u32 i = 0; i < 4; ++i)
+        texture[0] |= (2U << (7 + 3 * i)) | ((i + 2) << (19 + 3 * i));
+    texture[1] = 0x100000;
+    texture[2] = (3U << 21) | 0x21;
+    texture[3] = 3U << 28;
+    texture[4] = 15U | (1U << 23);
+    texture[5] = 7U | (1U << 31);
+    texture[7] = 3U << 4;
+    Words sampler{};
+    sampler[1] = 2U | (2U << 4) | (2U << 6);
+    constexpr u32 Handle = (1U << 20) | 2;
+    engine.regs.tex_header = {0, static_cast<u32>(base + 0x600), 2};
+    engine.regs.tex_sampler = {0, static_cast<u32>(base + 0x800), 1};
+    engine.regs.sampler_binding = Engine::Regs::SamplerBinding::Independently;
+    const auto update_descriptors = [&] {
+        write(base + 0x640, texture);
+        write(base + 0x820, sampler);
+    };
+    update_descriptors();
+    const auto specialize = [&] {
+        Environment environment{engine, memory, Program::Pixel,
+                                Environment::NativeProgram{header_address, {}}};
+        REQUIRE(environment.ReadTextureType(Handle) == Shader::TextureType::Color2D);
+        (void)environment.ReadTexturePixelFormat(Handle);
+        environment.FinalizeNativeResources();
+        REQUIRE(environment.NativeTextures().size() == 1);
+        REQUIRE(environment.NativeTextures()[0].texture.width == 16);
+        REQUIRE(environment.NativeTextures()[0].texture.height == 8);
+        REQUIRE_THROWS_AS(environment.ReadTextureType(Handle + 1), Shader::RuntimeError);
+        REQUIRE_THROWS_AS(environment.ReadCbufValue(0, 0), Shader::RuntimeError);
+        return environment.CalculateHash();
+    };
+    const u64 original = specialize();
+    REQUIRE(specialize() == original);
+    const auto specialize_constant = [&] {
+        Environment environment{engine, memory, Program::Pixel,
+                                Environment::NativeProgram{header_address, {}}};
+        REQUIRE(environment.ReadCbufValue(0, 0) != 0);
+        environment.FinalizeNativeResources();
+        return environment.CalculateHash();
+    };
+    const auto constant_hash = specialize_constant();
+    write(base + 0x200, u32{0x98765432});
+    REQUIRE(specialize_constant() != constant_hash);
+    write(base + 0x200, u32{0xabcdef01});
+    texture[4] ^= 1U << 22;
+    update_descriptors();
+    REQUIRE(specialize() != original);
+    texture[4] ^= 1U << 22;
+    sampler[1] |= 1U << 12;
+    update_descriptors();
+    REQUIRE(specialize() != original);
+    sampler[1] &= ~(1U << 12);
+    texture[2] |= 1U << 18;
+    update_descriptors();
+    REQUIRE(specialize() != original);
+    {
+        auto lease = memory.AcquireMappingLease();
+        Environment external{engine, memory, Program::Pixel,
+                             Environment::NativeProgram{header_address, {}, &lease}};
+        REQUIRE(external.ReadTextureType(Handle) == Shader::TextureType::Color2D);
+        REQUIRE(external.NativeTextures()[0].texture.reserved[2] == (1U << 18));
+    }
     memory.Unmap(base + Kernel::PageSize, Kernel::PageSize);
     REQUIRE(captured.ReadInstruction(80) != 0);
     REQUIRE_THROWS_AS(captured.ReadCbufValue(0, 0), Shader::RuntimeError);

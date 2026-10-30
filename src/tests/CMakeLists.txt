@@ -44,6 +44,7 @@ add_executable(tests
     video_core/native_semaphore_release.cpp
     video_core/native_inline_upload.cpp
     video_core/native_indexed_draw.cpp
+    video_core/native_texture_descriptor.cpp
     video_core/native_graphics_config.cpp
     video_core/native_graphics_header.cpp
     video_core/native_graphics_environment.cpp

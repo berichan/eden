@@ -22,6 +22,7 @@
 #include "common/polyfill_thread.h"
 #include "common/unique_function.h"
 #include "shader_recompiler/environment.h"
+#include "video_core/control/native_texture_descriptor.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/memory_manager.h"
 
@@ -84,6 +85,7 @@ protected:
                               const Tegra::MemoryManager::MappingLease* mapping = nullptr);
     size_t native_source_size{};
     u64 native_specialization_hash{};
+    u64 native_resource_hash{};
 
     Tegra::Texture::TICEntry ReadTextureInfo(GPUVAddr tic_addr, u32 tic_limit,
                                              bool via_header_index, u32 raw);
@@ -117,6 +119,11 @@ protected:
 
 class GraphicsEnvironment final : public GenericEnvironment {
 public:
+    struct NativeTextureBinding {
+        u32 handle;
+        Tegra::Control::NativeTextureDescriptor texture;
+        Tegra::Control::NativeSamplerDescriptor sampler;
+    };
     struct NativeProgram {
         GPUVAddr header_address;
         std::stop_token stop;
@@ -150,8 +157,15 @@ public:
 
     std::optional<Shader::ReplaceConstant> GetReplaceConstBuffer(u32 bank, u32 offset) override;
 
+    // Call after native IR preparation, before pipeline lookup. Late compilation
+    // reads must be contained in this frozen dependency set.
+    void FinalizeNativeResources();
+    std::span<const NativeTextureBinding> NativeTextures() const {
+        return native_textures;
+    }
+
 private:
-    [[noreturn]] void RejectNativeTexture(u32 handle);
+    const NativeTextureBinding& CaptureNativeTexture(u32 handle);
     Tegra::Engines::Maxwell3D* maxwell3d{};
     size_t stage_index{};
     std::array<Tegra::Engines::ConstBufferInfo, Tegra::Engines::Maxwell3D::Regs::MaxConstBuffers>
@@ -159,6 +173,8 @@ private:
     u64 native_mapping_generation{};
     const Tegra::MemoryManager::MappingLease* native_capture_mapping{};
     std::vector<u8> native_driver_constants;
+    std::vector<NativeTextureBinding> native_textures;
+    bool native_resources_finalized{};
 };
 
 class ComputeEnvironment final : public GenericEnvironment {

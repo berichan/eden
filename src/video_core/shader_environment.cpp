@@ -225,7 +225,8 @@ u64 GenericEnvironment::CalculateHash() const {
         constexpr u64 NativeCacheVersion = 0x4f554e4345000004ULL;
         return Common::CityHash64(reinterpret_cast<const char*>(code.data()),
                                   code.size() * sizeof(u64)) ^
-               NativeCacheVersion ^ (u64{local_memory_size} << 32) ^ native_specialization_hash;
+               NativeCacheVersion ^ (u64{local_memory_size} << 32) ^ native_specialization_hash ^
+               native_resource_hash;
     }
     const size_t size{ReadSizeBytes()};
     const auto data{std::make_unique<char[]>(size)};
@@ -535,6 +536,8 @@ u32 GraphicsEnvironment::ReadCbufValue(u32 cbuf_index, u32 cbuf_offset) {
         const auto key = MakeCbufKey(cbuf_index, cbuf_offset);
         if (const auto cached = cbuf_values.find(key); cached != cbuf_values.end())
             return cached->second;
+        if (native_resources_finalized)
+            throw Shader::RuntimeError("Native constant dependency changed after preparation");
         u32 value{};
         if (cbuf_index == 1) {
             if (cbuf_offset > native_driver_constants.size() ||
@@ -591,8 +594,10 @@ std::optional<Shader::ReplaceConstant> GraphicsEnvironment::GetReplaceConstBuffe
 }
 
 Shader::TextureType GraphicsEnvironment::ReadTextureType(u32 handle) {
-    if (native_source_size)
-        RejectNativeTexture(handle);
+    if (native_source_size) {
+        const auto& texture = CaptureNativeTexture(handle).texture;
+        return texture.normalized ? Shader::TextureType::Color2D : Shader::TextureType::Color2DRect;
+    }
     const auto& regs{maxwell3d->regs};
     const bool via_header_index{regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding};
     auto entry =
@@ -603,8 +608,12 @@ Shader::TextureType GraphicsEnvironment::ReadTextureType(u32 handle) {
 }
 
 Shader::TexturePixelFormat GraphicsEnvironment::ReadTexturePixelFormat(u32 handle) {
-    if (native_source_size)
-        RejectNativeTexture(handle);
+    if (native_source_size) {
+        const auto& texture = CaptureNativeTexture(handle).texture;
+        return static_cast<Shader::TexturePixelFormat>(
+            texture.srgb ? VideoCore::Surface::PixelFormat::A8B8G8R8_SRGB
+                         : VideoCore::Surface::PixelFormat::A8B8G8R8_UNORM);
+    }
     const auto& regs{maxwell3d->regs};
     const bool via_header_index{regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding};
     auto entry =
@@ -619,44 +628,75 @@ bool GraphicsEnvironment::IsTexturePixelFormatInteger(u32 handle) {
         static_cast<VideoCore::Surface::PixelFormat>(ReadTexturePixelFormat(handle)));
 }
 
-void GraphicsEnvironment::RejectNativeTexture(u32 handle) {
+const GraphicsEnvironment::NativeTextureBinding& GraphicsEnvironment::CaptureNativeTexture(
+    u32 handle) {
+    using namespace Tegra::Control;
+    for (const auto& binding : native_textures)
+        if (binding.handle == handle)
+            return binding;
+    if (native_resources_finalized || native_textures.size() >= 64)
+        throw Shader::RuntimeError("Native texture dependency changed or exceeds capture capacity");
     const auto read = [&](u32 method) { return maxwell3d->GetRegisterValue(method); };
-    const u32 binding = read(0x48d);
-    LOG_DEBUG(HW_GPU, "Native texture lookup rejected: stage={}, handle={:#x}, binding={:#x}",
-              stage_index, handle, binding);
-    // Capture only the two requested descriptors, without interpreting either as
-    // a legacy TIC/TSC. Linked-header indexing still needs its own native contract.
-    if (binding == 0) {
-        std::optional<Tegra::MemoryManager::MappingLease> owned_mapping;
-        if (!native_capture_mapping)
-            owned_mapping.emplace(gpu_memory->AcquireMappingLease());
-        const auto& mapping = native_capture_mapping ? *native_capture_mapping : *owned_mapping;
-        const auto capture = [&](std::string_view name, u32 base, u32 limit_mask, u32 index) {
-            const u32 upper = read(base), lower = read(base + 1), limit = read(base + 2);
-            constexpr u64 AddressLimit = u64{1} << 40;
-            const GPUVAddr pool = (GPUVAddr{upper} << 32) | lower;
-            const u64 offset = u64{index} * 32;
-            std::array<u32, 8> words{};
-            if (!mapping.Protects(*gpu_memory) ||
-                native_mapping_generation != gpu_memory->MappingGeneration() || upper > 0xff ||
-                (lower & 31) || (limit & ~limit_mask) || index > limit ||
-                offset > AddressLimit - pool || sizeof(words) > AddressLimit - pool - offset ||
-                !mapping.ReadBlockChecked(pool + offset,
-                                          {reinterpret_cast<u8*>(words.data()), sizeof(words)})) {
-                LOG_DEBUG(HW_GPU, "Native {} descriptor unavailable: index={:#x}, limit={:#x}",
-                          name, index, limit);
-                return;
-            }
-            LOG_DEBUG(HW_GPU,
-                      "Native {} descriptor candidate: index={:#x}, words={:#x}/{:#x}/{:#x}/{:#x}/"
-                      "{:#x}/{:#x}/{:#x}/{:#x}",
-                      name, index, words[0], words[1], words[2], words[3], words[4], words[5],
-                      words[6], words[7]);
-        };
-        capture("texture", 0x55d, 0x3fffff, handle & 0xfffff);
-        capture("sampler", 0x557, 0xfffff, handle >> 20);
+    if (read(0x48d) != 0)
+        throw Shader::RuntimeError("Unsupported native linked sampler binding");
+    std::optional<Tegra::MemoryManager::MappingLease> owned_mapping;
+    if (!native_capture_mapping)
+        owned_mapping.emplace(gpu_memory->AcquireMappingLease());
+    const auto& mapping = native_capture_mapping ? *native_capture_mapping : *owned_mapping;
+    if (!mapping.Protects(*gpu_memory) ||
+        native_mapping_generation != gpu_memory->MappingGeneration())
+        throw Shader::RuntimeError("Native texture capture address space changed");
+    const auto capture = [&](NativeDescriptorPool pool, u32 base, u32 index) {
+        const auto address =
+            NativeDescriptorAddress(pool, read(base), read(base + 1), read(base + 2), index);
+        NativeDescriptorWords words{};
+        if (!address || !mapping.ReadBlockChecked(
+                            *address, {reinterpret_cast<u8*>(words.data()), sizeof(words)}))
+            throw Shader::RuntimeError("Unmapped or invalid native descriptor pool entry");
+        return words;
+    };
+    const auto texture = NativeTextureDescriptor::Decode(
+        capture(NativeDescriptorPool::Texture, 0x55d, handle & 0xfffff));
+    const auto sampler = NativeSamplerDescriptor::Decode(
+        capture(NativeDescriptorPool::Sampler, 0x557, handle >> 20));
+    if (!texture || !sampler || !texture->IsRgba8Unorm2D())
+        throw Shader::RuntimeError("Unsupported native texture or sampler metadata");
+    LOG_DEBUG(HW_GPU,
+              "Native texture metadata: stage={}, handle={:#x}, address={:#x}, extent={}x{}, "
+              "mips={}..{}, reserved_word2={:#x}, sampler_lod={}..{}",
+              stage_index, handle, texture->address, texture->width, texture->height,
+              texture->view_min_mip, texture->view_max_mip, texture->reserved[2], sampler->min_lod,
+              sampler->max_lod);
+    native_textures.push_back({handle, *texture, *sampler});
+    return native_textures.back();
+}
+
+void GraphicsEnvironment::FinalizeNativeResources() {
+    if (!native_source_size)
+        throw Shader::RuntimeError("Native resource preparation requires a native program");
+    if (native_resources_finalized)
+        return;
+    std::vector<std::pair<u64, u32>> dependencies{cbuf_values.begin(), cbuf_values.end()};
+    std::ranges::sort(dependencies);
+    u64 hash{};
+    for (const auto& [key, value] : dependencies) {
+        const std::array<u64, 2> dependency{key, value};
+        hash = Common::CityHash64WithSeed(reinterpret_cast<const char*>(dependency.data()),
+                                          sizeof(dependency), hash);
     }
-    throw Shader::RuntimeError("Native texture descriptors require native decoding");
+    std::ranges::sort(native_textures, {}, &NativeTextureBinding::handle);
+    for (const auto& binding : native_textures) {
+        hash = Common::CityHash64WithSeed(reinterpret_cast<const char*>(&binding.handle),
+                                          sizeof(binding.handle), hash);
+        hash =
+            Common::CityHash64WithSeed(reinterpret_cast<const char*>(binding.texture.words.data()),
+                                       sizeof(binding.texture.words), hash);
+        hash =
+            Common::CityHash64WithSeed(reinterpret_cast<const char*>(binding.sampler.words.data()),
+                                       sizeof(binding.sampler.words), hash);
+    }
+    native_resource_hash = hash;
+    native_resources_finalized = true;
 }
 
 u32 GraphicsEnvironment::ReadViewportTransformState() {

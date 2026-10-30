@@ -5,15 +5,15 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <bit>
 #include <cstddef>
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <numeric>
 #include <span>
 #include <thread>
 #include <vector>
-#include <bit>
-#include <numeric>
 #include "common/cityhash.h"
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
@@ -21,12 +21,15 @@
 #include "core/core.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/environment.h"
+#include "shader_recompiler/frontend/ir/modifiers.h"
+#include "shader_recompiler/frontend/ir/opcodes.h"
 #include "shader_recompiler/frontend/maxwell/control_flow.h"
 #include "shader_recompiler/frontend/maxwell/translate_program.h"
 #include "shader_recompiler/ir_opt/passes.h"
 #include "shader_recompiler/program_header.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/gpu_logging/gpu_logging.h"
 #include "video_core/memory_manager.h"
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
@@ -44,7 +47,6 @@
 #include "video_core/surface.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
-#include "video_core/gpu_logging/gpu_logging.h"
 
 #ifdef __ANDROID__
 #include "../../android/app/src/main/jni/android_settings.h"
@@ -853,6 +855,30 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
 
         if (native) {
             const auto& info = programs[index].info;
+            if (!info.texture_descriptors.empty()) {
+                u32 reported{};
+                for (const auto* block : programs[index].blocks) {
+                    for (const auto& instruction : block->Instructions()) {
+                        const auto opcode = instruction.GetOpcode();
+                        if (opcode >= Shader::IR::Opcode::ImageSampleImplicitLod &&
+                            opcode <= Shader::IR::Opcode::ImageQueryLod && reported++ < 8)
+                            LOG_DEBUG(HW_GPU,
+                                      "Native texture operation: stage={}, opcode={}, flags={:#x}",
+                                      index, Shader::IR::NameOf(opcode),
+                                      instruction.Flags<Shader::IR::TextureInstInfo>().raw);
+                    }
+                }
+                for (u32 i = 0; i < (std::min)(size_t{8}, info.texture_descriptors.size()); ++i) {
+                    const auto& descriptor = info.texture_descriptors[i];
+                    LOG_DEBUG(HW_GPU,
+                              "Native texture binding: stage={}, cbuf={}, offset={:#x}, count={}, "
+                              "shift={}, secondary={}, depth={}, multisample={}, integer={}",
+                              index, descriptor.cbuf_index, descriptor.cbuf_offset,
+                              descriptor.count, descriptor.shift_left, descriptor.has_secondary,
+                              descriptor.is_depth, descriptor.is_multisample,
+                              descriptor.is_integer);
+                }
+            }
             if ((index != 1 && index != 5) || info.uses_global_memory ||
                 !info.storage_buffers_descriptors.empty() ||
                 !info.texture_buffer_descriptors.empty() ||
@@ -974,15 +1000,33 @@ GraphicsPipeline* PipelineCache::NativeGraphicsPipeline(
         key.unique_hashes[1] != environments[0]->CalculateHash() ||
         key.unique_hashes[5] != environments[1]->CalculateHash())
         return nullptr;
-    if (const auto found = native_graphics_cache.find(key); found != native_graphics_cache.end())
+    // Translation discovers constant/texture dependencies beyond CFG branch
+    // reads. Freeze them before lookup, including on a pipeline-cache hit.
+    main_pools.ReleaseContents();
+    try {
+        for (auto* environment : environments) {
+            Shader::Maxwell::Flow::CFG cfg{*environment, main_pools.flow_block,
+                                           environment->StartAddress()};
+            (void)TranslateProgram(main_pools.inst, main_pools.block, *environment, cfg, host_info);
+            environment->FinalizeNativeResources();
+        }
+    } catch (const Shader::Exception& error) {
+        LOG_ERROR(Render_Vulkan, "Native graphics resource preparation rejected: {}", error.what());
+        return nullptr;
+    }
+    auto prepared_key = key;
+    prepared_key.unique_hashes[1] = environments[0]->CalculateHash();
+    prepared_key.unique_hashes[5] = environments[1]->CalculateHash();
+    if (const auto found = native_graphics_cache.find(prepared_key);
+        found != native_graphics_cache.end())
         return found->second->IsBound() ? found->second.get() : nullptr;
     main_pools.ReleaseContents();
     const std::array<Shader::Environment*, 2> envs{environments[0], environments[1]};
-    auto pipeline = CreateGraphicsPipeline(main_pools, key, envs, nullptr, false, true);
+    auto pipeline = CreateGraphicsPipeline(main_pools, prepared_key, envs, nullptr, false, true);
     if (!pipeline || !pipeline->IsBound())
         return nullptr;
     auto* result = pipeline.get();
-    native_graphics_cache.emplace(key, std::move(pipeline));
+    native_graphics_cache.emplace(prepared_key, std::move(pipeline));
     return result;
 }
 
