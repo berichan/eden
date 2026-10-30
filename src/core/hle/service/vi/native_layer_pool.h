@@ -15,6 +15,7 @@ namespace Service::VI {
 class NativeLayerPool {
 public:
     static constexpr size_t Capacity = 64;
+    static constexpr u64 TimestampCheckpointMask = 0x1f;
 
     Result Create(u64* out_id, u64 owner_process_id) {
         auto slot = std::ranges::find_if(m_layers, [](const auto& layer) { return !layer; });
@@ -38,6 +39,21 @@ public:
         const auto* layer = Find(id, owner_process_id);
         R_UNLESS(layer != nullptr, (Result{ErrorModule::VI, 7}));
         *out_state = layer->available_buffers;
+        R_SUCCEED();
+    }
+
+    Result SetTimestampCheckpoints(u64 id, u64 owner_process_id, u64 mask) {
+        R_UNLESS(mask <= TimestampCheckpointMask, (Result{ErrorModule::VI, 4}));
+        auto* layer = Find(id, owner_process_id);
+        R_UNLESS(layer != nullptr, (Result{ErrorModule::VI, 7}));
+        layer->timestamp_checkpoints = static_cast<u32>(mask);
+        R_SUCCEED();
+    }
+
+    Result QueryTimestampCheckpoints(u32* out_mask, u64 id, u64 owner_process_id) {
+        const auto* layer = Find(id, owner_process_id);
+        R_UNLESS(layer != nullptr, (Result{ErrorModule::VI, 7}));
+        *out_mask = layer->timestamp_checkpoints;
         R_SUCCEED();
     }
 
@@ -92,6 +108,7 @@ private:
         u32 available_buffers{std::numeric_limits<u32>::max()};
         std::optional<u64> display_id{};
         bool selected{};
+        u32 timestamp_checkpoints{};
     };
 
     Layer* Find(u64 id, u64 owner_process_id) {

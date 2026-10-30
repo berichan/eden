@@ -106,6 +106,12 @@ Result Container::QueryNativeLayerBufferState(u64* out_state, u64 layer_id, u64 
     R_RETURN(m_native_layers.QueryBufferState(out_state, layer_id, owner_process_id));
 }
 
+Result Container::SetNativeLayerTimestampCheckpoints(u64 layer_id, u64 owner_process_id, u64 mask) {
+    std::scoped_lock lk{m_lock};
+    R_UNLESS(!m_is_shut_down, VI::ResultOperationFailed);
+    R_RETURN(m_native_layers.SetTimestampCheckpoints(layer_id, owner_process_id, mask));
+}
+
 Result Container::BindNativeLayer(u64 layer_id, u64 owner_process_id, u64 display_id) {
     std::scoped_lock lk{m_lock};
     R_UNLESS(m_displays.GetDisplayById(display_id) != nullptr, VI::ResultNotFound);

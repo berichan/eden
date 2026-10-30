@@ -57,6 +57,7 @@ public:
     Result CreateNativeLayer(u64* out_layer_id, u64 owner_process_id);
     Result DestroyNativeLayer(u64 layer_id, u64 owner_process_id);
     Result QueryNativeLayerBufferState(u64* out_state, u64 layer_id, u64 owner_process_id);
+    Result SetNativeLayerTimestampCheckpoints(u64 layer_id, u64 owner_process_id, u64 mask);
     Result BindNativeLayer(u64 layer_id, u64 owner_process_id, u64 display_id);
     Result UnbindNativeLayer(u64 layer_id, u64 owner_process_id);
     Result SelectNativeLayer(u64 layer_id, u64 owner_process_id, u64 display_id,

@@ -11,10 +11,13 @@
 #include "core/hle/kernel/svc_results.h"
 #include "core/hle/service/gsv/display_session.h"
 #include "core/hle/service/gsv/native_image_pool.h"
+#include "core/hle/service/gsv/native_present_packet.h"
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/sm/sm.h"
 #include "core/hle/service/vi/container.h"
 #include "core/hle/service/vi/manager_root_service.h"
+#include "core/hle/service/vi/native_layer_pool.h"
+#include "core/hle/service/vi/vi_results.h"
 
 namespace Service::GSV {
 namespace {
@@ -31,6 +34,14 @@ bool HasInputWords(HLERequestContext& ctx, u32 words) {
     std::memcpy(&header, ctx.CommandBuffer(), sizeof(header));
     return ctx.IsTipc() && words <= IPC::COMMAND_BUFFER_LENGTH && header.data_size == words &&
            ctx.GetDataPayloadOffset() <= IPC::COMMAND_BUFFER_LENGTH - words;
+}
+
+bool HasPlainInputWords(HLERequestContext& ctx, u32 words) {
+    if (!HasInputWords(ctx, words))
+        return false;
+    IPC::CommandHeader header{};
+    std::memcpy(&header, ctx.CommandBuffer(), sizeof(header));
+    return header.raw_low == static_cast<u32>(header.type.Value()) && header.raw_high == words;
 }
 
 void Reply(HLERequestContext& ctx, Result result) {
@@ -60,6 +71,7 @@ DisplaySession::DisplaySession(Core::System& system, Kernel::KProcess* process,
         {201, &DisplaySession::CreateLayer, "CreateLayer"},
         {202, &DisplaySession::DestroyLayer, "DestroyLayer"},
         {212, &DisplaySession::QueryLayerBufferState, "QueryLayerBufferState"},
+        {229, &DisplaySession::PresentLayer, "PresentLayer"},
         {251, &DisplaySession::BindLayer, "BindLayer"},
         {252, &DisplaySession::UnbindLayer, "UnbindLayer"},
         {261, &DisplaySession::LinkVsyncSemaphore, "LinkVsyncSemaphore"},
@@ -68,6 +80,7 @@ DisplaySession::DisplaySession(Core::System& system, Kernel::KProcess* process,
         {266, &DisplaySession::UnlinkHdrStatusSemaphore, "UnlinkHdrStatusSemaphore"},
         {267, &DisplaySession::LinkHdrPaperWhiteSemaphore, "LinkHdrPaperWhiteSemaphore"},
         {268, &DisplaySession::UnlinkHdrPaperWhiteSemaphore, "UnlinkHdrPaperWhiteSemaphore"},
+        {351, &DisplaySession::SetLayerTimestampCheckpoints, "SetLayerTimestampCheckpoints"},
     };
     RegisterHandlersTipc(functions);
 }
@@ -131,6 +144,65 @@ void DisplaySession::ConfigureTimestampRecorderPool(HLERequestContext& ctx) {
         R_SUCCEED();
     }();
     Reply(ctx, result);
+}
+
+void DisplaySession::SetLayerTimestampCheckpoints(HLERequestContext& ctx) {
+    const auto result = [&]() -> Result {
+        R_UNLESS(HasPlainInputWords(ctx, 4), Kernel::ResultInvalidSize);
+        IPC::RequestParser rp{ctx};
+        const auto token = rp.Pop<u64>();
+        const auto mask = rp.Pop<u64>();
+        R_UNLESS(token != 0 && mask <= VI::NativeLayerPool::TimestampCheckpointMask,
+                 ResultInvalidArgument);
+        const auto layer = std::ranges::find_if(
+            m_layers, [=](const auto& entry) { return entry && entry->token == token; });
+        R_UNLESS(layer != m_layers.end(), ResultNotFound);
+        R_UNLESS(m_container != nullptr, ResultInvalidState);
+        // The SDK sends this selection before Present. Recorder identity and
+        // timestamp completion belong to the subsequent presentation lifecycle.
+        R_TRY(m_container->SetNativeLayerTimestampCheckpoints((*layer)->layer_id,
+                                                              m_process->GetProcessId(), mask));
+        LOG_DEBUG(Service, "Native layer timestamp checkpoints configured: layer_id={}, mask={:#x}",
+                  (*layer)->layer_id, mask);
+        R_SUCCEED();
+    }();
+    Reply(ctx, result);
+}
+
+void DisplaySession::PresentLayer(HLERequestContext& ctx) {
+    const auto result = [&]() -> Result {
+        R_UNLESS(HasPlainInputWords(ctx, 24), Kernel::ResultInvalidSize);
+        const auto payload =
+            std::span{reinterpret_cast<const u8*>(ctx.CommandBuffer() + ctx.GetDataPayloadOffset()),
+                      size_t{96}};
+        const auto packet = DecodeNativePresentPacket(payload);
+        R_UNLESS(packet && packet->layer_token, ResultInvalidArgument);
+        const auto layer = std::ranges::find_if(m_layers, [&](const auto& entry) {
+            return entry && entry->token == packet->layer_token;
+        });
+        R_UNLESS(layer != m_layers.end(), ResultNotFound);
+        const auto& state = packet->state;
+        LOG_DEBUG(Service,
+                  "Native present request: layer_id={}, slot={}, image={:#x}, "
+                  "crop={}/{}/{}/{}, flags={:#x}, ticks={:#x}, interval={:#x}, "
+                  "hdr_flags={:#x}, luminance={}/{}/{}/{}, recorder={:#x}, user_data={:#x}, "
+                  "counter={:#x}, mode={}, target={:#x}, empty_sync={}",
+                  (*layer)->layer_id, packet->slot, packet->image, state.crop[0], state.crop[1],
+                  state.crop[2], state.crop[3], state.flags, state.submitted_ticks,
+                  state.swap_interval, state.hdr_flags, state.hdr_luminance[0],
+                  state.hdr_luminance[1], state.hdr_luminance[2], state.hdr_luminance[3],
+                  state.recorder_flags, state.user_data, packet->render_sync.counter,
+                  packet->render_sync.mode, packet->render_sync.target,
+                  packet->render_sync.IsEmpty());
+        // Decoding is not presentation. Until owned backing, rendering fences
+        // and compositor source lifetimes are connected, do not queue work or
+        // claim a reusable slot/image through a success reply.
+        R_RETURN(VI::ResultNotSupported);
+    }();
+    IPC::ResponseBuilder rb{ctx, 8};
+    rb.Push(result);
+    rb.Push<u64>(0);
+    rb.PushRaw(std::array<u32, 4>{});
 }
 
 void DisplaySession::InitializeEventQueue(HLERequestContext& ctx) {

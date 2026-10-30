@@ -34,6 +34,8 @@ private:
     void GetMaxSemaphoreId(HLERequestContext& ctx);
     void GetMaxTimestampRecorderId(HLERequestContext& ctx);
     void ConfigureTimestampRecorderPool(HLERequestContext& ctx);
+    void SetLayerTimestampCheckpoints(HLERequestContext& ctx);
+    void PresentLayer(HLERequestContext& ctx);
     void InitializeEventQueue(HLERequestContext& ctx);
     void NotifyEvent(HLERequestContext& ctx);
     void ReadEventQueue(HLERequestContext& ctx);

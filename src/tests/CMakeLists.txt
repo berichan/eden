@@ -31,6 +31,7 @@ add_executable(tests
     core/hle/native_syncpoint_wait.cpp
     core/hle/gpu_memory_attribute.cpp
     core/hle/native_image_layout.cpp
+    core/hle/native_present_packet.cpp
     core/internal_network/network.cpp
     core/loader/deconstructed_rom_directory.cpp
     video_core/memory_tracker.cpp

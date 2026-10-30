@@ -1087,3 +1087,146 @@ TEST_CASE("Native timestamp recorder setup validates bounds and preserves initia
     REQUIRE(RequestWords(caller, service, 51, full_count).first.IsSuccess());
     REQUIRE(RequestWords(caller, service, 51, full_count).first == Result{ErrorModule::VI, 5});
 }
+
+TEST_CASE("Native timestamp checkpoint masks are retained per owned layer", "[core][ipc][gsv]") {
+    Service::VI::NativeLayerPool pool;
+    u64 first{}, second{}, other_owner{};
+    REQUIRE(pool.Create(&first, 4).IsSuccess());
+    REQUIRE(pool.Create(&second, 4).IsSuccess());
+    REQUIRE(pool.Create(&other_owner, 5).IsSuccess());
+    u32 mask{0xfeed};
+    REQUIRE(pool.QueryTimestampCheckpoints(&mask, first, 4).IsSuccess());
+    REQUIRE(mask == 0);
+    REQUIRE(pool.SetTimestampCheckpoints(other_owner, 5, 0x1f).IsSuccess());
+    for (u64 selected = 0; selected <= Service::VI::NativeLayerPool::TimestampCheckpointMask;
+         ++selected) {
+        REQUIRE(pool.SetTimestampCheckpoints(first, 4, selected).IsSuccess());
+        REQUIRE(pool.QueryTimestampCheckpoints(&mask, first, 4).IsSuccess());
+        REQUIRE(mask == selected);
+        REQUIRE(pool.QueryTimestampCheckpoints(&mask, second, 4).IsSuccess());
+        REQUIRE(mask == 0);
+        REQUIRE(pool.QueryTimestampCheckpoints(&mask, other_owner, 5).IsSuccess());
+        REQUIRE(mask == 0x1f);
+    }
+    REQUIRE(pool.SetTimestampCheckpoints(first, 4, 5).IsSuccess());
+    for (u64 invalid :
+         {0x20ULL, 0x80000000ULL, 0x100000000ULL, 0x100000005ULL, 0xffffffffffffffffULL}) {
+        REQUIRE(pool.SetTimestampCheckpoints(first, 4, invalid) == Result{ErrorModule::VI, 4});
+        REQUIRE(pool.QueryTimestampCheckpoints(&mask, first, 4).IsSuccess());
+        REQUIRE(mask == 5);
+    }
+    REQUIRE(pool.SetTimestampCheckpoints(first, 5, 7) == Result{ErrorModule::VI, 7});
+    REQUIRE(pool.SetTimestampCheckpoints(0, 4, 7) == Result{ErrorModule::VI, 7});
+    REQUIRE(pool.SetTimestampCheckpoints(0xffff, 4, 7) == Result{ErrorModule::VI, 7});
+    REQUIRE(pool.QueryTimestampCheckpoints(&mask, first, 4).IsSuccess());
+    REQUIRE(mask == 5);
+    mask = 0xfeed;
+    REQUIRE(pool.QueryTimestampCheckpoints(&mask, first, 5) == Result{ErrorModule::VI, 7});
+    REQUIRE(mask == 0xfeed);
+
+    REQUIRE(pool.Bind(first, 4, 0).IsSuccess());
+    REQUIRE(pool.Select(first, 4, 0).IsSuccess());
+    REQUIRE(pool.Unbind(first, 4).IsSuccess());
+    REQUIRE(pool.QueryTimestampCheckpoints(&mask, first, 4).IsSuccess());
+    REQUIRE(mask == 5);
+    REQUIRE(pool.Destroy(first, 4).IsSuccess());
+    mask = 0xfeed;
+    REQUIRE(pool.QueryTimestampCheckpoints(&mask, first, 4) == Result{ErrorModule::VI, 7});
+    REQUIRE(mask == 0xfeed);
+    REQUIRE(pool.SetTimestampCheckpoints(first, 4, 1) == Result{ErrorModule::VI, 7});
+    u64 replacement{};
+    REQUIRE(pool.Create(&replacement, 4).IsSuccess());
+    REQUIRE(replacement != first);
+    REQUIRE(pool.QueryTimestampCheckpoints(&mask, replacement, 4).IsSuccess());
+    REQUIRE(mask == 0);
+    REQUIRE(pool.SetTimestampCheckpoints(replacement, 4, 7).IsSuccess());
+    pool.Clear();
+    REQUIRE(pool.QueryTimestampCheckpoints(&mask, replacement, 4) == Result{ErrorModule::VI, 7});
+    REQUIRE(pool.Create(&replacement, 4).IsSuccess());
+    REQUIRE(pool.QueryTimestampCheckpoints(&mask, replacement, 4).IsSuccess());
+    REQUIRE(mask == 0);
+}
+
+TEST_CASE("Native display checkpoint configuration requires two u64 inputs and a five-bit mask",
+          "[core][ipc][gsv]") {
+    Caller caller;
+    Service::GSV::DisplaySession service{caller.system, &caller.process};
+    const std::array<u32, 5> packet{0x11223344, 0x55667788, 5, 0, 0};
+    for (size_t size = 0; size < packet.size() + 1; ++size) {
+        if (size == 4)
+            continue;
+        REQUIRE(RequestWords(caller, service, 351, std::span{packet}.first(size)).first ==
+                Kernel::ResultInvalidSize);
+    }
+    for (const auto& invalid :
+         std::array<std::array<u32, 4>, 5>{{{{0, 0, 5, 0}},
+                                            {{1, 0, 0x20, 0}},
+                                            {{1, 0, 0x80000000, 0}},
+                                            {{1, 0, 5, 1}},
+                                            {{1, 0, 0xffffffff, 0xffffffff}}}}) {
+        REQUIRE(RequestWords(caller, service, 351, invalid).first == Result{ErrorModule::VI, 4});
+    }
+    for (u32 mask = 0; mask < 32; ++mask) {
+        const std::array<u32, 4> unknown_layer{0x11223344, 0x55667788, mask, 0};
+        // RequestWords checks the result-only reply and absence of handles.
+        REQUIRE(RequestWords(caller, service, 351, unknown_layer).first ==
+                Result{ErrorModule::VI, 7});
+    }
+    const std::array<u32, 4> high_token{0, 1, 5, 0};
+    REQUIRE(RequestWords(caller, service, 351, high_token).first == Result{ErrorModule::VI, 7});
+}
+
+TEST_CASE("Native present decoding rejects malformed or unowned requests without queueing",
+          "[core][ipc][gsv]") {
+    Caller caller;
+    Service::GSV::DisplaySession service{caller.system, &caller.process};
+    std::array<u32, 25> packet{};
+    packet[0] = 1;
+    for (size_t size : {0U, 23U, 25U})
+        REQUIRE(RequestWords(caller, service, 229, std::span{packet}.first(size), 7).first ==
+                Kernel::ResultInvalidSize);
+    REQUIRE(RequestWords(caller, service, 229, std::span{packet}.first(24), 7).first ==
+            Result{ErrorModule::VI, 7});
+    packet[0] = 0;
+    REQUIRE(RequestWords(caller, service, 229, std::span{packet}.first(24), 7).first ==
+            Result{ErrorModule::VI, 4});
+}
+
+TEST_CASE("Native checkpoint and present packets reject descriptors and reserved header bits",
+          "[core][ipc][gsv]") {
+    Caller caller;
+    Service::GSV::DisplaySession service{caller.system, &caller.process};
+    for (u32 command : {229U, 351U}) {
+        for (const auto [low, high] : std::array<std::pair<u32, u32>, 8>{{{1U << 16, 0},
+                                                                          {1U << 20, 0},
+                                                                          {1U << 24, 0},
+                                                                          {1U << 28, 0},
+                                                                          {0, 1U << 10},
+                                                                          {0, 2U << 10},
+                                                                          {0, 1U << 31},
+                                                                          {0, 1U << 14}}}) {
+            std::array<u32_le, IPC::COMMAND_BUFFER_LENGTH> data{};
+            IPC::CommandHeader header{};
+            header.type.Assign(static_cast<IPC::CommandType>(16 + command));
+            header.data_size.Assign(command == 229 ? 24 : 4);
+            header.raw_low = static_cast<u32>(header.raw_low) | low;
+            header.raw_high = static_cast<u32>(header.raw_high) | high;
+            size_t offset{};
+            Put(data, offset, header);
+            Service::HLERequestContext ctx{caller.system.Kernel(), caller.process.GetMemory(),
+                                           nullptr, &caller.thread};
+            REQUIRE(ctx.PopulateFromIncomingCommandBuffer(data.data()).IsSuccess());
+            // Fill the payload at its parsed offset so descriptor-bearing
+            // requests would otherwise reach owned-layer validation.
+            const auto payload = ctx.GetDataPayloadOffset();
+            ctx.CommandBuffer()[payload] = 0x11223344;
+            ctx.CommandBuffer()[payload + 1] = 0;
+            ctx.CommandBuffer()[payload + 2] = 5;
+            service.InvokeRequestTipc(ctx);
+            IPC::CommandHeader output{};
+            std::memcpy(&output, ctx.CommandBuffer(), sizeof(output));
+            REQUIRE(output.data_size == (command == 229 ? 7U : 1U));
+            REQUIRE(ctx.CommandBuffer()[2] == Kernel::ResultInvalidSize.raw);
+        }
+    }
+}

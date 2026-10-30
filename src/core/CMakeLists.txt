@@ -710,6 +710,7 @@ add_library(core STATIC
     hle/service/gsv/native_image_layout.h
     hle/service/gsv/native_image_pool.cpp
     hle/service/gsv/native_image_pool.h
+    hle/service/gsv/native_present_packet.h
     hle/service/gsv/native_memory_descriptions.h
     hle/service/gsv/syncpt_session.cpp
     hle/service/gsv/syncpt_session.h
