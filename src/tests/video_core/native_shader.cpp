@@ -1390,6 +1390,45 @@ TEST_CASE("Native call and return preserve values through the actual shader fron
     REQUIRE(stores == 1);
 }
 
+TEST_CASE("Native returns read R0 or R55 links without writing them", "[native-shader]") {
+    const u32 link = GENERATE(0U, 55U);
+    const std::array<Native, 6> input{{
+        {{0x00007802U | (link << 16), 0x20, 0xf00, 0}},
+        {{0x00007944, 0x10, 0x03c00000, 0}},
+        VertexTransform.back(),
+        {{0x00087202, link, 0xf00, 0}},
+        {{0x00097802, 0, 0xf00, 0}},
+        {{0x08007950, 0xffffffa0, 0x03c3ffff, 0}},
+    }};
+    const auto lowered = Shader::Ampere::LowerToMaxwell(input);
+    REQUIRE(lowered);
+    REQUIRE(lowered.source_size == sizeof(input));
+    REQUIRE(Shader::Maxwell::Decode(lowered.instructions.back()) == Shader::Maxwell::Opcode::RET);
+
+    auto clobber = input;
+    clobber[3] = Native{{0x00007802U | (link << 16), 0, 0xf00, 0}};
+    const auto rejected = Shader::Ampere::LowerToMaxwell(clobber);
+    REQUIRE_FALSE(rejected);
+    REQUIRE(rejected.error == "native callee overwrites link register");
+    REQUIRE(rejected.error_offset == 3 * sizeof(Native));
+    REQUIRE(rejected.instructions.empty());
+
+    for (const auto [word, mask] : std::array<std::pair<u32, u32>, 4>{
+             {{0, 1U << 12}, {0, 1U << 24}, {1, 16U}, {2, 1U << 24}}}) {
+        auto malformed = input;
+        malformed.back().words[word] ^= mask;
+        const auto invalid = Shader::Ampere::LowerToMaxwell(malformed);
+        REQUIRE_FALSE(invalid);
+        REQUIRE(invalid.instructions.empty());
+    }
+    auto wrong_copy = input;
+    wrong_copy[3].words[1] = link + 1;
+    REQUIRE_FALSE(Shader::Ampere::LowerToMaxwell(wrong_copy));
+    auto nonzero_high = input;
+    nonzero_high[4].words[1] = 1;
+    REQUIRE_FALSE(Shader::Ampere::LowerToMaxwell(nonzero_high));
+}
+
 TEST_CASE("Native scaled multiplication preserves captured power-of-two scales",
           "[native-shader]") {
     std::array<Native, 4> input{{
@@ -3501,6 +3540,61 @@ TEST_CASE("Native uniform signed right shift sign extends the high word", "[nati
         machine.Execute(block);
         REQUIRE(machine.regs[221] == ((value & 0x80000000U) ? 0xffffffffU : 0U));
     }
+}
+
+TEST_CASE("Native low-result right shifts use the zero high word for both integer types",
+          "[native-shader]") {
+    const u32 type = GENERATE(2U, 3U);
+    const u32 shift = GENERATE(0U, 1U, 8U, 31U, 32U);
+    const std::array<Native, 2> input{{
+        {{0x08007819, shift, 0x000010ffU | (type << 9), 0x000fc800}},
+        VertexTransform.back(),
+    }};
+    const auto lowered = Shader::Ampere::LowerToMaxwell(input);
+    REQUIRE(lowered);
+    REQUIRE(Shader::Maxwell::Decode(lowered.instructions.front()) ==
+            Shader::Maxwell::Opcode::SHR_imm);
+    Shader::ObjectPool<IR::Inst> pool;
+    IR::Block block{pool};
+    TranslateScalarNative(input, block);
+    for (u32 value : {0U, 1U, 0x7fffffffU, 0x80000000U, 0xffffffffU, 0x89abcdefU}) {
+        ScalarNativeMachine machine;
+        machine.regs[8] = value;
+        machine.regs[0] = 0xdeadbeef;
+        machine.predicates.fill(true);
+        const auto predicates = machine.predicates;
+        machine.Execute(block);
+        REQUIRE(machine.regs[0] == (shift < 32 ? value >> shift : 0U));
+        REQUIRE(machine.regs[8] == value);
+        REQUIRE(machine.predicates == predicates);
+    }
+    for (u32 predicate : {1U, 9U}) {
+        auto predicated = input;
+        predicated[0].words[0] = (predicated[0].words[0] & ~0xf000U) | (predicate << 12);
+        const auto guarded = Shader::Ampere::LowerToMaxwell(predicated);
+        REQUIRE(guarded);
+        const auto guard = Shader::Maxwell::Instruction{guarded.instructions.front()}.Pred();
+        REQUIRE(guard.index == 1);
+        REQUIRE(guard.negated == ((predicate & 8) != 0));
+    }
+}
+
+TEST_CASE("Native low-result right shifts reject unsupported funnel modes", "[native-shader]") {
+    const std::array<Native, 2> input{{
+        {{0x08007819, 8, 0x000016ff, 0x000fc800}},
+        VertexTransform.back(),
+    }};
+    for (u32 word2 :
+         {0x00001608U, 0x000012ffU, 0x000010ffU, 0x00001effU, 0x000216ffU, 0x000036ffU}) {
+        auto invalid = input;
+        invalid[0].words[2] = word2;
+        const auto rejected = Shader::Ampere::LowerToMaxwell(invalid);
+        REQUIRE_FALSE(rejected);
+        REQUIRE(rejected.instructions.empty());
+    }
+    auto excessive = input;
+    excessive[0].words[1] = 33;
+    REQUIRE_FALSE(Shader::Ampere::LowerToMaxwell(excessive));
 }
 
 TEST_CASE("Native indexed constant load adds a signed byte displacement", "[native-shader]") {

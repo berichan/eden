@@ -153,7 +153,8 @@ LoweredProgram LowerToMaxwell(std::span<const Instruction> code) {
                     active_link = call_links[call];
                 }
             }
-            if (active_link && insn.Bits(16, 8) == *active_link)
+            // RET has no destination GPR; its reserved zero field is not a write to R0.
+            if (active_link && opcode != 0x950 && insn.Bits(16, 8) == *active_link)
                 return fail(index, "native callee overwrites link register");
         }
         // Scratch values and emulated uniform state occupy reserved high GPRs.
@@ -1604,6 +1605,14 @@ LoweredProgram LowerToMaxwell(std::span<const Instruction> code) {
             if (!insn.Bits(80, 1) && !insn.Bits(76, 1) && insn.Bits(64, 8) == 255 &&
                 insn.Bits(73, 2) == 3 && !insn.Bits(75, 1) && insn.words[1] <= 32) {
                 emit(base(0x3848000000000000ULL) | (u64{insn.Bits(24, 8)} << 8) |
+                     (u64{insn.words[1]} << 20));
+                break;
+            }
+            if ((insn.words[2] == 0x000014ff || insn.words[2] == 0x000016ff) &&
+                insn.words[1] <= 32) {
+                // SHF.R's low result shifts the full high:low pair. With a zero
+                // high word even S32 is logical: the concatenated sign bit is zero.
+                emit(base(0x3828000000000000ULL) | (u64{insn.Bits(24, 8)} << 8) |
                      (u64{insn.words[1]} << 20));
                 break;
             }
