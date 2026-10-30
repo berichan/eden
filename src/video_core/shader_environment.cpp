@@ -613,6 +613,10 @@ Shader::TexturePixelFormat GraphicsEnvironment::ReadTexturePixelFormat(u32 handl
         if (texture.IsB10G11R11Float2D())
             return static_cast<Shader::TexturePixelFormat>(
                 VideoCore::Surface::PixelFormat::B10G11R11_FLOAT);
+        if (texture.IsAstc4x4Unorm2D())
+            return static_cast<Shader::TexturePixelFormat>(
+                texture.srgb ? VideoCore::Surface::PixelFormat::ASTC_2D_4X4_SRGB
+                             : VideoCore::Surface::PixelFormat::ASTC_2D_4X4_UNORM);
         return static_cast<Shader::TexturePixelFormat>(
             texture.srgb ? VideoCore::Surface::PixelFormat::A8B8G8R8_SRGB
                          : VideoCore::Surface::PixelFormat::A8B8G8R8_UNORM);
@@ -662,7 +666,9 @@ const GraphicsEnvironment::NativeTextureBinding& GraphicsEnvironment::CaptureNat
     const auto sampler_words = capture(NativeDescriptorPool::Sampler, 0x557, handle >> 20);
     const auto texture = NativeTextureDescriptor::Decode(texture_words);
     const auto sampler = NativeSamplerDescriptor::Decode(sampler_words);
-    if (!texture || !sampler || !(texture->IsRgba8Unorm2D() || texture->IsB10G11R11Float2D())) {
+    if (!texture || !sampler ||
+        !(texture->IsRgba8Unorm2D() || texture->IsB10G11R11Float2D() ||
+          texture->IsAstc4x4Unorm2D())) {
         LOG_DEBUG(HW_GPU,
                   "Native texture metadata rejected: handle={:#x}, "
                   "tic={:#x}/{:#x}/{:#x}/{:#x}/{:#x}/{:#x}/{:#x}/{:#x}, "

@@ -47,6 +47,8 @@
 #include "video_core/shader_cache.h"
 #include "video_core/shader_environment.h"
 #include "video_core/texture_cache/texture_cache_base.h"
+#include "video_core/textures/astc.h"
+#include "video_core/textures/decoders.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
@@ -880,8 +882,8 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
     // Reject effects that have no native resource/state adapter yet.
     bool unsupported_state{};
     for (u32 method :
-         {0x1d0U, 0x1d1U, 0x370U, 0x371U, 0x372U, 0x374U, 0x3d0U, 0x3e9U, 0x452U, 0x47eU, 0x4b3U,
-          0x4bbU, 0x4d5U, 0x4e0U, 0x54dU, 0x54eU, 0x54fU, 0x59bU, 0x653U, 0x65fU, 0x66fU, 0x671U}) {
+         {0x1d0U, 0x1d1U, 0x370U, 0x371U, 0x372U, 0x374U, 0x3d0U, 0x3e9U, 0x452U, 0x47eU, 0x4bbU,
+          0x4d5U, 0x4e0U, 0x54dU, 0x54eU, 0x54fU, 0x59bU, 0x653U, 0x65fU, 0x66fU, 0x671U}) {
         if (read(method)) {
             LOG_ERROR(HW_GPU, "Unsupported native draw state: method={:#x}, value={:#x}", method,
                       read(method));
@@ -890,6 +892,10 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
     }
     if (unsupported_state)
         return false;
+    // ZT_SELECT is zero above: there is no depth attachment, so the stored
+    // depth-test request cannot enable testing on this color-only framebuffer.
+    if (read(0x4b3) > 1)
+        return reject("invalid native depth-test enable");
     if (read(0x545) > 1 || (read(0x545) && !Settings::IsGPULevelHigh()))
         return reject("native pixel counting requires precise GPU queries");
     // ZCULL_STATS enables internal counters without changing rasterization.
@@ -1019,7 +1025,7 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
     // the first few completed draws and report only their hashes.
     std::vector<u8> readback;
     std::optional<u64> before_hash;
-    if (native_draw_readbacks < 12 && target->size_bytes <= SnapshotLimit) {
+    if (native_draw_readbacks < 32 && target->size_bytes <= SnapshotLimit) {
         readback.resize(target->size_bytes);
         if (!lease.ReadBlockChecked(target->address, readback))
             return reject("native target initial snapshot");
@@ -1207,6 +1213,7 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
         VideoCommon::ImageInfo info;
         VkFormat host_format;
         VkSampler sampler;
+        std::vector<u8> uploaded_pixels;
     };
     std::vector<SampledRequest> sampled_requests;
     for (u32 stage = 0; stage < 5; ++stage) {
@@ -1267,12 +1274,30 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
             if (sampler.mag_filter == 2 || sampler.min_filter == 2)
                 features |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
             const bool packed_float = binding->texture.IsB10G11R11Float2D();
+            const bool astc = binding->texture.IsAstc4x4Unorm2D();
             const VkFormat sampled_format =
                 packed_float ? VK_FORMAT_B10G11R11_UFLOAT_PACK32 : VK_FORMAT_A8B8G8R8_SRGB_PACK32;
+            if (astc) {
+                const auto host_surface =
+                    MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, false,
+                                               VideoCore::Surface::PixelFormat::A8B8G8R8_SRGB);
+                const auto host_view =
+                    MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, true,
+                                               VideoCore::Surface::PixelFormat::A8B8G8R8_SRGB);
+                if (!host_surface.attachable || host_surface.format != sampled_format ||
+                    host_view.format != sampled_format)
+                    return reject("native decoded ASTC host format unavailable");
+                features |= VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
+                            VK_FORMAT_FEATURE_TRANSFER_DST_BIT |
+                            VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+                if (host_surface.storage)
+                    features |= VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
+            }
             if (!device.IsFormatSupported(sampled_format, features, FormatType::Optimal))
                 return reject("native sampled-image filtering unavailable on host");
             VideoCommon::ImageInfo sampled;
             sampled.format = packed_float ? VideoCore::Surface::PixelFormat::B10G11R11_FLOAT
+                             : astc       ? VideoCore::Surface::PixelFormat::ASTC_2D_4X4_SRGB
                                           : VideoCore::Surface::PixelFormat::A8B8G8R8_SRGB;
             sampled.type = VideoCommon::ImageType::e2D;
             sampled.size = {mip->width, mip->height, 1};
@@ -1281,6 +1306,35 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
             sampled.layout = Tegra::Texture::BlockLinearLayout::TuringColor2D;
             if (VideoCommon::CalculateGuestSizeInBytes(sampled) != size)
                 return reject("native sampled-image footprint mismatch");
+            std::vector<u8> uploaded_pixels;
+            if (astc) {
+                // Native C797 color blocklinear images use Turing's sector
+                // order. Require the complete generic mapping,
+                // not just an opaque descriptor preset or the first page kind.
+                if (gpu_memory->GetPageKind(mip->address) != Tegra::PTEKind::GENERIC_16BX2 ||
+                    gpu_memory->GetMemoryLayoutSize(mip->address, size) < size)
+                    return reject("unsupported native ASTC memory kind");
+                std::vector<u8> tiled;
+                if (!snapshot(mip->address, size, tiled))
+                    return reject("native ASTC backing or coherence");
+                const u64 columns = (u64{mip->width} + 3) / 4;
+                const u64 rows = (u64{mip->height} + 3) / 4;
+                const u64 linear_size = columns * rows * 16;
+                const u64 decoded_size = u64{mip->width} * mip->height * 4;
+                if (linear_size > SnapshotLimit - snapshot_bytes ||
+                    decoded_size > SnapshotLimit - snapshot_bytes - linear_size)
+                    return reject("native ASTC decode exceeds snapshot capacity");
+                snapshot_bytes += linear_size + decoded_size;
+                std::vector<u8> linear(static_cast<size_t>(linear_size));
+                Tegra::Texture::UnswizzleTexture(linear, tiled, 16, static_cast<u32>(columns),
+                                                 static_cast<u32>(rows), 1, mip->block_height, 0, 1,
+                                                 Tegra::Texture::BlockLinearLayout::TuringColor2D);
+                uploaded_pixels.resize(static_cast<size_t>(decoded_size));
+                Tegra::Texture::ASTC::Decompress(linear, mip->width, mip->height, 1, 4, 4,
+                                                 uploaded_pixels);
+                if (stop_token.stop_requested())
+                    return false;
+            }
             // This standalone image represents the selected guest mip, so its
             // host LOD is zero even when the guest's fixed clamp selects LOD > 0.
             native_samplers.push_back(device.GetLogical().CreateSampler(VkSamplerCreateInfo{
@@ -1305,7 +1359,7 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
                 .unnormalizedCoordinates = VK_FALSE,
             }));
             sampled_requests.push_back({stage, i, mip->address, *backing, sampled, sampled_format,
-                                        *native_samplers.back()});
+                                        *native_samplers.back(), std::move(uploaded_pixels)});
             LOG_DEBUG(HW_GPU,
                       "Native sampled mip: level={}, address={:#x}, extent={}x{}, block_height={}",
                       mip->level, mip->address, mip->width, mip->height, mip->block_height);
@@ -1331,6 +1385,61 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
         for (const auto& sampled : sampled_requests) {
             if (stop_token.stop_requested())
                 return false;
+            if (!sampled.uploaded_pixels.empty()) {
+                // Keep the decoded asset private to this draw. It must not be
+                // registered as an overlapping RGBA interpretation of guest ASTC.
+                if (buffer_cache.IsRegionGpuModified(
+                        sampled.backing, VideoCommon::CalculateGuestSizeInBytes(sampled.info)) ||
+                    texture_cache.IsRegionGpuModified(
+                        sampled.backing, VideoCommon::CalculateGuestSizeInBytes(sampled.info)))
+                    return false;
+                auto host_info = sampled.info;
+                host_info.format = VideoCore::Surface::PixelFormat::A8B8G8R8_SRGB;
+                const u64 host_size = VideoCommon::CalculateGuestSizeInBytes(host_info);
+                if (host_size > SnapshotLimit - native_sample_copy_bytes)
+                    return false;
+                native_sample_copy_bytes += host_size;
+                host_info.layer_stride = host_info.maybe_unaligned_layer_stride =
+                    static_cast<u32>(host_size);
+                native_sample_images.push_back(
+                    std::make_unique<Image>(texture_cache_runtime, host_info, 0, 0));
+                auto& uploaded = *native_sample_images.back();
+                const auto staging =
+                    staging_pool.Request(sampled.uploaded_pixels.size(), MemoryUsage::Upload);
+                if (!staging.buffer || staging.mapped_span.size() < sampled.uploaded_pixels.size())
+                    return false;
+                std::memcpy(staging.mapped_span.data(), sampled.uploaded_pixels.data(),
+                            sampled.uploaded_pixels.size());
+                const VideoCommon::BufferImageCopy copy{
+                    .buffer_offset = 0,
+                    .buffer_size = sampled.uploaded_pixels.size(),
+                    .buffer_row_length = sampled.info.size.width,
+                    .buffer_image_height = sampled.info.size.height,
+                    .image_subresource = {},
+                    .image_offset = {},
+                    .image_extent = sampled.info.size,
+                };
+                uploaded.UploadMemory(staging, std::span{&copy, 1});
+                native_sample_views.push_back(
+                    device.GetLogical().CreateImageView(VkImageViewCreateInfo{
+                        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                        .pNext = nullptr,
+                        .flags = 0,
+                        .image = uploaded.Handle(),
+                        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+                        .format = sampled.host_format,
+                        .components = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                                       VK_COMPONENT_SWIZZLE_IDENTITY,
+                                       VK_COMPONENT_SWIZZLE_IDENTITY},
+                        .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+                    }));
+                sampled_images.push_back(
+                    {sampled.stage, sampled.index, *native_sample_views.back(), sampled.sampler});
+                LOG_DEBUG(HW_GPU, "Native ASTC upload: address={:#x}, extent={}x{}, bytes={}",
+                          sampled.address, sampled.info.size.width, sampled.info.size.height,
+                          sampled.uploaded_pixels.size());
+                continue;
+            }
             // The descriptor's opaque registration preset cannot identify a
             // layout. Only a previously established exact native image may be sampled.
             const auto source = texture_cache.PrepareNativeClearTarget(

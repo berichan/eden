@@ -15,6 +15,7 @@
 #include "video_core/memory_manager.h"
 #include "video_core/renderer_null/null_rasterizer.h"
 #include "video_core/texture_cache/util.h"
+#include "video_core/textures/astc.h"
 #include "video_core/textures/decoders.h"
 
 namespace {
@@ -39,6 +40,34 @@ u32 NativeOffset(u32 x, u32 y, u32 pitch_gobs, u32 block_height) {
            ((y & 3) << 4) + ((x & 16) << 2) + ((y & 4) << 5) + ((x & 32) << 3);
 }
 } // namespace
+
+TEST_CASE("Native ASTC color sectors decode clipped edge blocks", "[native-shader]") {
+    constexpr u32 width = 13, height = 9;
+    std::vector<u8> tiled(512);
+    for (u32 row = 0; row < 3; ++row) {
+        for (u32 column = 0; column < 4; ++column) {
+            const u8 red = static_cast<u8>(3 + 40 * column);
+            const u8 green = static_cast<u8>(5 + 65 * row);
+            // Standard ASTC LDR void-extent block with replicated 16-bit colors.
+            const std::array<u8, 16> block{0xfc, 0xfd, 0xff,  0xff,  0xff, 0xff, 0xff, 0xff,
+                                           red,  red,  green, green, 7,    7,    255,  255};
+            for (u32 byte = 0; byte < block.size(); ++byte)
+                tiled[NativeOffset(column * 16 + byte, row, 1, 0)] = block[byte];
+        }
+    }
+    std::vector<u8> linear(4 * 3 * 16), pixels(width * height * 4);
+    Tegra::Texture::UnswizzleTexture(linear, tiled, 16, 4, 3, 1, 0, 0, 1, Layout::TuringColor2D);
+    Tegra::Texture::ASTC::Decompress(linear, width, height, 1, 4, 4, pixels);
+    for (u32 y = 0; y < height; ++y) {
+        for (u32 x = 0; x < width; ++x) {
+            const auto pixel = (y * width + x) * 4;
+            REQUIRE(pixels[pixel] == 3 + 40 * (x / 4));
+            REQUIRE(pixels[pixel + 1] == 5 + 65 * (y / 4));
+            REQUIRE(pixels[pixel + 2] == 7);
+            REQUIRE(pixels[pixel + 3] == 255);
+        }
+    }
+}
 
 TEST_CASE("Native color clear decodes checked target and clipping state", "[ipc][video_core]") {
     auto regs = Registers();

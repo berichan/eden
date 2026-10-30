@@ -266,6 +266,19 @@ TEST_CASE("Native graphics capture separates source headers, code and constant s
         floating.FinalizeNativeResources();
         REQUIRE(floating.CalculateHash() != rgba_hash);
     }
+    texture[0] = 0x40;
+    for (u32 i = 0; i < 4; ++i)
+        texture[0] |= (2U << (7 + 3 * i)) | ((i + 2) << (19 + 3 * i));
+    texture[4] |= 1U << 22;
+    update_descriptors();
+    {
+        Environment astc{engine, memory, Program::Pixel,
+                         Environment::NativeProgram{header_address, {}}};
+        REQUIRE(astc.ReadTextureType(Handle) == Shader::TextureType::Color2D);
+        REQUIRE(static_cast<VideoCore::Surface::PixelFormat>(astc.ReadTexturePixelFormat(Handle)) ==
+                VideoCore::Surface::PixelFormat::ASTC_2D_4X4_SRGB);
+        REQUIRE_FALSE(astc.IsTexturePixelFormatInteger(Handle));
+    }
     memory.Unmap(base + Kernel::PageSize, Kernel::PageSize);
     REQUIRE(captured.ReadInstruction(80) != 0);
     REQUIRE_THROWS_AS(captured.ReadCbufValue(0, 0), Shader::RuntimeError);

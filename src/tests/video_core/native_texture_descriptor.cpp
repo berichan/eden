@@ -7,6 +7,50 @@
 
 using namespace Tegra::Control;
 
+TEST_CASE("Native ASTC base mip footprints use compressed block rows", "[native-shader]") {
+    NativeDescriptorWords image{};
+    image[0] = 0x40;
+    for (u32 i = 0; i < 4; ++i)
+        image[0] |= (2U << (7 + 3 * i)) | ((i + 2) << (19 + 3 * i));
+    image[2] = 3U << 21;
+    image[3] = 4U << 3;
+    image[4] = 639U | (1U << 22) | (1U << 23);
+    image[5] = 359U | (1U << 31);
+    const auto texture = NativeTextureDescriptor::Decode(image);
+    REQUIRE(texture);
+    REQUIRE(texture->IsAstc4x4Unorm2D());
+    REQUIRE_FALSE(texture->IsRgba8Unorm2D());
+    NativeDescriptorWords state{};
+    state[0] = 2U | (2U << 3) | (2U << 6) | (1U << 13);
+    state[1] = 2U | (2U << 4) | (3U << 6);
+    state[2] = 15U << 20;
+    const auto sampler = NativeSamplerDescriptor::Decode(state);
+    REQUIRE(sampler);
+    const auto mip = SelectNativeSampledMip(*texture, *sampler);
+    REQUIRE(mip);
+    REQUIRE(mip->size_bytes == 0x50000);
+    REQUIRE(mip->block_height == 4);
+    auto small = *texture;
+    small.width = 3;
+    small.height = 5;
+    const auto edge = SelectNativeSampledMip(small, *sampler);
+    REQUIRE(edge);
+    REQUIRE(edge->size_bytes == 512);
+    REQUIRE(edge->block_height == 0);
+    auto unsupported = *texture;
+    unsupported.max_mip = unsupported.view_max_mip = 1;
+    REQUIRE_FALSE(SelectNativeSampledMip(unsupported, *sampler));
+    unsupported = *texture;
+    unsupported.srgb = false;
+    REQUIRE_FALSE(SelectNativeSampledMip(unsupported, *sampler));
+    unsupported = *texture;
+    unsupported.swizzle[0] = 4;
+    REQUIRE_FALSE(SelectNativeSampledMip(unsupported, *sampler));
+    unsupported = *texture;
+    unsupported.address = (u64{1} << 40) - 512;
+    REQUIRE_FALSE(SelectNativeSampledMip(unsupported, *sampler));
+}
+
 TEST_CASE("Native packed float color sampling preserves format and missing alpha",
           "[native-shader]") {
     NativeDescriptorWords image{};

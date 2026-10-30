@@ -33,6 +33,7 @@ struct NativeTextureDescriptor {
     static std::optional<NativeTextureDescriptor> Decode(const NativeDescriptorWords& words);
     bool IsRgba8Unorm2D() const;
     bool IsB10G11R11Float2D() const;
+    bool IsAstc4x4Unorm2D() const;
 };
 
 struct NativeSamplerDescriptor {
@@ -53,8 +54,8 @@ struct NativeSampledMip {
     u32 width, height, block_height, level;
 };
 
-// Only for ordinary sampled-image operations and an independently verified native
-// color image. Computes a fixed integral LOD span, without validating its backing.
+// Only for ordinary sampled-image operations. Computes a fixed integral LOD span;
+// execution still requires independent backing, layout and coherence validation.
 std::optional<NativeSampledMip> SelectNativeSampledMip(const NativeTextureDescriptor& texture,
                                                        const NativeSamplerDescriptor& sampler);
 bool IsNativeFixedMipSample(const Shader::IR::Inst& instruction);
