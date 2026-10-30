@@ -1317,7 +1317,7 @@ void TextureCache<P>::InvalidateScale(Image& image) {
     image.image_view_ids.clear();
     image.image_view_infos.clear();
     for (size_t c : active_channel_ids) {
-        auto& channel_info = channel_storage[c];
+        auto& channel_info = *channel_storage[c];
 
         if constexpr (ENABLE_VALIDATION)
             for (auto& e : channel_info.image_view_ids)
@@ -2395,7 +2395,7 @@ void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
         image_allocs_table.erase(alloc_it);
     }
     for (size_t c : active_channel_ids) {
-        auto& channel_info = channel_storage[c];
+        auto& channel_info = *channel_storage[c];
         if constexpr (ENABLE_VALIDATION)
             for (auto& e : channel_info.image_view_ids)
                 e.second = CORRUPT_ID;
@@ -2408,7 +2408,7 @@ void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
 template <class P>
 void TextureCache<P>::RemoveImageViewReferences(std::span<const ImageViewId> removed_views) {
     for (size_t c : active_channel_ids) {
-        auto& channel_info = channel_storage[c];
+        auto& channel_info = *channel_storage[c];
         auto it = channel_info.image_views.begin();
         while (it != channel_info.image_views.end()) {
             const auto found = std::ranges::find(removed_views, it->second);
@@ -2691,7 +2691,7 @@ template <class P>
 void TextureCache<P>::CreateChannel(struct Tegra::Control::ChannelState& channel) {
     VideoCommon::ChannelSetupCaches<TextureCacheChannelInfo>::CreateChannel(channel);
     const auto it = channel_map.find(channel.bind_id);
-    auto* this_state = &channel_storage[it->second];
+    auto* this_state = &*channel_storage[it->second];
     const auto& this_as_ref = address_spaces[channel.memory_manager->GetID()];
     this_state->gpu_page_table = &gpu_page_table_storage[this_as_ref.storage_id * 2];
     this_state->sparse_page_table = &gpu_page_table_storage[this_as_ref.storage_id * 2 + 1];
@@ -2700,8 +2700,20 @@ void TextureCache<P>::CreateChannel(struct Tegra::Control::ChannelState& channel
 /// Bind a channel for execution.
 template <class P>
 void TextureCache<P>::OnGPUASRegister([[maybe_unused]] size_t map_id) {
-    gpu_page_table_storage.emplace_back();
-    gpu_page_table_storage.emplace_back();
+    const size_t storage_id = address_spaces.at(map_id).storage_id;
+    while (gpu_page_table_storage.size() <= storage_id * 2 + 1) {
+        gpu_page_table_storage.emplace_back();
+    }
+}
+
+template <class P>
+void TextureCache<P>::OnGPUASUnregister(size_t map_id) {
+    const size_t storage_id = address_spaces.at(map_id).storage_id;
+    for (const size_t index : {storage_id * 2, storage_id * 2 + 1}) {
+        if (index < gpu_page_table_storage.size()) {
+            gpu_page_table_storage[index].clear();
+        }
+    }
 }
 
 } // namespace VideoCommon

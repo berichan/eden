@@ -6,9 +6,12 @@
 #include <new>
 #include "common/logging.h"
 #include "common/swap.h"
+#include "core/core.h"
 #include "core/hle/service/nvdrv/core/native_gpu_channel.h"
 #include "core/hle/service/nvdrv/core/native_gpu_error_notifier.h"
+#include "core/hle/service/nvdrv/core/native_gpu_submission.h"
 #include "core/hle/service/nvdrv/devices/nvhost_native_gpu.h"
+#include "video_core/gpu.h"
 
 namespace Service::Nvidia::Devices {
 
@@ -17,7 +20,11 @@ nvhost_native_gpu::nvhost_native_gpu(Core::System& system_, NvCore::NativeGpuCha
 
 nvhost_native_gpu::~nvhost_native_gpu() {
     if (open_fd) {
+        const auto channel = channels.Get(*open_fd, owner);
         channels.Close(*open_fd, owner);
+        if (channel && system.IsPoweredOn()) {
+            system.GPU().RetireNativeGPUChannel(channel);
+        }
     }
 }
 
@@ -188,7 +195,61 @@ NvResult nvhost_native_gpu::Ioctl1(DeviceFD fd, Ioctl command, std::span<const u
 NvResult nvhost_native_gpu::Ioctl2(DeviceFD fd, Ioctl command, std::span<const u8> input,
                                    std::span<const u8> inline_input, std::span<u8> output) {
     std::scoped_lock lock{mutex};
-    return open_fd && *open_fd == fd ? NvResult::NotSupported : NvResult::InvalidState;
+    if (!open_fd || *open_fd != fd) {
+        return NvResult::InvalidState;
+    }
+    if (command.group != 'H' || command.cmd != 0x1b) {
+        return NvResult::NotSupported;
+    }
+    constexpr size_t RequestSize = 24;
+    if (!command.is_in || !command.is_out) {
+        return NvResult::BadParameter;
+    }
+    if (command.length != RequestSize || input.size() < RequestSize ||
+        output.size() < RequestSize) {
+        return NvResult::InvalidSize;
+    }
+    std::array<u32_le, 6> request;
+    std::memcpy(request.data(), input.data(), RequestSize);
+    const u32 count = request[2];
+    if (count > inline_input.size() / sizeof(u64)) {
+        return NvResult::InvalidSize;
+    }
+    if (!count || count > Tegra::Control::NativeCommandStream::MaxEntries) {
+        return NvResult::BadParameter;
+    }
+    try {
+        std::vector<u64> entries(count);
+        for (u32 index = 0; index < count; ++index) {
+            u64_le wire;
+            std::memcpy(&wire, inline_input.data() + index * sizeof(wire), sizeof(wire));
+            entries[index] = wire;
+        }
+        std::shared_ptr<NvCore::NativeGpuSubmission> job;
+        NvFence fence;
+        const auto result =
+            channels.ReserveSubmission(&job, &fence, fd, owner, entries, request[3], request[5]);
+        if (result != NvResult::Success) {
+            return result;
+        }
+        if (!system.IsPoweredOn()) {
+            return NvResult::NotInitialized;
+        }
+        // The device mutex serializes reservation and queue publication for this channel.
+        if (!system.GPU().PushNativeGPUJob(job)) {
+            return NvResult::Busy;
+        }
+        request[3] = 0;
+        request[4] = static_cast<u32>(fence.id);
+        request[5] = fence.value;
+        std::memcpy(output.data(), request.data(), RequestSize);
+        LOG_DEBUG(Service_NVDRV,
+                  "Native GPU job queued: fd={}, entries={}, syncpoint={}, counter={}", fd, count,
+                  fence.id, fence.value);
+        return NvResult::Success;
+    } catch (const std::bad_alloc&) {
+        return NvResult::InsufficientMemory;
+    }
 }
 
 NvResult nvhost_native_gpu::Ioctl3(DeviceFD fd, Ioctl command, std::span<const u8> input,
@@ -208,7 +269,11 @@ void nvhost_native_gpu::OnOpen(NvCore::SessionId session_id, DeviceFD fd) {
 void nvhost_native_gpu::OnClose(DeviceFD fd) {
     std::scoped_lock lock{mutex};
     if (open_fd && *open_fd == fd) {
+        const auto channel = channels.Get(fd, owner);
         channels.Close(fd, owner);
+        if (channel && system.IsPoweredOn()) {
+            system.GPU().RetireNativeGPUChannel(channel);
+        }
         open_fd.reset();
     }
 }

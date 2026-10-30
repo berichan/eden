@@ -10,6 +10,7 @@
 #include "common/thread.h"
 #include "core/core.h"
 #include "core/frontend/graphics_context.h"
+#include "core/hle/service/nvdrv/core/native_gpu_submission.h"
 #include "video_core/control/scheduler.h"
 #include "video_core/dma_pusher.h"
 #include "video_core/gpu.h"
@@ -23,10 +24,16 @@ ThreadManager::ThreadManager(Core::System& system_)
     : system{system_}
 {}
 
-ThreadManager::~ThreadManager() = default;
+ThreadManager::~ThreadManager() {
+    NotifyShutdown();
+}
 
 void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Frontend::GraphicsContext& context, Tegra::Control::Scheduler& scheduler) {
     rasterizer = renderer.ReadRasterizer();
+    {
+        std::scoped_lock lock{state.write_lock};
+        accepting_native = true;
+    }
     thread = std::jthread([&](std::stop_token stop_token) {
         Common::SetCurrentThreadName("GPU");
         Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
@@ -38,10 +45,15 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
         while (!stop_token.stop_requested()) {
             state.queue.PopWait(next, stop_token);
             if (stop_token.stop_requested()) {
+                if (auto* native = std::get_if<SubmitNativeCommand>(&next.data)) {
+                    native->submission->Cancel();
+                }
                 break;
             }
             if (auto* submit_list = std::get_if<SubmitListCommand>(&next.data)) {
                 scheduler.Push(system.GPU(), submit_list->channel, std::move(submit_list->entries));
+            } else if (auto* native = std::get_if<SubmitNativeCommand>(&next.data)) {
+                native->submission->Execute(system, stop_token);
             } else if (std::holds_alternative<GPUTickCommand>(next.data)) {
                 system.GPU().TickWork();
             } else if (const auto* flush = std::get_if<FlushRegionCommand>(&next.data)) {
@@ -51,6 +63,7 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
             } else {
                 ASSERT(false);
             }
+            DrainNativeRetirements();
             state.signaled_fence.store(next.fence);
             if (next.block) {
                 // We have to lock the write_lock to ensure that the condition_variable wait not get a
@@ -62,8 +75,57 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
     });
 }
 
+bool ThreadManager::SubmitNative(
+    std::shared_ptr<Service::Nvidia::NvCore::NativeGpuSubmission> submission) {
+    std::scoped_lock lock{state.write_lock};
+    if (!accepting_native || !submission || !submission->MarkQueued()) {
+        return false;
+    }
+    const u64 fence = state.last_fence + 1;
+    if (!state.queue.TryEmplace(CommandData{SubmitNativeCommand{submission}}, fence, false)) {
+        submission->Cancel();
+        return false;
+    }
+    state.last_fence = fence;
+    return true;
+}
+
 void ThreadManager::SubmitList(s32 channel, Tegra::CommandList&& entries, bool is_async) {
     PushCommand(SubmitListCommand(channel, std::move(entries)), false, is_async);
+}
+
+void ThreadManager::RetireNative(
+    std::shared_ptr<Service::Nvidia::NvCore::NativeGpuChannel> channel) {
+    std::scoped_lock lock{state.write_lock};
+    if (!accepting_native) {
+        return;
+    }
+    const u32 index = channel->GetChannelIndex();
+    ASSERT(index < native_retirements.size());
+    {
+        std::scoped_lock retirement_lock{retirement_mutex};
+        native_retirements[index] = std::move(channel);
+    }
+    const u64 fence = state.last_fence + 1;
+    if (state.queue.TryEmplace(CommandData{GPUTickCommand{}}, fence, false)) {
+        state.last_fence = fence;
+    }
+}
+
+void ThreadManager::DrainNativeRetirements() {
+    decltype(native_retirements) retired;
+    {
+        std::scoped_lock lock{retirement_mutex};
+        retired.swap(native_retirements);
+    }
+    for (const auto& channel : retired) {
+        if (channel) {
+            if (!channel->RetireBackend(system)) {
+                std::scoped_lock lock{retirement_mutex};
+                native_retirements[channel->GetChannelIndex()] = channel;
+            }
+        }
+    }
 }
 
 void ThreadManager::FlushRegion(DAddr addr, u64 size, bool is_async) {
@@ -115,9 +177,19 @@ u64 ThreadManager::PushCommand(CommandData&& command_data, bool block, bool is_a
 }
 
 void ThreadManager::NotifyShutdown() {
+    {
+        std::scoped_lock lock{state.write_lock};
+        accepting_native = false;
+    }
     if (thread.joinable()) {
         thread.request_stop();
         thread.join();
+    }
+    CommandDataContainer pending;
+    while (state.queue.TryPop(pending)) {
+        if (auto* native = std::get_if<SubmitNativeCommand>(&pending.data)) {
+            native->submission->Cancel();
+        }
     }
 }
 

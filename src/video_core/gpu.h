@@ -19,6 +19,11 @@ namespace Core {
 class System;
 } // namespace Core
 
+namespace Service::Nvidia::NvCore {
+class NativeGpuSubmission;
+class NativeGpuChannel;
+} // namespace Service::Nvidia::NvCore
+
 namespace VideoCore {
 class RendererBase;
 class ShaderNotify;
@@ -240,6 +245,8 @@ public:
 
     /// Push GPU command entries to be processed
     void PushGPUEntries(s32 channel, Tegra::CommandList&& entries);
+    bool PushNativeGPUJob(std::shared_ptr<Service::Nvidia::NvCore::NativeGpuSubmission> submission);
+    void RetireNativeGPUChannel(std::shared_ptr<Service::Nvidia::NvCore::NativeGpuChannel> channel);
 
     /// Notify rasterizer that any caches of the specified region should be flushed to Switch memory
     [[nodiscard]] VideoCore::RasterizerDownloadArea OnCPURead(DAddr addr, u64 size);

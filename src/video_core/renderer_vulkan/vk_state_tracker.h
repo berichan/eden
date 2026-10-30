@@ -289,6 +289,7 @@ public:
     void SetupTables(Tegra::Control::ChannelState& channel_state);
 
     void ChangeChannel(Tegra::Control::ChannelState& channel_state);
+    void ReleaseChannel(s32 channel_id);
 
     void InvalidateState();
 
@@ -308,6 +309,7 @@ private:
     };
 
     Tegra::Engines::Maxwell3D::DirtyState::Flags* flags;
+    s32 bound_channel{-1};
     Tegra::Engines::Maxwell3D::DirtyState::Flags default_flags;
     Tegra::Engines::Maxwell3D::DirtyState::Flags invalidation_flags;
     Maxwell::PrimitiveTopology current_topology = INVALID_TOPOLOGY;

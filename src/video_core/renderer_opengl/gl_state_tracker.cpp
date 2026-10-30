@@ -235,6 +235,15 @@ void StateTracker::SetupTables(Tegra::Control::ChannelState& channel_state) {
 
 void StateTracker::ChangeChannel(Tegra::Control::ChannelState& channel_state) {
     flags = &channel_state.payload->maxwell_3d.dirty.flags;
+    bound_channel = channel_state.bind_id;
+}
+
+void StateTracker::ReleaseChannel(s32 channel_id) {
+    if (bound_channel == channel_id) {
+        flags = &default_flags;
+        bound_channel = -1;
+        InvalidateState();
+    }
 }
 
 void StateTracker::InvalidateState() {

@@ -4,13 +4,20 @@
 #pragma once
 
 #include <array>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
+#include <stop_token>
 #include <vector>
 #include "common/container/unordered_map.h"
 #include "core/hle/service/nvdrv/core/container.h"
 #include "video_core/host1x/syncpoint_manager.h"
+
+namespace Core {
+class System;
+}
 
 namespace Tegra {
 class MemoryManager;
@@ -24,6 +31,7 @@ namespace Service::Nvidia::NvCore {
 
 class NativeGpuChannel;
 class NativeGpuErrorNotifier;
+class NativeGpuSubmission;
 
 class NativeGpuSchedulingGroup {
 public:
@@ -97,9 +105,16 @@ public:
     u32 GetChannelIndex() const;
     u32 GetRunlist() const;
     bool IsOpen() const;
+    bool RetireBackend(Core::System& system);
 
 private:
     friend class NativeGpuChannels;
+    friend class NativeGpuSubmission;
+    NvResult ReserveSubmission(std::shared_ptr<NativeGpuSubmission>* out_job, NvFence* out_fence,
+                               const std::shared_ptr<NativeGpuChannel>& self,
+                               std::span<const u64> entries, u32 flags, u32 increment,
+                               Tegra::Host1x::SyncpointManager& manager);
+    void ReleaseSubmission(u64 sequence);
     void Close();
     NvResult AllocateObjectContext(u32 class_id, u32 flags);
     NvResult BindZCull(u64 address, u32 mode);
@@ -124,6 +139,21 @@ private:
     std::shared_ptr<Tegra::Control::NativeGpuGraphicsContext> graphics_context;
     u64 client_data{};
     std::optional<u32> timeout;
+    struct Backend;
+    std::shared_ptr<Backend> backend;
+    struct PendingSubmission {
+        u64 sequence;
+        u32 slot;
+        u32 entries;
+        bool released{};
+        bool published{};
+    };
+    std::deque<PendingSubmission> pending_submissions;
+    u64 next_submission{1};
+    u32 ring_put{};
+    u32 ring_used{};
+    bool faulted{};
+    std::stop_source cancellation;
 };
 
 // Each native nvdrv context owns this typed descriptor table. Entries only appear after
@@ -143,6 +173,9 @@ public:
                                  u32 jobs, u32 flags);
     NvResult QuerySyncpoint(u64* out_address, NvFence* out_fence, DeviceFD fd,
                             SessionId owner) const;
+    NvResult ReserveSubmission(std::shared_ptr<NativeGpuSubmission>* out_job, NvFence* out_fence,
+                               DeviceFD fd, SessionId owner, std::span<const u64> entries,
+                               u32 flags, u32 increment);
     void Close(DeviceFD fd, SessionId owner);
 
 private:

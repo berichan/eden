@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -32,6 +33,11 @@ class GraphicsContext;
 class System;
 } // namespace Core
 
+namespace Service::Nvidia::NvCore {
+class NativeGpuSubmission;
+class NativeGpuChannel;
+} // namespace Service::Nvidia::NvCore
+
 namespace VideoCore {
 class RasterizerInterface;
 class RendererBase;
@@ -46,6 +52,10 @@ struct SubmitListCommand final {
 
     s32 channel;
     Tegra::CommandList entries;
+};
+
+struct SubmitNativeCommand final {
+    std::shared_ptr<Service::Nvidia::NvCore::NativeGpuSubmission> submission;
 };
 
 /// Command to signal to the GPU thread to flush a region
@@ -77,8 +87,8 @@ struct FlushAndInvalidateRegionCommand final {
 struct GPUTickCommand final {};
 
 using CommandData =
-    std::variant<std::monostate, SubmitListCommand, FlushRegionCommand, InvalidateRegionCommand,
-                 FlushAndInvalidateRegionCommand, GPUTickCommand>;
+    std::variant<std::monostate, SubmitListCommand, SubmitNativeCommand, FlushRegionCommand,
+                 InvalidateRegionCommand, FlushAndInvalidateRegionCommand, GPUTickCommand>;
 
 struct CommandDataContainer {
     CommandDataContainer() = default;
@@ -113,6 +123,8 @@ public:
 
     /// Push GPU command entries to be processed
     void SubmitList(s32 channel, Tegra::CommandList&& entries, bool is_async);
+    bool SubmitNative(std::shared_ptr<Service::Nvidia::NvCore::NativeGpuSubmission> submission);
+    void RetireNative(std::shared_ptr<Service::Nvidia::NvCore::NativeGpuChannel> channel);
 
     /// Notify rasterizer that any caches of the specified region should be flushed to Switch memory
     void FlushRegion(DAddr addr, u64 size, bool is_async);
@@ -128,6 +140,7 @@ public:
     void NotifyShutdown();
 
 private:
+    void DrainNativeRetirements();
     /// Pushes a command to be executed by the GPU thread
     u64 PushCommand(CommandData&& command_data, bool block, bool is_async);
 
@@ -135,6 +148,9 @@ private:
     VideoCore::RasterizerInterface* rasterizer = nullptr;
     SynchState state;
     std::jthread thread;
+    bool accepting_native{};
+    std::mutex retirement_mutex;
+    std::array<std::shared_ptr<Service::Nvidia::NvCore::NativeGpuChannel>, 448> native_retirements;
 };
 
 } // namespace VideoCommon::GPUThread

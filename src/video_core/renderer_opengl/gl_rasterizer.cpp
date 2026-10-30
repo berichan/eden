@@ -1383,6 +1383,7 @@ void RasterizerOpenGL::BindChannel(Tegra::Control::ChannelState& channel) {
 }
 
 void RasterizerOpenGL::ReleaseChannel(s32 channel_id) {
+    state_tracker.ReleaseChannel(channel_id);
     EraseChannel(channel_id);
     {
         std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};

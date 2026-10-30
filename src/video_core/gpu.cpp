@@ -67,11 +67,17 @@ struct GPU::Impl {
     std::shared_ptr<Control::ChannelState> CreateChannel(s32 channel_id) {
         auto channel_state = std::make_shared<Tegra::Control::ChannelState>(channel_id);
         channels.emplace(channel_id, channel_state);
-        scheduler.DeclareChannel(channel_state);
+        try {
+            scheduler.DeclareChannel(channel_state);
+        } catch (...) {
+            channels.erase(channel_id);
+            throw;
+        }
         return channel_state;
     }
 
     void BindChannel(s32 channel_id) {
+        std::scoped_lock lock{channel_guard};
         if (bound_channel != channel_id) {
             auto it = channels.find(channel_id);
             ASSERT(it != channels.end());
@@ -82,6 +88,7 @@ struct GPU::Impl {
     }
 
     std::shared_ptr<Control::ChannelState> AllocateChannel() {
+        std::scoped_lock lock{channel_guard};
         return CreateChannel(new_channel_id++);
     }
 
@@ -96,7 +103,17 @@ struct GPU::Impl {
     }
 
     void ReleaseChannel(Control::ChannelState& to_release) {
-        UNIMPLEMENTED();
+        {
+            std::scoped_lock lock{channel_guard};
+            if (bound_channel == to_release.bind_id) {
+                bound_channel = -1;
+                current_channel = nullptr;
+            }
+        }
+        renderer->ReadRasterizer()->ReleaseChannel(to_release.bind_id);
+        scheduler.RemoveChannel(to_release.bind_id);
+        std::scoped_lock lock{channel_guard};
+        channels.erase(to_release.bind_id);
     }
 
     /// Binds a renderer to the GPU.
@@ -350,6 +367,7 @@ struct GPU::Impl {
 
     Tegra::Control::Scheduler scheduler;
     ::Common::unordered_map<s32, std::shared_ptr<Tegra::Control::ChannelState>> channels;
+    std::mutex channel_guard;
     Tegra::Control::ChannelState* current_channel;
     s32 bound_channel{-1};
 
@@ -377,8 +395,18 @@ void GPU::BindChannel(s32 channel_id) {
     impl->BindChannel(channel_id);
 }
 
+bool GPU::PushNativeGPUJob(
+    std::shared_ptr<Service::Nvidia::NvCore::NativeGpuSubmission> submission) {
+    return impl->gpu_thread.SubmitNative(std::move(submission));
+}
+
 void GPU::ReleaseChannel(Control::ChannelState& to_release) {
     impl->ReleaseChannel(to_release);
+}
+
+void GPU::RetireNativeGPUChannel(
+    std::shared_ptr<Service::Nvidia::NvCore::NativeGpuChannel> channel) {
+    impl->gpu_thread.RetireNative(std::move(channel));
 }
 
 void GPU::InitAddressSpace(Tegra::MemoryManager& memory_manager) {

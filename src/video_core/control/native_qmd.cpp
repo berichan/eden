@@ -155,12 +155,18 @@ NativeQmdScheduler::Result NativeQmdScheduler::Signal(GPUVAddr address, u32 argu
             }
         }
         if (descriptor[12] && (descriptor[13] & 0xffff) && (descriptor[14] & 0xffff)) {
+            if (host.should_stop && host.should_stop(host.context)) {
+                return fail(Error::Cancelled, request.address);
+            }
             if (!host.dispatch || !host.dispatch(host.context, descriptor)) {
                 return fail(Error::DispatchFailed, request.address);
             }
             ++result.dispatches;
         }
         for (const auto& release : std::span{releases}.first(release_count)) {
+            if (host.should_stop && host.should_stop(host.context)) {
+                return fail(Error::Cancelled, request.address);
+            }
             if (!host.release || !host.release(host.context, release)) {
                 return fail(Error::ReleaseFailed, request.address);
             }

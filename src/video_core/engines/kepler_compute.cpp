@@ -69,7 +69,9 @@ bool KeplerCompute::CallNativeMethod(u32 method, u32 value, bool last, std::stop
          },
          [](void* context, const Qmd::Release& release) {
              auto& self = static_cast<HostContext*>(context)->owner;
-             if (!self.rasterizer || !self.rasterizer->SynchronizeNativeWork()) {
+             const auto token = static_cast<HostContext*>(context)->stop_token;
+             if (token.stop_requested() || !self.rasterizer ||
+                 !self.rasterizer->SynchronizeNativeWork() || token.stop_requested()) {
                  return false;
              }
              const u32 payload = static_cast<u32>(release.payload);

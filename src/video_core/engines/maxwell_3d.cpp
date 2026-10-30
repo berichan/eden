@@ -25,6 +25,24 @@ namespace Tegra::Engines {
 /// First register id that is actually a Macro call.
 constexpr u32 MacroRegistersStart = 0xE00;
 
+namespace {
+u32 NativeVersionRegister(u32 method) {
+    switch (method) {
+    case 0x5a8:
+        return 0x58e; // CHECK_CLASS_VERSION / SET_CLASS_VERSION
+    case 0x5aa:
+        return 0x5a9; // CHECK_SPH_VERSION / SET_SPH_VERSION
+    case 0x5e5:
+        return 0x5e4; // CHECK_AAM_VERSION / SET_AAM_VERSION
+    default:
+        return 0;
+    }
+}
+bool IsNativeVersionSet(u32 method) {
+    return method == 0x58e || method == 0x5a9 || method == 0x5e4;
+}
+} // namespace
+
 Maxwell3D::Maxwell3D(MemoryManager& memory_manager_)
     : draw_manager()
     , memory_manager{memory_manager_}
@@ -68,9 +86,125 @@ bool Maxwell3D::HasNativeMacroFailure() const {
             native_macro_processor->GetError() != Control::NativeMacroProcessor::Error::None);
 }
 
+bool Maxwell3D::HasPendingNativeMacro() const {
+    return native_macro_processor && native_macro_processor->HasPendingInvocation();
+}
+
+bool Maxwell3D::CallNativeMethod(Core::System& system, u32 method, u32 value, bool last,
+                                 std::stop_token stop_token) {
+    if (!native_macro_processor || stop_token.stop_requested()) {
+        return false;
+    }
+    native_stop_token = stop_token;
+    CallMethod(system, method, value, last);
+    return !HasNativeMacroFailure();
+}
+
 bool Maxwell3D::IsNativeStateMethod(u32 method) {
-    return !(method >= 0x154 && method <= 0x15d) &&
+    // C797 actions cannot fall through as state merely because the older class has
+    // no executable method at the same offset. NVIDIA classes/3d/clc797.h.
+    switch (method) {
+    case 0x43:  // NOTIFY
+    case 0x4f:  // SEND_GO_IDLE
+    case 0x50:  // PM_TRIGGER
+    case 0x51:  // PM_TRIGGER_WFI
+    case 0x5a:  // REPORT_SEMAPHORE_EXECUTE
+    case 0x6c:  // LAUNCH_DMA
+    case 0x6d:  // LOAD_INLINE_DATA
+    case 0x80:  // RUN_DS_NOW
+    case 0x87:  // INVALIDATE_SHADER_CACHES
+    case 0x9a:  // DRAW_INDEX_BUFFER_BEGIN_END_A
+    case 0x9b:  // DRAW_INDEX_BUFFER_BEGIN_END_B
+    case 0x9c:  // DRAW_VERTEX_ARRAY_BEGIN_END_A
+    case 0x9d:  // DRAW_VERTEX_ARRAY_BEGIN_END_B
+    case 0x9f:  // INVALIDATE_RASTER_CACHE_NO_WFI
+    case 0xb2:  // INCREMENT_SYNC_POINT
+    case 0xb5:  // FLUSH_AND_INVALIDATE_ROP_MINI_CACHE
+    case 0xb8:  // DECOMPRESS_SURFACE
+    case 0xbc:  // PEER_SEMAPHORE_RELEASE
+    case 0xbf:  // ASSIGN_ZCULL_SUBREGIONS
+    case 0xc1:  // DRAW_ZERO_INDEX
+    case 0xcf:  // RESERVED_TG07
+    case 0xd0:  // RESERVED_TG08
+    case 0xd1:  // RESERVED_TG09
+    case 0xd2:  // RESERVED_TG10
+    case 0xd3:  // RESERVED_TG11
+    case 0xd4:  // RESERVED_TG12
+    case 0xd5:  // RESERVED_TG13
+    case 0xd6:  // RESERVED_TG14
+    case 0xd7:  // RESERVED_TG15
+    case 0x142: // LOAD_ROOT_TABLE
+    case 0x157: // MME_DMA_READ
+    case 0x158: // MME_DMA_READ_FIFOED
+    case 0x159: // MME_DMA_WRITE
+    case 0x15a: // MME_DMA_REDUCTION
+    case 0x15b: // MME_DMA_SYSMEMBAR
+    case 0x15c: // MME_DMA_SYNC
+    case 0x1ff: // THROTTLE_SM
+    case 0x35e: // DRAW_VERTEX_ARRAY
+    case 0x366: // FORCE_TRANSITION_TO_BETA
+    case 0x369: // INVALIDATE_SHADER_CACHES_NO_WFI
+    case 0x378: // PIXEL_SHADER_BARRIER
+    case 0x37b: // MME_DMA_WRITE_METHOD_BARRIER
+    case 0x37c: // LOAD_ITERATED_BLEND_INSTRUCTION_POINTER
+    case 0x37d: // LOAD_ITERATED_BLEND_INSTRUCTION
+    case 0x3c6: // PM_LOCAL_TRIGGER
+    case 0x43d: // UNBIND_ALL
+    case 0x445: // PM_TRIGGER_END
+    case 0x451: // FLUSH_PENDING_WRITES
+    case 0x47d: // FORCE_HEAVYWEIGHT_METHOD_SYNC
+    case 0x47f: // DECOMPRESS_ZETA_SURFACE
+    case 0x485: // DRAW_VERTEX_ARRAY_BEGIN_END_INSTANCE_FIRST
+    case 0x486: // DRAW_VERTEX_ARRAY_BEGIN_END_INSTANCE_SUBSEQUENT
+    case 0x48f: // DRAW_AUTO
+    case 0x4a2: // INVALIDATE_TEXTURE_DATA_CACHE_NO_WFI
+    case 0x4b2: // CLEAR_ZCULL_REGION
+    case 0x4c1: // DRAW_INLINE_INDEX4X8
+    case 0x4cc: // INVALIDATE_SAMPLER_CACHE
+    case 0x4cd: // INVALIDATE_TEXTURE_HEADER_CACHE
+    case 0x4ce: // INVALIDATE_TEXTURE_DATA_CACHE
+    case 0x509: // INVALIDATE_SAMPLER_CACHE_NO_WFI
+    case 0x50a: // INVALIDATE_TEXTURE_HEADER_CACHE_NO_WFI
+    case 0x519: // STORE_ZCULL
+    case 0x540: // LOAD_ZCULL
+    case 0x54c: // CLEAR_REPORT_VALUE
+    case 0x57a: // DRAW_INLINE_INDEX
+    case 0x57c: // DRAW_INLINE_INDEX2X16
+    case 0x585: // END
+    case 0x586: // BEGIN
+    case 0x588: // ADD_TO_PRIMITIVE_ID
+    case 0x589: // LOAD_PRIMITIVE_ID
+    case 0x5a8: // CHECK_CLASS_VERSION
+    case 0x5aa: // CHECK_SPH_VERSION
+    case 0x5e5: // CHECK_AAM_VERSION
+    case 0x5f8: // DRAW_INDEX_BUFFER
+    case 0x5f9: // DRAW_INDEX_BUFFER32_BEGIN_END_INSTANCE_FIRST
+    case 0x5fa: // DRAW_INDEX_BUFFER16_BEGIN_END_INSTANCE_FIRST
+    case 0x5fb: // DRAW_INDEX_BUFFER8_BEGIN_END_INSTANCE_FIRST
+    case 0x5fc: // DRAW_INDEX_BUFFER32_BEGIN_END_INSTANCE_SUBSEQUENT
+    case 0x5fd: // DRAW_INDEX_BUFFER16_BEGIN_END_INSTANCE_SUBSEQUENT
+    case 0x5fe: // DRAW_INDEX_BUFFER8_BEGIN_END_INSTANCE_SUBSEQUENT
+    case 0x656: // INVALIDATE_ZCULL
+    case 0x65e: // ZCULL_SYNC
+    case 0x674: // CLEAR_SURFACE
+    case 0x675: // CLEAR_CLIP_ID_SURFACE
+    case 0x6c3: // SET_REPORT_SEMAPHORE_D
+    case 0xccd: // ENABLE_SHADER_PERFORMANCE_SNAPSHOT_COUNTER
+    case 0xcce: // DISABLE_SHADER_PERFORMANCE_SNAPSHOT_COUNTER
+    case 0xcf8: // START_SHADER_PERFORMANCE_COUNTER
+    case 0xcf9: // STOP_SHADER_PERFORMANCE_COUNTER
+        return false;
+    default:
+        break;
+    }
+    return !(method >= 0x154 && method <= 0x15d) && !(method >= 0x8e4 && method <= 0x8f3) &&
+           !(method >= 0x499 && method <= 0x49d) &&
            (!IsMethodExecutable(method) || method == MAXWELL3D_REG_INDEX(shadow_ram_control));
+}
+
+bool Maxwell3D::NativeWaitForIdle() {
+    return !native_stop_token.stop_requested() && rasterizer &&
+           rasterizer->SynchronizeNativeWork() && !native_stop_token.stop_requested();
 }
 
 void Maxwell3D::BindRasterizer(VideoCore::RasterizerInterface* rasterizer_) {
@@ -434,19 +568,70 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
             },
             [](void* context, u32 method, u32 value) {
                 auto& self = *static_cast<HostContext*>(context);
+                if (method == 0x44) { // C797 WAIT_FOR_IDLE
+                    return self.engine.NativeWaitForIdle();
+                }
+                if (NativeVersionRegister(method) || IsNativeVersionSet(method)) {
+                    self.engine.CallMethod(self.system, method, value, true);
+                    return !self.engine.HasNativeMacroFailure();
+                }
                 // Native draw/action adapters must opt in before MME can execute those methods.
                 if (!self.engine.IsNativeStateMethod(method)) {
+                    if (method == 0x8c4) {
+                        LOG_ERROR(HW_GPU,
+                                  "Unsupported native Falcon register update: target={:#x}, "
+                                  "value={:#x}, mask={:#x}",
+                                  value, self.engine.GetRegisterValue(0xd01),
+                                  self.engine.GetRegisterValue(0xd02));
+                    }
+                    LOG_ERROR(HW_GPU, "Unsupported native graphics macro output method={:#x}",
+                              method);
                     return false;
                 }
                 self.engine.CallMethod(self.system, method, value, true);
                 return true;
             },
+            [](void* context) {
+                const auto& self = static_cast<HostContext*>(context)->engine;
+                return self.rasterizer && self.rasterizer->SynchronizeNativeWork();
+            },
+            [](void* context) {
+                return static_cast<HostContext*>(context)
+                    ->engine.native_stop_token.stop_requested();
+            },
         };
         const auto status =
             native_macro_processor->CallMethod(method, method_argument, is_last_call, host);
         if (status != Control::NativeMacroProcessor::Status::Unhandled) {
+            if (status == Control::NativeMacroProcessor::Status::Failed) {
+                const auto& execution = native_macro_processor->GetExecutionResult();
+                LOG_ERROR(HW_GPU,
+                          "Native graphics macro failed: method={:#x}, error={}, "
+                          "execution_error={}, pc={:#x}",
+                          method, static_cast<u32>(native_macro_processor->GetError()),
+                          static_cast<u32>(execution.error), execution.program_counter);
+            }
             if (status == Control::NativeMacroProcessor::Status::Accepted && method >= 0x45 &&
                 method <= 0x48) {
+                ProcessDirtyRegisters(method, method_argument);
+            }
+            return;
+        }
+        if (method == 0x44) {
+            native_action_failed = !NativeWaitForIdle();
+            return;
+        }
+        if (const u32 version_register = NativeVersionRegister(method)) {
+            const u32 configured = GetRegisterValue(version_register);
+            // Support exact agreement with a declared, nonempty version interval.
+            native_action_failed = configured == 0 || configured != method_argument ||
+                                   (configured >> 16) > (configured & 0xffff);
+            return;
+        }
+        if (IsNativeVersionSet(method)) {
+            if (!method_argument || (method_argument >> 16) > (method_argument & 0xffff)) {
+                native_action_failed = true;
+            } else {
                 ProcessDirtyRegisters(method, method_argument);
             }
             return;

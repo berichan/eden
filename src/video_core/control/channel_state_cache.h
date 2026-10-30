@@ -63,13 +63,14 @@ public:
     Tegra::MemoryManager* GetFromID(size_t id) const {
         std::unique_lock<std::mutex> lk(config_mutex);
         const auto ref = address_spaces.find(id);
-        return ref->second.gpu_memory;
+        return ref == address_spaces.end() || ref->second.ref_count == 0 ? nullptr
+                                                                         : ref->second.gpu_memory;
     }
 
     std::optional<size_t> getStorageID(size_t id) const {
         std::unique_lock<std::mutex> lk(config_mutex);
         const auto ref = address_spaces.find(id);
-        if (ref == address_spaces.end()) {
+        if (ref == address_spaces.end() || ref->second.ref_count == 0) {
             return std::nullopt;
         }
         return ref->second.storage_id;
@@ -86,7 +87,7 @@ protected:
     Tegra::MemoryManager* gpu_memory{};
     u64 program_id{};
 
-    std::deque<P> channel_storage;
+    std::deque<std::optional<P>> channel_storage;
     std::deque<size_t> free_channel_ids;
     ::Common::unordered_map<s32, size_t> channel_map;
     std::vector<size_t> active_channel_ids;
@@ -99,6 +100,7 @@ protected:
     mutable std::mutex config_mutex;
 
     virtual void OnGPUASRegister([[maybe_unused]] size_t map_id) {}
+    virtual void OnGPUASUnregister([[maybe_unused]] size_t map_id) {}
 };
 
 } // namespace VideoCommon

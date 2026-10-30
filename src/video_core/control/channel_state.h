@@ -31,6 +31,7 @@ class GPU;
 class MemoryManager;
 
 namespace Control {
+class NativeGpuGraphicsContext;
 
 struct ChannelState {
     explicit ChannelState(s32 bind_id);
@@ -58,6 +59,7 @@ struct ChannelState {
     };
     std::optional<Payload> payload;
     MemoryManager* memory_manager = nullptr;
+    std::shared_ptr<const NativeGpuGraphicsContext> native_context;
 
     s32 bind_id = -1;
     u64 program_id = 0;

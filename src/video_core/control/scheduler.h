@@ -25,6 +25,7 @@ public:
     void Push(GPU& gpu, s32 channel, CommandList&& entries);
 
     void DeclareChannel(std::shared_ptr<ChannelState> new_channel);
+    void RemoveChannel(s32 channel);
 
 private:
     ::Common::unordered_map<s32, std::shared_ptr<ChannelState>> channels;

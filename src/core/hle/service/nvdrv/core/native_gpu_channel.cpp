@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <bit>
 #include <limits>
 #include <new>
@@ -8,6 +9,7 @@
 #include "common/assert.h"
 #include "core/hle/service/nvdrv/core/native_gpu_channel.h"
 #include "core/hle/service/nvdrv/core/native_gpu_error_notifier.h"
+#include "core/hle/service/nvdrv/core/native_gpu_submission.h"
 #include "video_core/control/native_gpu_context.h"
 #include "video_core/host1x/syncpoint_shim.h"
 #include "video_core/memory_manager.h"
@@ -163,6 +165,9 @@ NvResult NativeGpuChannel::UnbindGroup(const std::shared_ptr<NativeGpuScheduling
     }
     if (!group || group != old_group) {
         return NvResult::BadParameter;
+    }
+    if (!pending_submissions.empty() || backend) {
+        return NvResult::Busy;
     }
     group->Detach(subcontext);
     graphics_context.reset();
@@ -349,8 +354,79 @@ bool NativeGpuChannel::IsOpen() const {
 }
 
 void NativeGpuChannel::Close() {
+    {
+        std::scoped_lock lock{mutex};
+        open = false;
+    }
+    cancellation.request_stop();
+}
+
+NvResult NativeGpuChannel::ReserveSubmission(std::shared_ptr<NativeGpuSubmission>* out_job,
+                                             NvFence* out_fence,
+                                             const std::shared_ptr<NativeGpuChannel>& self,
+                                             std::span<const u64> entries, u32 flags, u32 increment,
+                                             Tegra::Host1x::SyncpointManager& manager) {
+    if (*out_job) {
+        return NvResult::BadParameter;
+    }
+    if ((flags & ~0x104U) || increment != 0) {
+        return NvResult::NotSupported;
+    }
+    if (entries.empty() || entries.size() > Tegra::Control::NativeCommandStream::MaxEntries) {
+        return NvResult::BadParameter;
+    }
     std::scoped_lock lock{mutex};
-    open = false;
+    if (!open || faulted || runlist != 0 || !command_ring || !graphics_context ||
+        command_ring->group != group || command_ring->address_space != address_space) {
+        return NvResult::InvalidState;
+    }
+    if (entries.size() > command_ring->entries.size() - 1 - ring_used) {
+        return NvResult::Busy;
+    }
+    const auto slot = std::ranges::find_if(command_ring->jobs,
+                                           [](const auto& job) { return job.num_entries == 0; });
+    if (slot == command_ring->jobs.end()) {
+        return NvResult::Busy;
+    }
+    if (next_submission == 0) {
+        return NvResult::OverFlow;
+    }
+    const NvFence submitted_fence{static_cast<s32>(syncpoint->GetId()),
+                                  manager.GetHostSyncpointValue(syncpoint->GetId())};
+    try {
+        auto submission = std::shared_ptr<NativeGpuSubmission>(new NativeGpuSubmission(
+            self, std::vector<u64>{entries.begin(), entries.end()}, submitted_fence));
+        const u32 slot_index = static_cast<u32>(slot - command_ring->jobs.begin());
+        const u32 count = static_cast<u32>(entries.size());
+        pending_submissions.push_back({next_submission, slot_index, count});
+        submission->sequence = next_submission++;
+        *slot = {ring_put, count, submitted_fence.value};
+        const u32 mask = static_cast<u32>(command_ring->entries.size() - 1);
+        for (const u64 entry : entries) {
+            command_ring->entries[ring_put] = entry;
+            ring_put = (ring_put + 1) & mask;
+        }
+        ring_used += count;
+        *out_fence = submitted_fence;
+        *out_job = std::move(submission);
+    } catch (const std::bad_alloc&) {
+        return NvResult::InsufficientMemory;
+    }
+    return NvResult::Success;
+}
+
+void NativeGpuChannel::ReleaseSubmission(u64 sequence) {
+    std::scoped_lock lock{mutex};
+    const auto found =
+        std::ranges::find(pending_submissions, sequence, &PendingSubmission::sequence);
+    ASSERT(found != pending_submissions.end() && !found->released);
+    found->released = true;
+    command_ring->jobs[found->slot] = {};
+    // Out-of-order cancellation cannot reuse entries still covered by an older job.
+    while (!pending_submissions.empty() && pending_submissions.front().released) {
+        ring_used -= pending_submissions.front().entries;
+        pending_submissions.pop_front();
+    }
 }
 
 NativeGpuChannels::NativeGpuChannels(Tegra::Host1x::SyncpointManager& manager_)
@@ -440,6 +516,16 @@ void NativeGpuChannels::Close(DeviceFD fd, SessionId owner) {
         it->second->Close();
         channels.erase(it);
     }
+}
+
+NvResult NativeGpuChannels::ReserveSubmission(std::shared_ptr<NativeGpuSubmission>* out_job,
+                                              NvFence* out_fence, DeviceFD fd, SessionId owner,
+                                              std::span<const u64> entries, u32 flags,
+                                              u32 increment) {
+    const auto channel = Get(fd, owner);
+    return channel ? channel->ReserveSubmission(out_job, out_fence, channel, entries, flags,
+                                                increment, manager)
+                   : NvResult::BadParameter;
 }
 
 } // namespace Service::Nvidia::NvCore

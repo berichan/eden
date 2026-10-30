@@ -12,6 +12,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <stop_token>
 #include <type_traits>
 #include <vector>
 
@@ -69,6 +70,9 @@ public:
 
     void SetNativeMacroState(std::shared_ptr<Control::AmpereGraphicsState> native_state);
     bool HasNativeMacroFailure() const;
+    bool HasPendingNativeMacro() const;
+    bool CallNativeMethod(Core::System& system, u32 method, u32 value, bool last,
+                          std::stop_token stop_token);
 
     /// Register structure of the Maxwell3D engine.
     struct Regs {
@@ -3260,6 +3264,7 @@ private:
 
     bool IsMethodExecutable(u32 method);
     bool IsNativeStateMethod(u32 method);
+    bool NativeWaitForIdle();
 
     MemoryManager& memory_manager;
 
@@ -3277,6 +3282,7 @@ private:
     MacroEngine macro_engine;
     std::unique_ptr<Control::NativeMacroProcessor> native_macro_processor;
     bool native_action_failed{};
+    std::stop_token native_stop_token;
 
     Upload::State upload_state;
 

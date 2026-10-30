@@ -598,6 +598,28 @@ TEST_CASE("Native graphics macro input cannot bypass pending invocation or actio
     MethodHost host;
     Processor uploader{state};
     Upload(uploader, SumProgram(0xd00), host);
+    for (const auto [setter, check] :
+         std::array<std::pair<u32, u32>, 3>{{{0x58e, 0x5a8}, {0x5a9, 0x5aa}, {0x5e4, 0x5e5}}}) {
+        Tegra::Engines::Maxwell3D engine{space};
+        engine.SetNativeMacroState(state);
+        REQUIRE(engine.CallNativeMethod(system, setter, 0x40004, true, {}));
+        REQUIRE(engine.CallNativeMethod(system, check, 0x40004, true, {}));
+        REQUIRE_FALSE(engine.CallNativeMethod(system, check, 0x30003, true, {}));
+        REQUIRE(engine.HasNativeMacroFailure());
+    }
+    {
+        Tegra::Engines::Maxwell3D engine{space};
+        REQUIRE_FALSE(engine.execution_mask[0xc1]);
+        engine.SetNativeMacroState(state);
+        REQUIRE_FALSE(engine.CallNativeMethod(system, 0xc1, 1, true, {}));
+        REQUIRE(engine.HasNativeMacroFailure());
+    }
+    {
+        Tegra::Engines::Maxwell3D engine{space};
+        engine.SetNativeMacroState(state);
+        REQUIRE_FALSE(engine.CallNativeMethod(system, 0x44, 0, true, {}));
+        REQUIRE(engine.HasNativeMacroFailure());
+    }
     for (u32 method : {0xd00U, u32(MAXWELL3D_REG_INDEX(clear_surface)), 0x157U}) {
         Tegra::Engines::Maxwell3D engine{space};
         engine.SetNativeMacroState(state);

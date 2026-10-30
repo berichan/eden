@@ -17,6 +17,7 @@ struct Host {
     std::string events;
     GPUVAddr bad_release{};
     bool reject_dispatch{};
+    bool cancel_after_dispatch{};
     size_t release_limit{100000};
     bool cancelled{};
     Scheduler::Host Bind() {
@@ -40,6 +41,7 @@ struct Host {
                     if (self.reject_dispatch)
                         return false;
                     self.dispatches.push_back(descriptor);
+                    self.cancelled = self.cancel_after_dispatch;
                     return true;
                 },
                 [](void* context, const Scheduler::Release& release) {
@@ -96,6 +98,18 @@ TEST_CASE("Native QMD dependencies gate real dispatch and all three ordered rele
 }
 
 TEST_CASE("Native QMD faults never turn skipped dispatch into a completion", "[ipc][video_core]") {
+    {
+        Scheduler cancelled;
+        Host host;
+        host.descriptors[0x1000] = Descriptor(0);
+        host.cancel_after_dispatch = true;
+        const auto result = cancelled.Signal(0x1000, 3, host.Bind());
+        REQUIRE(result.error == Scheduler::Error::Cancelled);
+        REQUIRE(result.dispatches == 1);
+        REQUIRE(result.releases == 0);
+        REQUIRE(host.releases.empty());
+        REQUIRE(cancelled.HasFailed());
+    }
     for (bool invalid_destination : {false, true}) {
         Scheduler scheduler;
         Host host;

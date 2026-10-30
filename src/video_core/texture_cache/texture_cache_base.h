@@ -293,6 +293,7 @@ private:
     }
 
     void OnGPUASRegister(size_t map_id) final override;
+    void OnGPUASUnregister(size_t map_id) final override;
 
     /// Runs the Garbage Collector.
     void RunGarbageCollector();
