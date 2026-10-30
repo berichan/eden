@@ -588,6 +588,34 @@ TEST_CASE("The graphics engine executes native macros without using legacy macro
     REQUIRE(engine.GetRegisterValue(0xd00) == 17);
 }
 
+TEST_CASE("Native graphics configuration survives channel binding in the same group",
+          "[ipc][video_core]") {
+    Core::System system;
+    Core::DeviceMemory memory;
+    Tegra::MaxwellDeviceMemoryManager backing{memory};
+    Tegra::MemoryManager space{system, backing, 32, 1ULL << 32, 16, 12};
+    Tegra::Engines::Maxwell3D first{space};
+    Tegra::Engines::Maxwell3D second{space};
+    auto state = std::make_shared<Tegra::Control::AmpereGraphicsState>();
+    first.SetNativeMacroState(state);
+    const Tegra::Control::NativeGraphicsConfig::Host host{nullptr, [](void*) { return true; },
+                                                          nullptr};
+    REQUIRE(state->graphics_config.ApplyMaskedRegister(0x418800, 1, 1, host) ==
+            Tegra::Control::NativeGraphicsConfig::Error::None);
+    second.SetNativeMacroState(state);
+    REQUIRE(first.GetNativeGraphicsConfig().PolygonOffsetNanIsZero());
+    REQUIRE(second.GetNativeGraphicsConfig().PolygonOffsetNanIsZero());
+    REQUIRE(&first.GetNativeGraphicsConfig() == &second.GetNativeGraphicsConfig());
+    first.SetNativeMacroState(state);
+    REQUIRE(first.GetNativeGraphicsConfig().PolygonOffsetNanIsZero());
+    first.SetNativeMacroState(nullptr);
+    REQUIRE_FALSE(first.GetNativeGraphicsConfig().PolygonOffsetNanIsZero());
+    REQUIRE(second.GetNativeGraphicsConfig().PolygonOffsetNanIsZero());
+    second.SetNativeMacroState(std::make_shared<Tegra::Control::AmpereGraphicsState>());
+    REQUIRE_FALSE(second.GetNativeGraphicsConfig().PolygonOffsetNanIsZero());
+    REQUIRE(state->graphics_config.PolygonOffsetNanIsZero());
+}
+
 TEST_CASE("Native graphics macro input cannot bypass pending invocation or action guards",
           "[ipc][video_core]") {
     Core::System system;
@@ -598,6 +626,23 @@ TEST_CASE("Native graphics macro input cannot bypass pending invocation or actio
     MethodHost host;
     Processor uploader{state};
     Upload(uploader, SumProgram(0xd00), host);
+    for (u32 method : {0x52U, 0x53U, 0x54U, 0x55U}) {
+        Tegra::Engines::Maxwell3D engine{space};
+        engine.SetNativeMacroState(state);
+        REQUIRE_FALSE(engine.CallNativeMethod(system, method, 1, true, {}));
+        REQUIRE(engine.HasNativeMacroFailure());
+    }
+    for (u32 target : {0x418800U, 0x419f78U}) {
+        Tegra::Engines::Maxwell3D engine{space};
+        engine.SetNativeMacroState(state);
+        REQUIRE(engine.CallNativeMethod(system, 0xd00, 0, true, {}));
+        REQUIRE(engine.CallNativeMethod(system, 0xd01, 1, true, {}));
+        REQUIRE(engine.CallNativeMethod(system, 0xd02, 1, true, {}));
+        REQUIRE_FALSE(engine.CallNativeMethod(system, 0x8c4, target, true, {}));
+        REQUIRE(engine.GetRegisterValue(0xd00) == 0);
+        REQUIRE_FALSE(engine.GetNativeGraphicsConfig().PolygonOffsetNanIsZero());
+        REQUIRE(engine.HasNativeMacroFailure());
+    }
     for (const auto [setter, check] :
          std::array<std::pair<u32, u32>, 3>{{{0x58e, 0x5a8}, {0x5a9, 0x5aa}, {0x5e4, 0x5e5}}}) {
         Tegra::Engines::Maxwell3D engine{space};

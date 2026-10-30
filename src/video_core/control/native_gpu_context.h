@@ -8,6 +8,7 @@
 #include <mutex>
 #include <optional>
 #include "common/common_types.h"
+#include "video_core/control/native_graphics_config.h"
 #include "video_core/control/native_qmd.h"
 #include "video_core/turing_macro.h"
 
@@ -31,6 +32,8 @@ struct AmpereGraphicsState {
     };
 
     std::mutex mutex;
+    // GPU-worker-owned settings; separate from the mutex held during MME callbacks.
+    NativeGraphicsConfig graphics_config;
     std::array<u32, MethodCount> registers{};
     std::array<u32, MethodCount> shadow_registers{};
     TuringMacroEngine macro_engine;

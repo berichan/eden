@@ -12,6 +12,7 @@
 #include "common/settings.h"
 #include "core/core.h"
 #include "core/core_timing.h"
+#include "video_core/control/native_gpu_context.h"
 #include "video_core/control/native_macro_processor.h"
 #include "video_core/dirty_flags.h"
 #include "video_core/engines/maxwell_3d.h"
@@ -68,6 +69,7 @@ void Maxwell3D::SetNativeMacroState(std::shared_ptr<Control::AmpereGraphicsState
     macro_segments.clear();
     current_macro_dirty = false;
     native_action_failed = false;
+    native_graphics_state = native_state;
     native_macro_processor =
         native_state ? std::make_unique<Control::NativeMacroProcessor>(std::move(native_state))
                      : nullptr;
@@ -90,6 +92,11 @@ bool Maxwell3D::HasPendingNativeMacro() const {
     return native_macro_processor && native_macro_processor->HasPendingInvocation();
 }
 
+const Control::NativeGraphicsConfig& Maxwell3D::GetNativeGraphicsConfig() const {
+    static const Control::NativeGraphicsConfig legacy_defaults;
+    return native_graphics_state ? native_graphics_state->graphics_config : legacy_defaults;
+}
+
 bool Maxwell3D::CallNativeMethod(Core::System& system, u32 method, u32 value, bool last,
                                  std::stop_token stop_token) {
     if (!native_macro_processor || stop_token.stop_requested()) {
@@ -108,6 +115,10 @@ bool Maxwell3D::IsNativeStateMethod(u32 method) {
     case 0x4f:  // SEND_GO_IDLE
     case 0x50:  // PM_TRIGGER
     case 0x51:  // PM_TRIGGER_WFI
+    case 0x52:  // FE_ATOMIC_SEQUENCE_BEGIN
+    case 0x53:  // FE_ATOMIC_SEQUENCE_END
+    case 0x54:  // SET_INSTRUMENTATION_METHOD_HEADER
+    case 0x55:  // SET_INSTRUMENTATION_METHOD_DATA
     case 0x5a:  // REPORT_SEMAPHORE_EXECUTE
     case 0x6c:  // LAUNCH_DMA
     case 0x6d:  // LOAD_INLINE_DATA
@@ -571,19 +582,13 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
                 if (method == 0x44) { // C797 WAIT_FOR_IDLE
                     return self.engine.NativeWaitForIdle();
                 }
-                if (NativeVersionRegister(method) || IsNativeVersionSet(method)) {
+                if (NativeVersionRegister(method) || IsNativeVersionSet(method) ||
+                    method == 0x8c4) {
                     self.engine.CallMethod(self.system, method, value, true);
                     return !self.engine.HasNativeMacroFailure();
                 }
                 // Native draw/action adapters must opt in before MME can execute those methods.
                 if (!self.engine.IsNativeStateMethod(method)) {
-                    if (method == 0x8c4) {
-                        LOG_ERROR(HW_GPU,
-                                  "Unsupported native Falcon register update: target={:#x}, "
-                                  "value={:#x}, mask={:#x}",
-                                  value, self.engine.GetRegisterValue(0xd01),
-                                  self.engine.GetRegisterValue(0xd02));
-                    }
                     LOG_ERROR(HW_GPU, "Unsupported native graphics macro output method={:#x}",
                               method);
                     return false;
@@ -619,6 +624,31 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
         }
         if (method == 0x44) {
             native_action_failed = !NativeWaitForIdle();
+            return;
+        }
+        if (method == 0x8c4) {
+            const Control::NativeGraphicsConfig::Host firmware_host{
+                this,
+                [](void* context) { return static_cast<Maxwell3D*>(context)->NativeWaitForIdle(); },
+                [](void* context) {
+                    return static_cast<Maxwell3D*>(context)->native_stop_token.stop_requested();
+                },
+            };
+            const auto error = native_graphics_state->graphics_config.ApplyMaskedRegister(
+                method_argument, GetRegisterValue(0xd01), GetRegisterValue(0xd02), firmware_host);
+            if (error != Control::NativeGraphicsConfig::Error::None) {
+                LOG_ERROR(HW_GPU,
+                          "Native Falcon request rejected: target={:#x}, value={:#x}, mask={:#x}, "
+                          "error={}",
+                          method_argument, GetRegisterValue(0xd01), GetRegisterValue(0xd02),
+                          static_cast<u32>(error));
+                native_action_failed = true;
+                return;
+            }
+            // The modeled context setting is applied before acknowledging the firmware method.
+            // Draw actions remain unsupported until the rasterizer honors its NaN policy.
+            ProcessDirtyRegisters(method, method_argument);
+            ProcessDirtyRegisters(0xd00, 1);
             return;
         }
         if (const u32 version_register = NativeVersionRegister(method)) {

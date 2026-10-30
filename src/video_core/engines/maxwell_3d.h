@@ -21,13 +21,14 @@
 #include "common/common_funcs.h"
 #include "common/common_types.h"
 #include "common/math_util.h"
+#include "video_core/control/native_graphics_config.h"
 #include "video_core/engines/const_buffer_info.h"
 #include "video_core/engines/engine_interface.h"
 #include "video_core/engines/engine_upload.h"
+#include "video_core/engines/maxwell_3d.h"
 #include "video_core/gpu.h"
 #include "video_core/macro.h"
 #include "video_core/textures/texture.h"
-#include "video_core/engines/maxwell_3d.h"
 
 namespace Core {
 class System;
@@ -71,6 +72,8 @@ public:
     void SetNativeMacroState(std::shared_ptr<Control::AmpereGraphicsState> native_state);
     bool HasNativeMacroFailure() const;
     bool HasPendingNativeMacro() const;
+    // GPU-worker access only, like the native context settings themselves.
+    const Control::NativeGraphicsConfig& GetNativeGraphicsConfig() const;
     bool CallNativeMethod(Core::System& system, u32 method, u32 value, bool last,
                           std::stop_token stop_token);
 
@@ -3282,6 +3285,7 @@ private:
     MacroEngine macro_engine;
     std::unique_ptr<Control::NativeMacroProcessor> native_macro_processor;
     bool native_action_failed{};
+    std::shared_ptr<Control::AmpereGraphicsState> native_graphics_state;
     std::stop_token native_stop_token;
 
     Upload::State upload_state;

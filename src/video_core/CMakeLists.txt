@@ -34,6 +34,8 @@ add_library(video_core STATIC
     control/channel_state_cache.h
     control/native_gpu_context.cpp
     control/native_gpu_context.h
+    control/native_graphics_config.cpp
+    control/native_graphics_config.h
     control/native_compute.cpp
     control/native_compute.h
     control/native_command_stream.cpp
