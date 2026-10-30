@@ -231,6 +231,15 @@ std::array<float, 2> EvaluateVertex(IR::Block& block, std::array<float, 2> input
             values[&inst] =
                 std::bit_cast<u32>(std::bit_cast<float>(arg(0)) * std::bit_cast<float>(arg(1)));
             break;
+        case IR::Opcode::FPSin:
+            values[&inst] = std::bit_cast<u32>(std::sin(std::bit_cast<float>(arg(0))));
+            break;
+        case IR::Opcode::FPCos:
+            values[&inst] = std::bit_cast<u32>(std::cos(std::bit_cast<float>(arg(0))));
+            break;
+        case IR::Opcode::FPExp2:
+            values[&inst] = std::bit_cast<u32>(std::exp2(std::bit_cast<float>(arg(0))));
+            break;
         case IR::Opcode::FPMin32:
             values[&inst] = std::bit_cast<u32>(
                 std::fmin(std::bit_cast<float>(arg(0)), std::bit_cast<float>(arg(1))));
@@ -265,6 +274,115 @@ std::array<float, 2> EvaluateVertex(IR::Block& block, std::array<float, 2> input
     return output;
 }
 } // namespace
+
+TEST_CASE("Native sine and cosine use turns without rescaling other special functions",
+          "[native-shader]") {
+    const u32 operation = GENERATE(0U, 1U, 2U);
+    const u32 form = GENERATE(0x308U, 0xb08U);
+    const std::array<Native, 4> code{{
+        VertexTransform.front(),
+        {{0x00027000U | form, form == 0xb08 ? 0x00c00000U : 0U, operation << 10, 0}},
+        {{0xff007322, 0x00007002, 0x000000ff, 0}},
+        VertexTransform.back(),
+    }};
+    const auto lowered = Shader::Ampere::LowerToMaxwell(code);
+    REQUIRE(lowered);
+    Shader::ObjectPool<IR::Inst> pool;
+    IR::Block block{pool};
+    EmptyEnvironment env;
+    Shader::Maxwell::TranslatorVisitor visitor{env, block};
+    for (const u64 word : lowered.instructions) {
+        using Shader::Maxwell::Opcode;
+        switch (Shader::Maxwell::Decode(word)) {
+        case Opcode::ALD:
+            visitor.ALD(word);
+            break;
+        case Opcode::AST:
+            visitor.AST(word);
+            break;
+        case Opcode::MOV_cbuf:
+            visitor.MOV_cbuf(word);
+            break;
+        case Opcode::FMUL32I:
+            visitor.FMUL32I(word);
+            break;
+        case Opcode::MUFU:
+            visitor.MUFU(word);
+            break;
+        case Opcode::EXIT:
+            break;
+        default:
+            FAIL("Unexpected lowered special-function instruction");
+        }
+    }
+    constexpr std::array<float, 4> angles{0.f, .25f, .5f, -.25f};
+    constexpr std::array<float, 4> cosine{1.f, 0.f, -1.f, 0.f};
+    constexpr std::array<float, 4> sine{0.f, 1.f, 0.f, -1.f};
+    for (u32 i = 0; i < angles.size(); ++i) {
+        const float angle = angles[i];
+        const float expected = operation == 0   ? cosine[i]
+                               : operation == 1 ? sine[i]
+                                                : std::exp2(angle);
+        REQUIRE(std::abs(EvaluateVertex(block, {angle, 0}, {angle, 0, 0, 0})[0] - expected) <
+                1e-6f);
+    }
+}
+
+TEST_CASE("Native half trigonometry converts after unpacking and retains predication",
+          "[native-shader]") {
+    const u32 operation = GENERATE(0U, 1U, 4U);
+    const std::array<Native, 2> code{{
+        {{0x00029308, 1, (operation << 10) | (1U << 9), 0}},
+        VertexTransform.back(),
+    }};
+    const auto lowered = Shader::Ampere::LowerToMaxwell(code);
+    REQUIRE(lowered);
+    Shader::ObjectPool<IR::Inst> pool;
+    IR::Block block{pool};
+    EmptyEnvironment env;
+    Shader::Maxwell::TranslatorVisitor visitor{env, block};
+    for (u32 index = lowered.source_instruction_offsets[0];
+         index < lowered.source_instruction_offsets[1]; ++index) {
+        const auto word = lowered.instructions[index];
+        const auto predicate = Shader::Maxwell::Instruction{word}.Pred();
+        REQUIRE(predicate.index == 1);
+        REQUIRE(predicate.negated);
+        using Shader::Maxwell::Opcode;
+        switch (Shader::Maxwell::Decode(word)) {
+        case Opcode::F2F_reg:
+            visitor.F2F_reg(word);
+            break;
+        case Opcode::FMUL32I:
+            visitor.FMUL32I(word);
+            break;
+        case Opcode::MUFU:
+            visitor.MUFU(word);
+            break;
+        default:
+            FAIL("Unexpected lowered half special-function instruction");
+        }
+    }
+    u32 scales{}, special_functions{};
+    bool unpacked{};
+    for (const auto& inst : block.Instructions()) {
+        if (inst.GetOpcode() == IR::Opcode::ConvertF32F16)
+            unpacked = true;
+        if (inst.GetOpcode() == IR::Opcode::FPMul32) {
+            REQUIRE(unpacked);
+            REQUIRE(inst.Arg(0).Inst()->GetOpcode() == IR::Opcode::BitCastF32U32);
+            ++scales;
+        }
+        if (inst.GetOpcode() == IR::Opcode::FPSin || inst.GetOpcode() == IR::Opcode::FPCos) {
+            // Observe the actual F32 data flow, rather than a packed F16 multiply.
+            const auto* source = inst.Arg(0).Inst();
+            REQUIRE(source->GetOpcode() == IR::Opcode::BitCastF32U32);
+            ++special_functions;
+        }
+    }
+    REQUIRE(unpacked);
+    REQUIRE(scales == (operation < 2 ? 1U : 0U));
+    REQUIRE(special_functions == (operation < 2 ? 1U : 0U));
+}
 
 TEST_CASE("Native vertex lowering preserves attribute transforms through existing shader IR",
           "[native-shader]") {
