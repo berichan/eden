@@ -58,4 +58,6 @@ std::optional<NativeSampledMip> SelectNativeSampledMip(const NativeTextureDescri
                                                        const NativeSamplerDescriptor& sampler);
 bool IsNativeFixedMipSample(const Shader::IR::Inst& instruction);
 
+bool NativeColorPitchMatches(u32 logical_width, u32 storage_width);
+
 } // namespace Tegra::Control

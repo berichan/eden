@@ -172,4 +172,9 @@ bool IsNativeFixedMipSample(const Shader::IR::Inst& instruction) {
            instruction.Arg(3).IsEmpty();
 }
 
+bool NativeColorPitchMatches(u32 logical_width, u32 storage_width) {
+    return logical_width && storage_width >= logical_width &&
+           ((u64{logical_width} * 4 + 63) & ~u64{63}) == ((u64{storage_width} * 4 + 63) & ~u64{63});
+}
+
 } // namespace Tegra::Control

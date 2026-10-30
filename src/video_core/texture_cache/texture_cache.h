@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include "video_core/control/native_texture_descriptor.h"
+
 #include <limits>
 #include <optional>
 #include <bit>
@@ -1233,7 +1235,8 @@ ImageId TextureCache<P>::FindOrInsertImage(const ImageInfo& info, GPUVAddr gpu_a
 template <class P>
 std::optional<typename TextureCache<P>::NativeClearTarget>
 TextureCache<P>::PrepareNativeClearTarget(const ImageInfo& info, GPUVAddr address,
-                                          DAddr backing_address, bool existing_only) {
+                                          DAddr backing_address, bool existing_only,
+                                          bool allow_pitch_padding) {
     if (info.layout != Tegra::Texture::BlockLinearLayout::TuringColor2D ||
         (info.format != PixelFormat::B10G11R11_FLOAT &&
          info.format != PixelFormat::A8B8G8R8_SRGB) ||
@@ -1247,9 +1250,11 @@ TextureCache<P>::PrepareNativeClearTarget(const ImageInfo& info, GPUVAddr addres
         return image.gpu_addr == address && image.cpu_addr == backing_address &&
                image.guest_size_bytes == size && existing.format == info.format &&
                existing.type == info.type && existing.resources == info.resources &&
-               existing.size.width == info.size.width && existing.size.height == info.size.height &&
-               existing.size.depth == 1 && existing.num_samples == 1 &&
-               existing.block.width == info.block.width &&
+               (existing.size.width == info.size.width ||
+                (existing_only && allow_pitch_padding &&
+                 Tegra::Control::NativeColorPitchMatches(info.size.width, existing.size.width))) &&
+               existing.size.height == info.size.height && existing.size.depth == 1 &&
+               existing.num_samples == 1 && existing.block.width == info.block.width &&
                existing.block.height == info.block.height &&
                existing.block.depth == info.block.depth &&
                existing.layer_stride == info.layer_stride && existing.layout == info.layout &&
@@ -1281,7 +1286,7 @@ TextureCache<P>::PrepareNativeClearTarget(const ImageInfo& info, GPUVAddr addres
     if (!framebuffer_id || !view_id)
         return std::nullopt;
     PrepareImage(id, false, false);
-    return NativeClearTarget{&slot_framebuffers[framebuffer_id], id, view_id};
+    return NativeClearTarget{&slot_framebuffers[framebuffer_id], id, view_id, &slot_images[id]};
 }
 
 template <class P>

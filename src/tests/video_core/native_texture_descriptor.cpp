@@ -7,6 +7,17 @@
 
 using namespace Tegra::Control;
 
+TEST_CASE("Native color views accept padding only within the same byte pitch", "[native-shader]") {
+    REQUIRE(NativeColorPitchMatches(40, 48));
+    REQUIRE(NativeColorPitchMatches(20, 32));
+    REQUIRE(NativeColorPitchMatches(1, 16));
+    REQUIRE(NativeColorPitchMatches(16, 16));
+    REQUIRE_FALSE(NativeColorPitchMatches(40, 49));
+    REQUIRE_FALSE(NativeColorPitchMatches(40, 32));
+    REQUIRE_FALSE(NativeColorPitchMatches(17, 16));
+    REQUIRE_FALSE(NativeColorPitchMatches(0, 16));
+}
+
 TEST_CASE("Native narrowed views require ordinary normalized base-mip sampling state",
           "[native-shader]") {
     NativeDescriptorWords image{};

@@ -993,7 +993,10 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
 
     auto lease = gpu_memory->AcquireMappingLease();
     // Failure drains must precede destruction of samplers referenced by a prefix.
+    std::vector<std::unique_ptr<Image>> native_sample_images;
+    std::vector<vk::ImageView> native_sample_views;
     std::vector<vk::Sampler> native_samplers;
+    u64 native_sample_copy_bytes{};
     bool work_drained{};
     SCOPE_EXIT {
         if (!work_drained) {
@@ -1016,7 +1019,7 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
     // the first few completed draws and report only their hashes.
     std::vector<u8> readback;
     std::optional<u64> before_hash;
-    if (native_draw_readbacks < 4 && target->size_bytes <= SnapshotLimit) {
+    if (native_draw_readbacks < 12 && target->size_bytes <= SnapshotLimit) {
         readback.resize(target->size_bytes);
         if (!lease.ReadBlockChecked(target->address, readback))
             return reject("native target initial snapshot");
@@ -1327,13 +1330,54 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
             // The descriptor's opaque registration preset cannot identify a
             // layout. Only a previously established exact native image may be sampled.
             const auto source = texture_cache.PrepareNativeClearTarget(
-                sampled.info, sampled.address, sampled.backing, true);
+                sampled.info, sampled.address, sampled.backing, true, true);
             if (!source ||
                 buffer_cache.IsRegionGpuModified(
                     sampled.backing, VideoCommon::CalculateGuestSizeInBytes(sampled.info)))
                 return false;
-            const VkImageView view =
+            VkImageView view =
                 texture_cache.GetImageView(source->view_id).Handle(Shader::TextureType::Color2D);
+            if (source->image->info.size.width != sampled.info.size.width) {
+                // Equal guest pitch proves the same pixel rows, but normalized
+                // coordinates and clamp-to-edge need the logical texture width.
+                // Copy those pixels to a standalone host image without registering
+                // another overlapping guest image in the cache.
+                const u64 size = VideoCommon::CalculateGuestSizeInBytes(sampled.info);
+                if (size > SnapshotLimit - native_sample_copy_bytes)
+                    return false;
+                native_sample_copy_bytes += size;
+                native_sample_images.push_back(
+                    std::make_unique<Image>(texture_cache_runtime, sampled.info, 0, 0));
+                auto& copy_image = *native_sample_images.back();
+                texture_cache_runtime.TransitionImageLayout(copy_image);
+                const VideoCommon::ImageCopy copy{
+                    .src_subresource = {},
+                    .dst_subresource = {},
+                    .src_offset = {},
+                    .dst_offset = {},
+                    .extent = sampled.info.size,
+                };
+                texture_cache_runtime.CopyImage(copy_image, *source->image, std::span{&copy, 1});
+                native_sample_views.push_back(
+                    device.GetLogical().CreateImageView(VkImageViewCreateInfo{
+                        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                        .pNext = nullptr,
+                        .flags = 0,
+                        .image = copy_image.Handle(),
+                        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+                        .format = VK_FORMAT_A8B8G8R8_SRGB_PACK32,
+                        .components = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                                       VK_COMPONENT_SWIZZLE_IDENTITY,
+                                       VK_COMPONENT_SWIZZLE_IDENTITY},
+                        .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+                    }));
+                view = *native_sample_views.back();
+                LOG_DEBUG(
+                    HW_GPU,
+                    "Native sampled color crop: storage_width={}, logical_width={}, height={}",
+                    source->image->info.size.width, sampled.info.size.width,
+                    sampled.info.size.height);
+            }
             if (!view)
                 return false;
             sampled_images.push_back({sampled.stage, sampled.index, view, sampled.sampler});

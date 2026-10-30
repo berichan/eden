@@ -263,13 +263,15 @@ public:
         Framebuffer* framebuffer;
         ImageId image_id;
         ImageViewId view_id;
+        Image* image;
     };
     // Caller holds the AS mapping lease and cache mutex. Never expand a native
     // target into overlapping images outside the caller's proven backing span.
     std::optional<NativeClearTarget> PrepareNativeClearTarget(const ImageInfo& info,
                                                               GPUVAddr address,
                                                               DAddr backing_address,
-                                                              bool existing_only = false);
+                                                              bool existing_only = false,
+                                                              bool allow_pitch_padding = false);
 
     std::recursive_mutex mutex;
 
