@@ -82,6 +82,11 @@ public:
         u32 bank;
         std::span<const u8> bytes;
     };
+    struct NativeSampledImage {
+        u32 stage, index;
+        VkImageView view;
+        VkSampler sampler;
+    };
     explicit GraphicsPipeline(
         Scheduler& scheduler, BufferCache& buffer_cache, TextureCache& texture_cache,
         vk::PipelineCache& pipeline_cache, VideoCore::ShaderNotify* shader_notify,
@@ -117,7 +122,8 @@ public:
     }
 
     bool ConfigureNative(std::span<const NativeUniformBuffer> buffers,
-                         const Framebuffer* framebuffer, std::array<float, 2> render_area);
+                         std::span<const NativeSampledImage> images, const Framebuffer* framebuffer,
+                         std::array<float, 2> render_area);
     const Shader::Info& NativeStageInfo(size_t stage) const {
         return stage_infos.at(stage);
     }

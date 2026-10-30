@@ -562,11 +562,12 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
 }
 
 bool GraphicsPipeline::ConfigureNative(std::span<const NativeUniformBuffer> buffers,
+                                       std::span<const NativeSampledImage> images,
                                        const Framebuffer* framebuffer,
                                        std::array<float, 2> extent) {
-    if (!IsBound() || !framebuffer || buffers.size() != num_descriptor_entries)
+    if (!IsBound() || !framebuffer || buffers.size() + images.size() != num_descriptor_entries)
         return false;
-    size_t current{};
+    size_t current{}, image_index{};
     RenderAreaPushConstant render_area;
     render_area.words = {extent[0], extent[1], 0.f, 0.f};
     for (u32 stage = 0; stage < NUM_STAGES; ++stage) {
@@ -584,16 +585,31 @@ bool GraphicsPipeline::ConfigureNative(std::span<const NativeUniformBuffer> buff
                 buffer.bytes.size() < info.constant_buffer_used_sizes[descriptor.index])
                 return false;
         }
+        for (u32 i = 0; i < info.texture_descriptors.size(); ++i) {
+            if (info.texture_descriptors[i].count != 1 || image_index >= images.size())
+                return false;
+            const auto& image = images[image_index++];
+            if (image.stage != stage || image.index != i || !image.view || !image.sampler)
+                return false;
+        }
     }
-    if (current != buffers.size())
+    if (current != buffers.size() || image_index != images.size())
         return false;
     guest_descriptor_queue.Acquire(scheduler, num_descriptor_entries, uses_descriptor_buffer);
-    for (const auto& buffer : buffers) {
-        const auto destination = buffer_cache.runtime.BindMappedUniformBuffer(
-            buffer.stage, buffer.bank, static_cast<u32>(buffer.bytes.size()));
-        if (destination.size() < buffer.bytes.size())
-            return false;
-        std::memcpy(destination.data(), buffer.bytes.data(), buffer.bytes.size());
+    current = image_index = 0;
+    for (u32 stage = 0; stage < NUM_STAGES; ++stage) {
+        for (size_t i = 0; i < stage_infos[stage].constant_buffer_descriptors.size(); ++i) {
+            const auto& buffer = buffers[current++];
+            const auto destination = buffer_cache.runtime.BindMappedUniformBuffer(
+                buffer.stage, buffer.bank, static_cast<u32>(buffer.bytes.size()));
+            if (destination.size() < buffer.bytes.size())
+                return false;
+            std::memcpy(destination.data(), buffer.bytes.data(), buffer.bytes.size());
+        }
+        for (size_t i = 0; i < stage_infos[stage].texture_descriptors.size(); ++i) {
+            const auto& image = images[image_index++];
+            guest_descriptor_queue.AddSampledImage(image.view, image.sampler);
+        }
     }
     return ConfigureDraw(RescalingPushConstant{}, render_area, framebuffer, true);
 }
@@ -607,7 +623,10 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
     u32 descriptor_buffer_chunk{};
     if (descriptor_set_layout && uses_descriptor_buffer) {
         const auto* const entries = static_cast<const DescriptorUpdateEntry*>(descriptor_data);
+        // A later native sampler can recycle a destroyed object's numeric handle.
+        // Its encoded descriptor must be written again even for an equal payload.
         const bool reuse_allocation =
+            !native &&
             last_descriptor_buffer_generation == descriptor_buffer_ring.CurrentGeneration() &&
             last_descriptor_payload.size() == num_descriptor_entries &&
             std::memcmp(last_descriptor_payload.data(), entries,

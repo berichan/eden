@@ -262,12 +262,14 @@ public:
     struct NativeClearTarget {
         Framebuffer* framebuffer;
         ImageId image_id;
+        ImageViewId view_id;
     };
     // Caller holds the AS mapping lease and cache mutex. Never expand a native
     // target into overlapping images outside the caller's proven backing span.
     std::optional<NativeClearTarget> PrepareNativeClearTarget(const ImageInfo& info,
                                                               GPUVAddr address,
-                                                              DAddr backing_address);
+                                                              DAddr backing_address,
+                                                              bool existing_only = false);
 
     std::recursive_mutex mutex;
 

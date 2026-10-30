@@ -3,6 +3,8 @@
 
 #include <bit>
 #include <cmath>
+#include "shader_recompiler/frontend/ir/modifiers.h"
+#include "shader_recompiler/frontend/ir/value.h"
 #include "video_core/control/native_texture_descriptor.h"
 
 namespace Tegra::Control {
@@ -107,6 +109,38 @@ std::optional<NativeSamplerDescriptor> NativeSamplerDescriptor::Decode(
         result.reduction > 2 || result.min_lod > result.max_lod)
         return std::nullopt;
     return result;
+}
+
+bool CanSampleNativeBaseMip(const NativeTextureDescriptor& texture,
+                            const NativeSamplerDescriptor& sampler) {
+    if (!texture.IsRgba8Unorm2D() || !texture.srgb || !texture.normalized || texture.block_width ||
+        texture.block_depth || texture.tile_width || texture.gob3d || texture.gob_depth_offset ||
+        texture.view_min_mip || !sampler.srgb || (texture.words[7] & 0xfff000) ||
+        (texture.words[6] & 0x387fffc0U) || sampler.depth_compare || sampler.force_unnormalized ||
+        sampler.reduction || sampler.anisotropy || sampler.lod_bias || sampler.min_lod ||
+        sampler.max_lod || sampler.integer_only_nearest_lod ||
+        sampler.mag_filter != sampler.min_filter || (sampler.words[1] & 0x7c000000U) ||
+        sampler.wrap != std::array<u32, 3>{2, 2, 2})
+        return false;
+    // The SDK installs these registration/sampler presets. Preserve their raw
+    // identity; they cannot establish a layout for an arbitrary uploaded image.
+    for (u32 i = 0; i < texture.reserved.size(); ++i) {
+        if (texture.reserved[i] && !(i == 2 && texture.reserved[i] == 0x40000))
+            return false;
+        if (sampler.reserved[i] && !(i == 0 && sampler.reserved[i] == 0x24000))
+            return false;
+    }
+    return true;
+}
+
+bool IsNativeBaseMipSample(const Shader::IR::Inst& instruction) {
+    const auto opcode = instruction.GetOpcode();
+    if (opcode != Shader::IR::Opcode::ImageSampleImplicitLod &&
+        opcode != Shader::IR::Opcode::ImageSampleExplicitLod)
+        return false;
+    const auto flags = instruction.Flags<Shader::IR::TextureInstInfo>();
+    return flags.type == Shader::TextureType::Color2D && !(flags.raw & ~0x0047ffffU) &&
+           instruction.Arg(3).IsEmpty();
 }
 
 } // namespace Tegra::Control

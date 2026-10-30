@@ -7,6 +7,10 @@
 #include <optional>
 #include "common/common_types.h"
 
+namespace Shader::IR {
+class Inst;
+}
+
 namespace Tegra::Control {
 
 using NativeDescriptorWords = std::array<u32, 8>;
@@ -41,5 +45,11 @@ struct NativeSamplerDescriptor {
 
     static std::optional<NativeSamplerDescriptor> Decode(const NativeDescriptorWords& words);
 };
+
+// Only for ordinary sampled-image operations and an independently verified native
+// color image. This selects mip zero; it does not validate image backing/layout.
+bool CanSampleNativeBaseMip(const NativeTextureDescriptor& texture,
+                            const NativeSamplerDescriptor& sampler);
+bool IsNativeBaseMipSample(const Shader::IR::Inst& instruction);
 
 } // namespace Tegra::Control

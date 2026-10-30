@@ -27,6 +27,7 @@
 #include "shader_recompiler/frontend/maxwell/translate_program.h"
 #include "shader_recompiler/ir_opt/passes.h"
 #include "shader_recompiler/program_header.h"
+#include "video_core/control/native_texture_descriptor.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/gpu_logging/gpu_logging.h"
@@ -861,6 +862,12 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                     for (const auto& instruction : block->Instructions()) {
                         const auto opcode = instruction.GetOpcode();
                         if (opcode >= Shader::IR::Opcode::ImageSampleImplicitLod &&
+                            opcode <= Shader::IR::Opcode::ImageGradient) {
+                            if (!Tegra::Control::IsNativeBaseMipSample(instruction))
+                                throw Shader::RuntimeError(
+                                    "Unsupported native sampled-image operation");
+                        }
+                        if (opcode >= Shader::IR::Opcode::ImageSampleImplicitLod &&
                             opcode <= Shader::IR::Opcode::ImageQueryLod && reported++ < 8)
                             LOG_DEBUG(HW_GPU,
                                       "Native texture operation: stage={}, opcode={}, flags={:#x}",
@@ -878,14 +885,19 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                               descriptor.is_depth, descriptor.is_multisample,
                               descriptor.is_integer);
                 }
+                for (const auto& descriptor : info.texture_descriptors)
+                    if (descriptor.type != Shader::TextureType::Color2D || descriptor.count != 1 ||
+                        descriptor.shift_left || descriptor.has_secondary || descriptor.is_depth ||
+                        descriptor.is_multisample || descriptor.is_integer)
+                        throw Shader::RuntimeError("Unsupported native sampled-image binding");
             }
             if ((index != 1 && index != 5) || info.uses_global_memory ||
                 !info.storage_buffers_descriptors.empty() ||
                 !info.texture_buffer_descriptors.empty() ||
-                !info.image_buffer_descriptors.empty() || !info.texture_descriptors.empty() ||
-                !info.image_descriptors.empty() || info.requires_layer_emulation ||
-                info.loads_indexed_attributes || info.stores_indexed_attributes ||
-                info.stores_frag_depth || info.stores_sample_mask || info.used_clip_distances)
+                !info.image_buffer_descriptors.empty() || !info.image_descriptors.empty() ||
+                info.requires_layer_emulation || info.loads_indexed_attributes ||
+                info.stores_indexed_attributes || info.stores_frag_depth ||
+                info.stores_sample_mask || info.used_clip_distances)
                 throw Shader::RuntimeError("Unsupported native graphics shader resources");
             for (u32 attribute = 0; attribute < 32; ++attribute)
                 if (index == 1 && info.loads.Generic(attribute) &&

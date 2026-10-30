@@ -2,9 +2,66 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <catch2/catch_test_macros.hpp>
+#include "shader_recompiler/frontend/ir/value.h"
 #include "video_core/control/native_texture_descriptor.h"
 
 using namespace Tegra::Control;
+
+TEST_CASE("Native narrowed views require ordinary normalized base-mip sampling state",
+          "[native-shader]") {
+    NativeDescriptorWords image{};
+    image[0] = 8;
+    for (u32 i = 0; i < 4; ++i)
+        image[0] |= (2U << (7 + 3 * i)) | ((i + 2) << (19 + 3 * i));
+    image[2] = (3U << 21) | (2U << 17);
+    image[3] = 4U << 28;
+    image[4] = 15U | (1U << 22) | (1U << 23);
+    image[5] = 15U | (1U << 31);
+    image[7] = 4U << 4;
+    NativeDescriptorWords state{};
+    state[0] = 2U | (2U << 3) | (2U << 6) | 0x26000;
+    state[1] = 2U | (2U << 4) | (2U << 6) | (3U << 8);
+    const auto texture = NativeTextureDescriptor::Decode(image);
+    const auto sampler = NativeSamplerDescriptor::Decode(state);
+    REQUIRE(texture);
+    REQUIRE(sampler);
+    REQUIRE(CanSampleNativeBaseMip(*texture, *sampler));
+    for (const auto [word, bit] : std::array<std::pair<u32, u32>, 7>{
+             {{1, 5}, {2, 17}, {3, 6}, {4, 22}, {5, 31}, {6, 6}, {7, 0}}}) {
+        auto changed = image;
+        changed[word] ^= 1U << bit;
+        const auto decoded = NativeTextureDescriptor::Decode(changed);
+        REQUIRE(decoded);
+        REQUIRE_FALSE(CanSampleNativeBaseMip(*decoded, *sampler));
+    }
+    for (const auto [word, bit] : std::array<std::pair<u32, u32>, 8>{
+             {{0, 9}, {0, 13}, {0, 20}, {1, 3}, {1, 10}, {1, 12}, {1, 25}, {2, 12}}}) {
+        auto changed = state;
+        changed[word] ^= 1U << bit;
+        const auto decoded = NativeSamplerDescriptor::Decode(changed);
+        REQUIRE(decoded);
+        REQUIRE_FALSE(CanSampleNativeBaseMip(*texture, *decoded));
+    }
+}
+
+TEST_CASE("Native selected-mip samples reject offsets and level-observing operations",
+          "[native-shader]") {
+    using Op = Shader::IR::Opcode;
+    for (Op opcode : {Op::ImageSampleImplicitLod, Op::ImageSampleExplicitLod}) {
+        Shader::IR::Inst sample{opcode, 0x20000};
+        REQUIRE(IsNativeBaseMipSample(sample));
+        sample.SetArg(3, Shader::IR::Value{u32{0}});
+        REQUIRE_FALSE(IsNativeBaseMipSample(sample));
+        sample.ClearArgs();
+        sample.SetFlags(u32{0x120000});
+        REQUIRE_FALSE(IsNativeBaseMipSample(sample));
+    }
+    for (Op opcode : {Op::ImageFetch, Op::ImageQueryDimensions, Op::ImageQueryLod, Op::ImageGather,
+                      Op::ImageGradient}) {
+        Shader::IR::Inst operation{opcode, 0x20000};
+        REQUIRE_FALSE(IsNativeBaseMipSample(operation));
+    }
+}
 
 TEST_CASE("Native descriptor pools check only the requested inclusive slot",
           "[ipc][native-shader]") {

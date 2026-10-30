@@ -1233,7 +1233,7 @@ ImageId TextureCache<P>::FindOrInsertImage(const ImageInfo& info, GPUVAddr gpu_a
 template <class P>
 std::optional<typename TextureCache<P>::NativeClearTarget>
 TextureCache<P>::PrepareNativeClearTarget(const ImageInfo& info, GPUVAddr address,
-                                          DAddr backing_address) {
+                                          DAddr backing_address, bool existing_only) {
     if (info.layout != Tegra::Texture::BlockLinearLayout::TuringColor2D ||
         (info.format != PixelFormat::B10G11R11_FLOAT &&
          info.format != PixelFormat::A8B8G8R8_SRGB) ||
@@ -1270,6 +1270,8 @@ TextureCache<P>::PrepareNativeClearTarget(const ImageInfo& info, GPUVAddr addres
     });
     if (incompatible)
         return std::nullopt;
+    if (!id && existing_only)
+        return std::nullopt;
     if (!id)
         id = InsertImage(info, address, RelaxedOptions{});
     if (!id || !exact(slot_images[id]))
@@ -1279,7 +1281,7 @@ TextureCache<P>::PrepareNativeClearTarget(const ImageInfo& info, GPUVAddr addres
     if (!framebuffer_id || !view_id)
         return std::nullopt;
     PrepareImage(id, false, false);
-    return NativeClearTarget{&slot_framebuffers[framebuffer_id], id};
+    return NativeClearTarget{&slot_framebuffers[framebuffer_id], id, view_id};
 }
 
 template <class P>

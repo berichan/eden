@@ -992,6 +992,8 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
                            {x2 > x0 ? x2 - x0 : 0, y2 > y0 ? y2 - y0 : 0}};
 
     auto lease = gpu_memory->AcquireMappingLease();
+    // Failure drains must precede destruction of samplers referenced by a prefix.
+    std::vector<vk::Sampler> native_samplers;
     bool work_drained{};
     SCOPE_EXIT {
         if (!work_drained) {
@@ -1195,6 +1197,14 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
         return reject("native fragment depth reads require a pixel-clamp adapter");
     std::array<std::array<std::vector<u8>, 18>, 5> constants;
     std::vector<GraphicsPipeline::NativeUniformBuffer> uniforms;
+    struct SampledRequest {
+        u32 stage, index;
+        GPUVAddr address;
+        DAddr backing;
+        VideoCommon::ImageInfo info;
+        VkSampler sampler;
+    };
+    std::vector<SampledRequest> sampled_requests;
     for (u32 stage = 0; stage < 5; ++stage) {
         const auto& shader = pipeline->NativeStageInfo(stage);
         if (shader.uses_render_area && (!regs.surface_clip.width || !regs.surface_clip.height))
@@ -1210,6 +1220,86 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
                 !snapshot(binding.address, size, constants[stage][descriptor.index]))
                 return reject("native uniform backing, bounds or coherence");
             uniforms.push_back({stage, descriptor.index, constants[stage][descriptor.index]});
+        }
+        for (u32 i = 0; i < shader.texture_descriptors.size(); ++i) {
+            if (stop_token.stop_requested())
+                return false;
+            if ((stage != 0 && stage != 4) || sampled_requests.size() >= 64)
+                return reject("unsupported native texture stage or count");
+            const auto& descriptor = shader.texture_descriptors[i];
+            if (descriptor.count != 1 || descriptor.shift_left || descriptor.has_secondary ||
+                descriptor.is_depth || descriptor.is_multisample || descriptor.is_integer ||
+                descriptor.type != Shader::TextureType::Color2D)
+                return reject("unsupported native sampled-image descriptor");
+            auto& environment = stage == 0 ? vertex : fragment;
+            const u32 handle =
+                environment.ReadCbufValue(descriptor.cbuf_index, descriptor.cbuf_offset);
+            const auto bindings = environment.NativeTextures();
+            const auto binding = std::ranges::find(
+                bindings, handle, &VideoCommon::GraphicsEnvironment::NativeTextureBinding::handle);
+            if (binding == bindings.end() ||
+                !Tegra::Control::CanSampleNativeBaseMip(binding->texture, binding->sampler))
+                return reject("unsupported native base-mip sampling state");
+            const auto& texture = binding->texture;
+            const auto& sampler = binding->sampler;
+            const u64 pitch = (u64{texture.width} * 4 + 63) & ~u64{63};
+            const u64 tile_height = u64{8} << texture.block_height;
+            const u64 height = (texture.height + tile_height - 1) & ~(tile_height - 1);
+            const u64 size = pitch * height;
+            if (!size || size > SnapshotLimit || texture.address >= (u64{1} << 40) ||
+                size > (u64{1} << 40) - texture.address ||
+                texture.width > limits.maxImageDimension2D ||
+                texture.height > limits.maxImageDimension2D)
+                return reject("unsupported native sampled-image extent");
+            const auto backing = lease.ResolveContiguous(texture.address, size, false);
+            if (!backing ||
+                (*backing < *output + target->size_bytes && *output < *backing + size) ||
+                (texture.address < target->address + target->size_bytes &&
+                 target->address < texture.address + size))
+                return reject("native sampled-image backing or attachment alias");
+            {
+                std::scoped_lock lock{buffer_cache.mutex};
+                if (buffer_cache.IsRegionGpuModified(*backing, size))
+                    return reject("native sampled-image overlaps pending buffer writes");
+            }
+            VkFormatFeatureFlags features = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+            if (sampler.mag_filter == 2 || sampler.min_filter == 2)
+                features |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+            if (!device.IsFormatSupported(VK_FORMAT_A8B8G8R8_SRGB_PACK32, features,
+                                          FormatType::Optimal))
+                return reject("native sampled-image filtering unavailable on host");
+            VideoCommon::ImageInfo sampled;
+            sampled.format = VideoCore::Surface::PixelFormat::A8B8G8R8_SRGB;
+            sampled.type = VideoCommon::ImageType::e2D;
+            sampled.size = {texture.width, texture.height, 1};
+            sampled.block = {0, texture.block_height, 0};
+            sampled.layer_stride = sampled.maybe_unaligned_layer_stride = static_cast<u32>(size);
+            sampled.layout = Tegra::Texture::BlockLinearLayout::TuringColor2D;
+            if (VideoCommon::CalculateGuestSizeInBytes(sampled) != size)
+                return reject("native sampled-image footprint mismatch");
+            native_samplers.push_back(device.GetLogical().CreateSampler(VkSamplerCreateInfo{
+                .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .magFilter = sampler.mag_filter == 1 ? VK_FILTER_NEAREST : VK_FILTER_LINEAR,
+                .minFilter = sampler.min_filter == 1 ? VK_FILTER_NEAREST : VK_FILTER_LINEAR,
+                .mipmapMode = sampler.mip_filter == 3 ? VK_SAMPLER_MIPMAP_MODE_LINEAR
+                                                      : VK_SAMPLER_MIPMAP_MODE_NEAREST,
+                .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                .mipLodBias = 0.f,
+                .anisotropyEnable = VK_FALSE,
+                .maxAnisotropy = 1.f,
+                .compareEnable = VK_FALSE,
+                .compareOp = VK_COMPARE_OP_ALWAYS,
+                .minLod = 0.f,
+                .maxLod = 0.f,
+                .borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,
+                .unnormalizedCoordinates = VK_FALSE,
+            }));
+            sampled_requests.push_back(
+                {stage, i, texture.address, *backing, sampled, *native_samplers.back()});
         }
     }
     {
@@ -1228,13 +1318,46 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
         return reject("native target footprint mismatch");
     const auto record = [&] {
         std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
+        std::vector<GraphicsPipeline::NativeSampledImage> sampled_images;
+        for (const auto& sampled : sampled_requests) {
+            if (stop_token.stop_requested())
+                return false;
+            // The descriptor's opaque registration preset cannot identify a
+            // layout. Only a previously established exact native image may be sampled.
+            const auto source = texture_cache.PrepareNativeClearTarget(
+                sampled.info, sampled.address, sampled.backing, true);
+            if (!source ||
+                buffer_cache.IsRegionGpuModified(
+                    sampled.backing, VideoCommon::CalculateGuestSizeInBytes(sampled.info)))
+                return false;
+            const VkImageView view =
+                texture_cache.GetImageView(source->view_id).Handle(Shader::TextureType::Color2D);
+            if (!view)
+                return false;
+            sampled_images.push_back({sampled.stage, sampled.index, view, sampled.sampler});
+        }
         const auto framebuffer =
             texture_cache.PrepareNativeClearTarget(image, target->address, *output);
+        if (!sampled_images.empty()) {
+            scheduler.RequestOutsideRenderPassOperationContext();
+            scheduler.Record([](vk::CommandBuffer command) {
+                const VkMemoryBarrier barrier{
+                    .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                    .pNext = nullptr,
+                    .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
+                    .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+                };
+                command.PipelineBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                        VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+                                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                        0, barrier);
+            });
+        }
         if (!framebuffer || stop_token.stop_requested() ||
             framebuffer->framebuffer->NumColorBuffers() != 1 ||
             framebuffer->framebuffer->RenderArea().width != target->width ||
             framebuffer->framebuffer->RenderArea().height != target->height ||
-            !pipeline->ConfigureNative(uniforms, framebuffer->framebuffer,
+            !pipeline->ConfigureNative(uniforms, sampled_images, framebuffer->framebuffer,
                                        {static_cast<float>(regs.surface_clip.width),
                                         static_cast<float>(regs.surface_clip.height)}))
             return false;
