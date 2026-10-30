@@ -15,7 +15,10 @@ namespace Shader::Ampere {
 // Bounds describe frozen native bindings. Dynamic/OOB scalar and pair reads
 // require 64-byte aligned bounds. Pairs check natural alignment at execution;
 // invalid pair addresses return zero without accessing an invalid host packet.
-// Unsupported loads throw before the IR is changed.
+// For 64-byte aligned bindings, proved address ranges reduce
+// info.constant_buffer_used_sizes to complete host packets. Declared binding
+// bounds remain unchanged; unknown ranges retain the full binding. Unsupported
+// loads throw before IR or metadata is changed.
 void GuardConstantBufferLoads(IR::Program& program, std::span<const u32> bound_sizes);
 
 } // namespace Shader::Ampere

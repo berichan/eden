@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <unordered_map>
@@ -25,7 +26,7 @@ struct Fixture {
     }
 };
 
-u32 Evaluate(IR::Block& block, u32 input, u32 bound) {
+u32 Evaluate(IR::Block& block, u32 input, u32 bound, u32 upload = 0, u32 bank = 0) {
     std::unordered_map<const IR::Inst*, u32> values;
     const auto read = [&](const IR::Value& value) -> u32 {
         if (!value.IsImmediate()) {
@@ -41,8 +42,26 @@ u32 Evaluate(IR::Block& block, u32 input, u32 bound) {
         const auto arg = [&](size_t index) { return read(instruction.Arg(index)); };
         u32 value{};
         switch (instruction.GetOpcode()) {
+        case IR::Opcode::Phi:
         case IR::Opcode::GetRegister:
             value = input;
+            break;
+        case IR::Opcode::UMin32:
+            value = (std::min)(arg(0), arg(1));
+            break;
+        case IR::Opcode::IAdd32:
+            value = arg(0) + arg(1);
+            break;
+        case IR::Opcode::IMul32:
+            value = arg(0) * arg(1);
+            break;
+        case IR::Opcode::ShiftLeftLogical32:
+            REQUIRE(arg(1) < 32);
+            value = arg(0) << arg(1);
+            break;
+        case IR::Opcode::ShiftRightLogical32:
+            REQUIRE(arg(1) < 32);
+            value = arg(0) >> arg(1);
             break;
         case IR::Opcode::BitwiseAnd32:
             value = arg(0) & arg(1);
@@ -56,11 +75,15 @@ u32 Evaluate(IR::Block& block, u32 input, u32 bound) {
             break;
         case IR::Opcode::GetCbufU32:
         case IR::Opcode::GetCbufF32: {
-            REQUIRE(arg(0) == 0);
+            REQUIRE(arg(0) == bank);
             const u32 offset = arg(1) & ~3U;
             // Evaluate every load, including unused ones. A post-load zero
             // select alone must not conceal an unsafe memory access.
             REQUIRE(offset <= bound - 4);
+            if (upload) {
+                REQUIRE(upload >= 16);
+                REQUIRE((offset & ~15U) <= upload - 16);
+            }
             value = 0x3f000000U + offset;
             break;
         }
@@ -78,7 +101,7 @@ u32 Evaluate(IR::Block& block, u32 input, u32 bound) {
     return result;
 }
 
-std::array<u32, 2> EvaluatePair(IR::Block& block, u32 input, u32 bound) {
+std::array<u32, 2> EvaluatePair(IR::Block& block, u32 input, u32 bound, u32 upload = 0) {
     std::unordered_map<const IR::Inst*, u32> values;
     std::unordered_map<const IR::Inst*, std::array<u32, 2>> pairs;
     const auto read = [&](const IR::Value& value) -> u32 {
@@ -102,6 +125,9 @@ std::array<u32, 2> EvaluatePair(IR::Block& block, u32 input, u32 bound) {
             break;
         case IR::Opcode::GetRegister:
             value = input;
+            break;
+        case IR::Opcode::UMin32:
+            value = (std::min)(arg(0), arg(1));
             break;
         case IR::Opcode::BitwiseAnd32:
             value = arg(0) & arg(1);
@@ -144,6 +170,10 @@ std::array<u32, 2> EvaluatePair(IR::Block& block, u32 input, u32 bound) {
             REQUIRE(offset <= bound - 8);
             // Also model the backend that fetches the containing vec4 packet.
             REQUIRE((offset & ~15U) <= bound - 16);
+            if (upload) {
+                REQUIRE(upload >= 16);
+                REQUIRE((offset & ~15U) <= upload - 16);
+            }
             pairs.emplace(&instruction, std::array{0x3f000000U + offset, 0x40000000U + offset + 4});
             continue;
         }
@@ -311,10 +341,12 @@ TEST_CASE("Native static scalar loads keep proven small bounds and hardware alig
     const auto value = fixture.ir.GetCbuf(fixture.ir.Imm32(0U), fixture.ir.Imm32(3U));
     fixture.ir.Reference(value);
     constexpr std::array<u32, 1> bounds{4};
+    fixture.program.info.constant_buffer_used_sizes[0] = 4;
     const auto count = fixture.block.size();
     GuardConstantBufferLoads(fixture.program, bounds);
     REQUIRE(fixture.block.size() == count);
     REQUIRE(value.Inst()->GetOpcode() == IR::Opcode::GetCbufU32);
+    REQUIRE(fixture.program.info.constant_buffer_used_sizes[0] == 4);
     REQUIRE(Evaluate(fixture.block, 0, 4) == 0x3f000000U);
     Fixture outside;
     outside.ir.Reference(outside.ir.GetCbuf(outside.ir.Imm32(0U), outside.ir.Imm32(4U)));
@@ -381,10 +413,16 @@ TEST_CASE("Native constant-buffer guard validation precedes mutation across bloc
     IR::IREmitter emitter{second};
     emitter.Reference(emitter.GetCbuf(emitter.Imm32(0U), emitter.GetReg(IR::Reg::R0), 16, false));
     const auto count = fixture.block.size();
+    fixture.program.info.constant_buffer_used_sizes.fill(0x1a5);
+    const auto used_sizes = fixture.program.info.constant_buffer_used_sizes;
+    fixture.program.info.native_constant_buffer_sizes.fill(1024);
+    const auto native_sizes = fixture.program.info.native_constant_buffer_sizes;
     constexpr std::array<u32, 1> bounds{1024};
     REQUIRE_THROWS_AS(GuardConstantBufferLoads(fixture.program, bounds), Shader::RuntimeError);
     REQUIRE(fixture.block.size() == count);
     REQUIRE(scalar.Inst()->GetOpcode() == IR::Opcode::GetCbufU32);
+    REQUIRE(fixture.program.info.constant_buffer_used_sizes == used_sizes);
+    REQUIRE(fixture.program.info.native_constant_buffer_sizes == native_sizes);
 }
 
 TEST_CASE("Native aligned pair guards sanitize both words and every fallback packet",
@@ -581,4 +619,161 @@ TEST_CASE("Native pair guard validation is atomic when a later load is unsupport
     REQUIRE_THROWS_AS(GuardConstantBufferLoads(fixture.program, bounds), Shader::RuntimeError);
     REQUIRE(fixture.block.size() == count);
     REQUIRE(pair.Inst()->GetOpcode() == IR::Opcode::GetCbufU32x2);
+}
+
+TEST_CASE("Native driver table clamps prove a small upload without changing the guest bound",
+          "[native-shader]") {
+    Fixture fixture;
+    auto& ir = fixture.ir;
+    // The source stands for an arbitrary word loaded from another bank. The
+    // clamp, not the source's contents, proves the driver table's footprint.
+    const IR::U32 shifted{ir.ShiftRightLogical(ir.GetReg(IR::Reg::R0), ir.Imm32(8U))};
+    const auto masked = ir.BitwiseAnd(Identity(fixture, Identity(fixture, shifted)), ir.Imm32(15U));
+    const auto clamped = ir.UMin(Identity(fixture, Identity(fixture, masked)), ir.Imm32(13U));
+    IR::U32 offset{ir.ShiftLeftLogical(clamped, ir.Imm32(2U))};
+    for (u32 index = 0; index < 3; ++index)
+        offset = Identity(fixture, offset);
+    ir.Reference(ir.GetCbuf(ir.Imm32(1U), offset));
+    constexpr std::array<u32, 2> bounds{64, 65536};
+    fixture.program.info.constant_buffer_used_sizes[1] = 65536;
+    fixture.program.info.native_constant_buffer_sizes[1] = 65536;
+    GuardConstantBufferLoads(fixture.program, bounds);
+    const u32 upload = fixture.program.info.constant_buffer_used_sizes[1];
+    REQUIRE(upload == 64);
+    REQUIRE(fixture.program.info.native_constant_buffer_sizes[1] == 65536);
+    for (u32 index = 0; index < 16; ++index) {
+        for (u32 unused : {0U, 0x800000ffU}) {
+            const u32 input = (index << 8) | unused;
+            const u32 address = (std::min)(index, 13U) * 4;
+            REQUIRE(Evaluate(fixture.block, input, bounds[1], upload, 1) == 0x3f000000U + address);
+        }
+    }
+    for (u32 input : {0x80000000U, 0xfffffff0U, 0xffffffffU}) {
+        const u32 address = (std::min)((input >> 8) & 15U, 13U) * 4;
+        REQUIRE(Evaluate(fixture.block, input, bounds[1], upload, 1) == 0x3f000000U + address);
+    }
+}
+
+TEST_CASE("Native upload bounds cover every load across blocks and banks", "[native-shader]") {
+    Fixture fixture;
+    auto& ir = fixture.ir;
+    const auto limited = ir.UMin(ir.GetReg(IR::Reg::R0), ir.Imm32(13U));
+    const IR::U32 offset{ir.ShiftLeftLogical(limited, ir.Imm32(2U))};
+    ir.Reference(ir.GetCbuf(ir.Imm32(0U), offset));
+    ir.Reference(ir.GetCbuf(ir.Imm32(1U), ir.Imm32(0x3cU)));
+    ir.Reference(ir.GetCbuf(ir.Imm32(2U), ir.GetReg(IR::Reg::R0)));
+    IR::Block second{fixture.pool};
+    fixture.program.blocks.push_back(&second);
+    IR::IREmitter other{second};
+    other.Reference(other.GetCbuf(other.Imm32(0U), other.Imm32(0x10cU)));
+    other.Reference(other.GetCbuf(other.Imm32(1U), other.Imm32(0x40U)));
+    constexpr std::array<u32, 3> bounds{65536, 1024, 64};
+    fixture.program.info.constant_buffer_used_sizes.fill(65536);
+    fixture.program.info.native_constant_buffer_sizes.fill(0x1234);
+    const auto native_sizes = fixture.program.info.native_constant_buffer_sizes;
+    GuardConstantBufferLoads(fixture.program, bounds);
+    REQUIRE(fixture.program.info.constant_buffer_used_sizes[0] == 0x110);
+    REQUIRE(fixture.program.info.constant_buffer_used_sizes[1] == 0x50);
+    REQUIRE(fixture.program.info.constant_buffer_used_sizes[2] == 64);
+    REQUIRE(fixture.program.info.constant_buffer_used_sizes[3] == 65536);
+    REQUIRE(fixture.program.info.native_constant_buffer_sizes == native_sizes);
+}
+
+TEST_CASE("Native upload bounds preserve full bindings for unknown and overflowing ranges",
+          "[native-shader]") {
+    constexpr std::array<u32, 1> bounds{65536};
+    for (u32 form = 0; form < 8; ++form) {
+        CAPTURE(form);
+        Fixture fixture;
+        auto& ir = fixture.ir;
+        const auto input = ir.GetReg(IR::Reg::R0);
+        IR::U32 offset{input};
+        switch (form) {
+        case 1:
+            offset =
+                IR::U32{ir.ShiftLeftLogical(ir.UMin(input, ir.Imm32(0x80000000U)), ir.Imm32(1U))};
+            break;
+        case 2:
+            offset = IR::U32{ir.IAdd(ir.UMin(input, ir.Imm32(0xfffffff0U)), ir.Imm32(32U))};
+            break;
+        case 3:
+            offset = ir.IMul(ir.UMin(input, ir.Imm32(0x10000U)), ir.Imm32(0x10000U));
+            break;
+        case 4: {
+            auto& phi = Phi(fixture);
+            phi.AddPhiOperand(&fixture.block, ir.Imm32(0U));
+            phi.AddPhiOperand(&fixture.block, IR::Value{&phi});
+            offset = IR::U32{IR::Value{&phi}};
+            break;
+        }
+        case 5:
+            offset = ir.BitwiseAnd(input, ir.Imm32(15U));
+            for (u32 index = 0; index < 80; ++index)
+                offset = Identity(fixture, offset);
+            break;
+        case 6:
+            offset = ir.BitCast<IR::U32>(ir.BitCast<IR::F32>(input));
+            break;
+        case 7: {
+            const auto tree = [&](auto&& self, u32 depth) -> IR::U32 {
+                if (!depth)
+                    return ir.GetReg(IR::Reg::R0);
+                return IR::U32{ir.IAdd(self(self, depth - 1), self(self, depth - 1))};
+            };
+            offset = tree(tree, 9);
+            break;
+        }
+        default:
+            break;
+        }
+        ir.Reference(ir.GetCbuf(ir.Imm32(0U), offset));
+        fixture.program.info.constant_buffer_used_sizes[0] = 65536;
+        GuardConstantBufferLoads(fixture.program, bounds);
+        REQUIRE(fixture.program.info.constant_buffer_used_sizes[0] == 65536);
+    }
+}
+
+TEST_CASE("Native clamped arithmetic and selects keep all scalar host packets backed",
+          "[native-shader]") {
+    Fixture fixture;
+    auto& ir = fixture.ir;
+    const auto input = ir.GetReg(IR::Reg::R0);
+    const auto left = ir.IMul(ir.UMin(input, ir.Imm32(7U)), ir.Imm32(8U));
+    const IR::U32 right{ir.IAdd(
+        ir.ShiftLeftLogical(ir.BitwiseAnd(input, ir.Imm32(3U)), ir.Imm32(4U)), ir.Imm32(4U))};
+    const IR::U32 offset{ir.Select(ir.ILessThanEqual(input, ir.Imm32(7U), false), left, right)};
+    ir.Reference(ir.GetCbuf(ir.Imm32(0U), offset));
+    constexpr std::array<u32, 1> bounds{65536};
+    GuardConstantBufferLoads(fixture.program, bounds);
+    const u32 upload = fixture.program.info.constant_buffer_used_sizes[0];
+    REQUIRE(upload == 64);
+    for (u32 input_value = 0; input_value < 128; ++input_value) {
+        const u32 address = input_value <= 7 ? input_value * 8 : (input_value & 3) * 16 + 4;
+        REQUIRE(Evaluate(fixture.block, input_value, bounds[0], upload) == 0x3f000000U + address);
+    }
+}
+
+TEST_CASE("Native immediate clamps bound cyclic inputs without assuming an induction invariant",
+          "[native-shader]") {
+    constexpr std::array<u32, 1> bounds{65536};
+    for (bool minimum : {false, true}) {
+        Fixture fixture;
+        auto& ir = fixture.ir;
+        auto& phi = Phi(fixture);
+        phi.AddPhiOperand(&fixture.block, ir.Imm32(0U));
+        phi.AddPhiOperand(&fixture.block, IR::Value{&phi});
+        const IR::U32 input{IR::Value{&phi}};
+        const auto limited =
+            minimum ? ir.UMin(ir.Imm32(7U), input) : ir.BitwiseAnd(ir.Imm32(7U), input);
+        const IR::U32 offset{ir.ShiftLeftLogical(limited, ir.Imm32(3U))};
+        ir.Reference(ir.GetCbuf(ir.Imm32(0U), offset, 64, false));
+        GuardConstantBufferLoads(fixture.program, bounds);
+        const u32 upload = fixture.program.info.constant_buffer_used_sizes[0];
+        REQUIRE(upload == 64);
+        for (u32 value : {0U, 7U, 8U, 63U, 0x80000000U, 0xffffffffU}) {
+            const u32 address = (minimum ? (std::min)(value, 7U) : value & 7U) * 8;
+            REQUIRE(EvaluatePair(fixture.block, value, bounds[0], upload) ==
+                    std::array<u32, 2>{0x3f000000U + address, 0x40000000U + address + 4});
+        }
+    }
 }

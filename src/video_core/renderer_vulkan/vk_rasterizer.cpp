@@ -1093,17 +1093,37 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
         if (!size || size > SnapshotLimit - snapshot_bytes || stop_token.stop_requested())
             return false;
         const auto backing = lease.ResolveContiguous(address, size, false);
-        if (!backing || overlaps_output(*backing, size))
+        if (!backing || overlaps_output(*backing, size)) {
+            const size_t prefix = lease.ContiguousPrefix(address, size, false, stop_token);
+            const size_t next_prefix =
+                prefix < size
+                    ? lease.ContiguousPrefix(address + prefix, size - prefix, false, stop_token)
+                    : 0;
+            LOG_DEBUG(HW_GPU,
+                      "Native snapshot backing rejected: address={:#x}, bytes={:#x}, "
+                      "backed={}, attachment_alias={}, contiguous_prefix={:#x}, next_prefix={:#x}",
+                      address, size, backing.has_value(),
+                      backing && overlaps_output(*backing, size), prefix, next_prefix);
             return false;
+        }
         {
             std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
-            if (buffer_cache.IsRegionGpuModified(*backing, size) ||
-                texture_cache.IsRegionGpuModified(*backing, size))
+            const bool buffer_modified = buffer_cache.IsRegionGpuModified(*backing, size);
+            const bool image_modified = texture_cache.IsRegionGpuModified(*backing, size);
+            if (buffer_modified || image_modified) {
+                LOG_DEBUG(HW_GPU,
+                          "Native snapshot coherence rejected: address={:#x}, bytes={:#x}, "
+                          "buffer_modified={}, image_modified={}",
+                          address, size, buffer_modified, image_modified);
                 return false;
+            }
         }
         bytes.resize(size);
-        if (!lease.ReadBlockChecked(address, bytes))
+        if (!lease.ReadBlockChecked(address, bytes)) {
+            LOG_DEBUG(HW_GPU, "Native snapshot read rejected: address={:#x}, bytes={:#x}", address,
+                      size);
             return false;
+        }
         snapshot_bytes += size;
         return true;
     };

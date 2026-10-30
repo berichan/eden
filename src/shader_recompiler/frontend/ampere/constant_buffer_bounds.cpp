@@ -2,11 +2,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <array>
 #include <bit>
+#include <limits>
 #include <optional>
 #include <unordered_map>
 #include <vector>
 #include <fmt/format.h>
+#include "common/logging.h"
 #include "shader_recompiler/exception.h"
 #include "shader_recompiler/frontend/ampere/constant_buffer_bounds.h"
 #include "shader_recompiler/frontend/ir/ir_emitter.h"
@@ -46,6 +49,83 @@ std::optional<IR::Value> ResolveIdentity(IR::Value value) {
         value = value.Inst()->Arg(0);
     }
     return std::nullopt;
+}
+
+class UnsignedOffsetBound {
+public:
+    u32 Upper(const IR::Value& value, u32 depth = 0) {
+        if (depth >= 64 || value.IsEmpty())
+            return Unknown;
+        if (!value.IsIdentity() && value.IsImmediate())
+            return value.Type() == IR::Type::U32 ? value.U32() : Unknown;
+        const auto* instruction = value.Inst();
+        if (const auto found = bounds.find(instruction); found != bounds.end())
+            return found->second.value_or(Unknown);
+        if (bounds.size() >= 512)
+            return Unknown;
+        // An in-progress node is unknown. In particular, do not assume a phi's
+        // seed bounds later iterations of its recurrence.
+        bounds.emplace(instruction, std::nullopt);
+        const u32 upper = Evaluate(*instruction, depth + 1);
+        bounds[instruction] = upper;
+        return upper;
+    }
+
+private:
+    static constexpr u32 Unknown = std::numeric_limits<u32>::max();
+
+    static std::optional<u32> Immediate(const IR::Value& value) {
+        const auto resolved = ResolveIdentity(value);
+        if (resolved && !resolved->IsEmpty() && resolved->IsImmediate() &&
+            resolved->Type() == IR::Type::U32)
+            return resolved->U32();
+        return std::nullopt;
+    }
+
+    u32 Evaluate(const IR::Inst& instruction, u32 depth) {
+        const auto upper = [&](size_t index) { return Upper(instruction.Arg(index), depth); };
+        switch (instruction.GetOpcode()) {
+        case IR::Opcode::Identity:
+            return upper(0);
+        case IR::Opcode::UMin32:
+        case IR::Opcode::BitwiseAnd32:
+            // Either operation cannot exceed either operand. An immediate
+            // clamp/mask bounds even a cyclic or otherwise opaque input.
+            if (const auto literal = Immediate(instruction.Arg(0)))
+                return *literal;
+            if (const auto literal = Immediate(instruction.Arg(1)))
+                return *literal;
+            return (std::min)(upper(0), upper(1));
+        case IR::Opcode::ShiftLeftLogical32: {
+            const auto shift = Immediate(instruction.Arg(1));
+            if (!shift || *shift >= 32)
+                return Unknown;
+            const u32 source = upper(0);
+            return source <= (Unknown >> *shift) ? source << *shift : Unknown;
+        }
+        case IR::Opcode::IAdd32: {
+            const u64 sum = u64{upper(0)} + upper(1);
+            return sum <= Unknown ? static_cast<u32>(sum) : Unknown;
+        }
+        case IR::Opcode::IMul32: {
+            const u64 product = u64{upper(0)} * upper(1);
+            return product <= Unknown ? static_cast<u32>(product) : Unknown;
+        }
+        case IR::Opcode::SelectU32:
+            return (std::max)(upper(1), upper(2));
+        default:
+            return Unknown;
+        }
+    }
+
+    std::unordered_map<const IR::Inst*, std::optional<u32>> bounds;
+};
+
+u32 UploadPrefix(u32 upper, u32 width, u32 bound) {
+    // Guards can only read zero or an in-range address. Include the containing
+    // vec4 packet even on hosts that implement the load with scalar accesses.
+    const u32 last = (std::min)(upper, bound - width) & ~(width - 1);
+    return (last + width + 15) & ~15U;
 }
 
 std::string DescribeOffset(const IR::Value& value) {
@@ -89,6 +169,10 @@ std::string DescribeOffset(const IR::Value& value) {
 
 void GuardConstantBufferLoads(IR::Program& program, std::span<const u32> bound_sizes) {
     std::vector<GuardedLoad> guarded;
+    UnsignedOffsetBound offset_bound;
+    std::array<u32, Info::MAX_CBUFS> used_sizes{};
+    std::array<bool, Info::MAX_CBUFS> touched{};
+    u32 reported_driver_offsets{};
     for (IR::Block* block : program.blocks) {
         for (auto& instruction : block->Instructions()) {
             const auto opcode = instruction.GetOpcode();
@@ -117,24 +201,37 @@ void GuardConstantBufferLoads(IR::Program& program, std::span<const u32> bound_s
                 if (immediate && resolved->U32() % width == 0 && size >= width &&
                     resolved->U32() <= size - width && size >= 16 &&
                     (resolved->U32() & ~15U) <= size - 16) {
-                    continue;
-                }
-                if (opcode != IR::Opcode::GetCbufU32x2 || size % 64) {
+                    // This static load needs no address guard.
+                } else if (opcode != IR::Opcode::GetCbufU32x2 || size % 64) {
                     throw RuntimeError("Unsupported native narrow/vector constant-buffer bound: "
                                        "opcode={}, bank={}, bound={:#x}, offset={}",
                                        IR::NameOf(opcode), bank.U32(), size,
                                        DescribeOffset(offset));
+                } else {
+                    guarded.push_back({block, &instruction, size});
                 }
+            } else if (!(offset.IsImmediate() && (offset.U32() & ~3U) <= size - 4)) {
+                if (size % 64)
+                    throw RuntimeError(
+                        "Native dynamic constant-buffer bound is not 64-byte aligned");
                 guarded.push_back({block, &instruction, size});
-                continue;
             }
-            if (offset.IsImmediate() && (offset.U32() & ~3U) <= size - 4) {
-                continue;
+            // Only the aligned native-binding contract admits upload narrowing.
+            // Preserve the existing small static-load contract independently.
+            if (size % 64 == 0) {
+                const u32 prefix = UploadPrefix(offset_bound.Upper(offset), width, size);
+                touched[bank.U32()] = true;
+                used_sizes[bank.U32()] = (std::max)(used_sizes[bank.U32()], prefix);
+                if (bank.U32() == 1 && size == 0x10000 && prefix == size && !offset.IsImmediate() &&
+                    reported_driver_offsets < 8) {
+                    ++reported_driver_offsets;
+                    LOG_DEBUG(HW_GPU,
+                              "Native dynamic driver constant offset: stage={}, opcode={}, "
+                              "bound={:#x}, offset={}",
+                              static_cast<u32>(program.stage), IR::NameOf(opcode), size,
+                              DescribeOffset(offset));
+                }
             }
-            if (size % 64) {
-                throw RuntimeError("Native dynamic constant-buffer bound is not 64-byte aligned");
-            }
-            guarded.push_back({block, &instruction, size});
         }
     }
     // Validate the entire program before mutating it. A later unsupported load
@@ -170,6 +267,10 @@ void GuardConstantBufferLoads(IR::Program& program, std::span<const u32> bound_s
             const auto value = ir.GetCbuf(bank, safe_offset);
             instruction.ReplaceUsesWith(ir.Select(valid, value, ir.Imm32(0U)));
         }
+    }
+    for (u32 bank = 0; bank < used_sizes.size(); ++bank) {
+        if (touched[bank])
+            program.info.constant_buffer_used_sizes[bank] = used_sizes[bank];
     }
 }
 
