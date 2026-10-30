@@ -49,6 +49,37 @@ bool IsNativeVersionSet(u32 method) {
 bool IsNativeConstantBufferBind(u32 method) {
     return method >= 0x904 && method <= 0x924 && (method - 0x904) % 8 == 0;
 }
+
+void LogNativeClearState(const Maxwell3D& engine, u32 argument) {
+    // Raw C797 state describes the target without constructing a legacy image or
+    // touching guest memory. Keep unsupported clears observable before enabling them.
+    const u32 target = (argument >> 6) & 15;
+    if (target >= 8)
+        return;
+    const u32 base = 0x200 + target * 0x10;
+    LOG_DEBUG(HW_GPU,
+              "Native clear target: argument={:#x}, target={}, address={:#x}/{:#x}, "
+              "width={:#x}, height={:#x}, format={:#x}, memory={:#x}, third={:#x}, "
+              "pitch={:#x}, layer={:#x}, state824={:#x}",
+              argument, target, engine.GetRegisterValue(base), engine.GetRegisterValue(base + 1),
+              engine.GetRegisterValue(base + 2), engine.GetRegisterValue(base + 3),
+              engine.GetRegisterValue(base + 4), engine.GetRegisterValue(base + 5),
+              engine.GetRegisterValue(base + 6), engine.GetRegisterValue(base + 7),
+              engine.GetRegisterValue(base + 8), engine.GetRegisterValue(base + 9));
+    LOG_DEBUG(HW_GPU,
+              "Native clear controls: color={:#x}/{:#x}/{:#x}/{:#x}, control={:#x}, "
+              "rect={:#x}/{:#x}, surface_clip={:#x}/{:#x}, scissor={:#x}/{:#x}/{:#x}, "
+              "viewport_clip={:#x}/{:#x}, msaa={:#x}/{:#x}/{:#x}",
+              engine.GetRegisterValue(0x360), engine.GetRegisterValue(0x361),
+              engine.GetRegisterValue(0x362), engine.GetRegisterValue(0x363),
+              engine.GetRegisterValue(0x43e), engine.GetRegisterValue(0x35b),
+              engine.GetRegisterValue(0x35c), engine.GetRegisterValue(0x340),
+              engine.GetRegisterValue(0x341), engine.GetRegisterValue(0x380),
+              engine.GetRegisterValue(0x381), engine.GetRegisterValue(0x382),
+              engine.GetRegisterValue(0x300), engine.GetRegisterValue(0x301),
+              engine.GetRegisterValue(0x3ee), engine.GetRegisterValue(0x54d),
+              engine.GetRegisterValue(0x574));
+}
 } // namespace
 
 Maxwell3D::Maxwell3D(MemoryManager& memory_manager_)
@@ -610,6 +641,8 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
                 }
                 // Native draw/action adapters must opt in before MME can execute those methods.
                 if (!self.engine.IsNativeStateMethod(method)) {
+                    if (method == 0x674)
+                        LogNativeClearState(self.engine, value);
                     LOG_ERROR(HW_GPU,
                               "Unsupported native graphics macro output method={:#x}, value={:#x}",
                               method, value);
@@ -870,6 +903,8 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
             return;
         }
         if (!IsNativeStateMethod(method)) {
+            if (method == 0x674)
+                LogNativeClearState(*this, method_argument);
             native_action_failed = true;
             return;
         }
