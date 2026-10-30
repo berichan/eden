@@ -102,6 +102,17 @@ void LogNativeDrawState(Maxwell3D& engine, MemoryManager& memory, u32 begin,
               engine.GetRegisterValue(0x50e), engine.GetRegisterValue(0x591),
               engine.GetRegisterValue(0x592), engine.GetRegisterValue(0x487),
               engine.GetRegisterValue(0x54e));
+    for (u32 target = 0; target < 8; ++target) {
+        const u32 base = 0x200 + target * 0x10;
+        LOG_DEBUG(HW_GPU,
+                  "Native draw color target: index={}, address={:#x}/{:#x}, extent={}x{}, "
+                  "format={:#x}, memory={:#x}, third={:#x}, pitch={:#x}, layer={:#x}",
+                  target, engine.GetRegisterValue(base), engine.GetRegisterValue(base + 1),
+                  engine.GetRegisterValue(base + 2), engine.GetRegisterValue(base + 3),
+                  engine.GetRegisterValue(base + 4), engine.GetRegisterValue(base + 5),
+                  engine.GetRegisterValue(base + 6), engine.GetRegisterValue(base + 7),
+                  engine.GetRegisterValue(base + 9));
+    }
     // This common indexed-draw shape programs its index state after BEGIN.
     // Report only the bounded, typed candidate, without dumping arbitrary input.
     if (parameters.size() == 5 && parameters[0] == begin && parameters[1] <= 0xff &&
@@ -111,6 +122,10 @@ void LogNativeDrawState(Maxwell3D& engine, MemoryManager& memory, u32 begin,
                   parameters[1], parameters[2], parameters[3], parameters[4]);
     }
     using Header = Shader::Ampere::GraphicsHeader;
+    // Keep diagnostic code and late IR metadata reads in one mapping incarnation.
+    std::optional<MemoryManager::MappingLease> lease;
+    if (inspect_memory)
+        lease.emplace(memory.AcquireMappingLease());
     for (u32 stage = 0; stage < 6 && !stop.stop_requested(); ++stage) {
         const u32 base = 0x800 + stage * 0x10;
         const u32 control = engine.GetRegisterValue(base);
@@ -123,7 +138,7 @@ void LogNativeDrawState(Maxwell3D& engine, MemoryManager& memory, u32 begin,
             continue;
         const GPUVAddr address = (GPUVAddr{upper} << 32) | lower;
         Header::Words words{};
-        if (!memory.ReadBlockChecked(address,
+        if (!lease->ReadBlockChecked(address,
                                      {reinterpret_cast<u8*>(words.data()), sizeof(words)})) {
             LOG_DEBUG(HW_GPU, "Native shader header unreadable: stage={}, address={:#x}", stage,
                       address);
@@ -148,12 +163,23 @@ void LogNativeDrawState(Maxwell3D& engine, MemoryManager& memory, u32 begin,
                   words[3] & 0xffffff, nonzero, extension, static_cast<u32>(decoded.error),
                   decoded.unsupported_words);
         if (decoded.header && (stage == 1 || stage == 5)) {
+            for (u32 index = 0; index < 8 && !stop.stop_requested(); ++index) {
+                std::array<u32, 4> instruction{};
+                if (!lease->ReadBlockChecked(
+                        address + Header::SizeBytes + index * sizeof(instruction),
+                        {reinterpret_cast<u8*>(instruction.data()), sizeof(instruction)}))
+                    break;
+                LOG_DEBUG(
+                    HW_GPU,
+                    "Native shader prefix: stage={}, instruction={}, words={:#x}/{:#x}/{:#x}/{:#x}",
+                    stage, index, instruction[0], instruction[1], instruction[2], instruction[3]);
+            }
             try {
                 VideoCommon::GraphicsEnvironment captured{
                     engine, memory,
                     stage == 1 ? Maxwell3D::Regs::ShaderType::VertexB
                                : Maxwell3D::Regs::ShaderType::Pixel,
-                    VideoCommon::GraphicsEnvironment::NativeProgram{address, stop}};
+                    VideoCommon::GraphicsEnvironment::NativeProgram{address, stop, &*lease}};
                 LOG_DEBUG(HW_GPU,
                           "Native graphics capture: stage={}, source_bytes={}, lowered_bytes={}, "
                           "hash={:#x}",
