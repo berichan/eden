@@ -27,6 +27,15 @@ bool SyncpointManager::IsFixedSyncpoint(u32 id) {
     return id == 0 || id == 12 || id == 26 || id == 27 || id == 54 || id == 55;
 }
 
+std::optional<u32> SyncpointManager::ReadAllocatedHostSyncpoint(u32 id) const {
+    if (id >= NativeSyncpointCount)
+        return std::nullopt;
+    std::scoped_lock lock{allocations->mutex};
+    if (!IsFixedSyncpoint(id) && !allocations->reserved.test(id))
+        return std::nullopt;
+    return syncpoints_host[id].load(std::memory_order_acquire);
+}
+
 bool SyncpointManager::TryReserveSyncpoint(u32 id) {
     if (id >= NativeSyncpointCount || IsFixedSyncpoint(id)) {
         return false;

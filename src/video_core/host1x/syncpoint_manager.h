@@ -51,6 +51,7 @@ public:
     u32 GetHostSyncpointValue(u32 id) const {
         return syncpoints_host[id].load(std::memory_order_acquire);
     }
+    std::optional<u32> ReadAllocatedHostSyncpoint(u32 id) const;
 
     struct RegisteredAction {
         explicit RegisteredAction(u32 expected_value_, std::function<void()>&& action_)

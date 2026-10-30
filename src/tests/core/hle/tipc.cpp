@@ -27,6 +27,7 @@
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/vi/native_layer_pool.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
+#include "video_core/host1x/syncpoint_manager.h"
 #include "video_core/memory_manager.h"
 
 namespace {
@@ -93,7 +94,7 @@ Result Request(Caller& caller, Service::GSV::UserSession& service, u32 command,
 
 std::pair<Result, u64> RequestWords(Caller& caller, Service::ServiceFrameworkBase& service,
                                     u32 command, std::span<const u32> arguments,
-                                    u32 reply_words = 1) {
+                                    u32 reply_words = 1, u32* extra_word = nullptr) {
     std::array<u32_le, IPC::COMMAND_BUFFER_LENGTH> data{};
     size_t offset{};
     IPC::CommandHeader header{};
@@ -112,6 +113,8 @@ std::pair<Result, u64> RequestWords(Caller& caller, Service::ServiceFrameworkBas
     REQUIRE(output.enable_handle_descriptor == 0);
     REQUIRE(output.data_size == reply_words);
     const u64 value = u64{ctx.CommandBuffer()[3]} | (u64{ctx.CommandBuffer()[4]} << 32);
+    if (extra_word)
+        *extra_word = ctx.CommandBuffer()[5];
     return {Result{ctx.CommandBuffer()[2]}, value};
 }
 
@@ -858,6 +861,59 @@ TEST_CASE("Native display registration validates names, notification slots, and 
         REQUIRE(RequestWords(caller, service, command + 1, unregistered_display).first.IsSuccess());
         REQUIRE(RequestWords(caller, service, command + 1, invalid_semaphore).first.IsSuccess());
     }
+}
+
+TEST_CASE("Native syncpoint queries return completed counters with the verified comparison mode",
+          "[core][ipc][gsv]") {
+    Caller caller;
+    Tegra::Host1x::SyncpointManager counters;
+    auto lease = counters.AllocateNativeChannelSyncpoint();
+    REQUIRE(lease.has_value());
+    Service::GSV::SyncptSession service{caller.system, &counters};
+    counters.IncrementHost(lease->GetId());
+    counters.IncrementHost(lease->GetId());
+    counters.IncrementGuest(lease->GetId());
+    u32 mode{0xcccccccc};
+    const std::array<u32, 1> identifier{~lease->GetId()};
+    auto [result, value] = RequestWords(caller, service, 103, identifier, 4, &mode);
+    REQUIRE(result.IsSuccess());
+    REQUIRE(value == 2);
+    REQUIRE(mode == 0);
+    REQUIRE(RequestWords(caller, service, 103, {}, 4).first == Kernel::ResultInvalidSize);
+    const std::array<u32, 2> oversized{identifier[0], 0};
+    REQUIRE(RequestWords(caller, service, 103, oversized, 4).first == Kernel::ResultInvalidSize);
+    {
+        std::array<u32_le, IPC::COMMAND_BUFFER_LENGTH> data{};
+        size_t offset{};
+        IPC::CommandHeader header{};
+        header.type.Assign(static_cast<IPC::CommandType>(119));
+        header.data_size.Assign(1);
+        header.enable_handle_descriptor.Assign(1);
+        Put(data, offset, header);
+        Put(data, offset, IPC::HandleDescriptorHeader{});
+        Put(data, offset, identifier[0]);
+        Service::HLERequestContext ctx{caller.system.Kernel(), caller.process.GetMemory(), nullptr,
+                                       &caller.thread};
+        REQUIRE(ctx.PopulateFromIncomingCommandBuffer(data.data()).IsSuccess());
+        service.InvokeRequestTipc(ctx);
+        REQUIRE(ctx.CommandBuffer()[2] == Kernel::ResultInvalidSize.raw);
+        REQUIRE(ctx.CommandBuffer()[3] == 0);
+        REQUIRE(ctx.CommandBuffer()[4] == 0);
+        REQUIRE(ctx.CommandBuffer()[5] == 0);
+    }
+    for (u32 invalid : {17U, ~448U, ~18U}) {
+        const std::array<u32, 1> id{invalid};
+        const auto rejected = RequestWords(caller, service, 103, id, 4);
+        REQUIRE(rejected.first == Kernel::ResultNotFound);
+        REQUIRE(rejected.second == 0);
+    }
+    REQUIRE(counters.TryReserveSyncpoint(447));
+    counters.IncrementHost(447);
+    const std::array<u32, 1> high_id{~447U};
+    REQUIRE(RequestWords(caller, service, 103, high_id, 4).second == 1);
+    counters.ReleaseSyncpoint(447);
+    lease.reset();
+    REQUIRE(RequestWords(caller, service, 103, identifier, 4).first == Kernel::ResultNotFound);
 }
 
 TEST_CASE("Copied guest objects remain referenced until the IPC reply is released", "[core][ipc]") {

@@ -3,11 +3,13 @@
 
 #include <cstring>
 
+#include "core/core.h"
 #include "core/hle/kernel/k_event.h"
 #include "core/hle/kernel/k_readable_event.h"
 #include "core/hle/kernel/svc_results.h"
 #include "core/hle/service/gsv/syncpt_session.h"
 #include "core/hle/service/ipc_helpers.h"
+#include "video_core/host1x/host1x.h"
 
 namespace Service::GSV {
 namespace {
@@ -30,13 +32,15 @@ void Reply(HLERequestContext& ctx, Result result) {
 
 } // namespace
 
-SyncptSession::SyncptSession(Core::System& system)
-    : ServiceFramework{system, "GsvSyncptSession"}, m_service_context{system, "GsvSyncptSession"} {
+SyncptSession::SyncptSession(Core::System& system, Tegra::Host1x::SyncpointManager* syncpoints)
+    : ServiceFramework{system, "GsvSyncptSession"}, m_service_context{system, "GsvSyncptSession"},
+      m_syncpoints{syncpoints} {
     static const FunctionInfo functions[] = {
         {0, &SyncptSession::Ping, "Ping"},
         {1, &SyncptSession::GetMaxEventCount, "GetMaxEventCount"},
         {21, &SyncptSession::SetEventCount, "SetEventCount"},
         {22, &SyncptSession::CreateEvent, "CreateEvent"},
+        {103, &SyncptSession::QueryCounter, "QueryCounter"},
     };
     RegisterHandlersTipc(functions);
 }
@@ -106,6 +110,36 @@ void SyncptSession::CreateEvent(HLERequestContext& ctx) {
     }();
     IPC::ResponseBuilder rb{ctx, 2, result.IsSuccess() ? 1U : 0U};
     rb.Push(result);
+}
+
+void SyncptSession::QueryCounter(HLERequestContext& ctx) {
+    u64 value{};
+    const auto result = [&]() -> Result {
+        R_UNLESS(HasInputWords(ctx, 1), Kernel::ResultInvalidSize);
+        IPC::CommandHeader header{};
+        std::memcpy(&header, ctx.CommandBuffer(), sizeof(header));
+        R_UNLESS(header.num_buf_a_descriptors == 0 && header.num_buf_b_descriptors == 0 &&
+                     header.num_buf_x_descriptors == 0 && header.num_buf_w_descriptors == 0 &&
+                     header.enable_handle_descriptor == 0 &&
+                     header.buf_c_descriptor_flags ==
+                         IPC::CommandHeader::BufferDescriptorCFlag::Disabled,
+                 Kernel::ResultInvalidSize);
+        IPC::RequestParser rp{ctx};
+        // Native GPU counter identifiers are the bitwise complement of the hardware ID.
+        const u32 id = ~rp.Pop<u32>();
+        R_UNLESS(id < Tegra::Host1x::SyncpointManager::NativeSyncpointCount,
+                 Kernel::ResultNotFound);
+        auto& manager = m_syncpoints ? *m_syncpoints : system.Host1x().GetSyncpointManager();
+        const auto current = manager.ReadAllocatedHostSyncpoint(id);
+        R_UNLESS(current.has_value(), Kernel::ResultNotFound);
+        value = *current;
+        LOG_DEBUG(Service, "Native syncpoint counter queried: id={}, value={}", id, value);
+        R_SUCCEED();
+    }();
+    IPC::ResponseBuilder rb{ctx, 5};
+    rb.Push(result);
+    rb.Push(value);
+    rb.Push<u32>(0); // Native GPU counters use 32-bit circular comparisons.
 }
 
 } // namespace Service::GSV
