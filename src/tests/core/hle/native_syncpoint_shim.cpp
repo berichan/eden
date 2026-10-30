@@ -188,6 +188,8 @@ TEST_CASE("GPU syncpoint mappings reserve a read-only aperture backed by live co
         const u32 attempted = 0xffffffff;
         manager.WriteBlockUnsafe(address, &attempted, sizeof(attempted));
         REQUIRE(manager.Read<u32>(address) == 1);
+        REQUIRE_FALSE(manager.WriteTimestampedReleaseChecked(address, 0xffffffff, 0x12345678));
+        REQUIRE(manager.Read<u32>(address) == 1);
     }
 }
 

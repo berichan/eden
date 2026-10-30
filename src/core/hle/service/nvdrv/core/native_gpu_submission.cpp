@@ -10,6 +10,7 @@
 #include "common/logging.h"
 #include "common/scope_exit.h"
 #include "core/core.h"
+#include "core/core_timing.h"
 #include "core/hle/service/nvdrv/core/native_gpu_error_notifier.h"
 #include "core/hle/service/nvdrv/core/native_gpu_submission.h"
 #include "video_core/control/channel_state.h"
@@ -17,6 +18,7 @@
 #include "video_core/control/native_gpu_context.h"
 #include "video_core/control/native_report_semaphore.h"
 #include "video_core/control/native_semaphore_acquire.h"
+#include "video_core/control/native_semaphore_release.h"
 #include "video_core/gpu.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/syncpoint_shim.h"
@@ -104,7 +106,53 @@ struct NativeGpuChannel::Backend {
             case 0xb:
             case 0xc:
                 break;
-            case 7: { // SEMAPHORED: plain four-byte RELEASE only
+            case 7: { // SEMAPHORED: checked acquire and release forms
+                if (value == 0x100002) {
+                    if (PendingFrontend(context))
+                        return false;
+                    using Release = Tegra::Control::NativeSemaphoreRelease;
+                    struct ReleaseContext {
+                        const Tegra::Control::NativeGpuGraphicsContext& graphics;
+                        VideoCore::RasterizerInterface& rasterizer;
+                        Core::System& system;
+                        std::stop_token token;
+                    } release_context{context, rasterizer, system, stop_token};
+                    const Release::Host host{
+                        &release_context,
+                        [](void* opaque, GPUVAddr address, size_t size) {
+                            return static_cast<ReleaseContext*>(opaque)
+                                ->graphics.GetAddressSpace()
+                                ->IsWritableRange(address, size);
+                        },
+                        [](void* opaque) {
+                            return static_cast<ReleaseContext*>(opaque)
+                                ->rasterizer.SynchronizeNativeWork();
+                        },
+                        [](void* opaque) {
+                            return static_cast<u64>(static_cast<ReleaseContext*>(opaque)
+                                                        ->system.CoreTiming()
+                                                        .GetGlobalTimeNs()
+                                                        .count());
+                        },
+                        [](void* opaque, GPUVAddr address, u32 payload, u64 timestamp) {
+                            auto& self = *static_cast<ReleaseContext*>(opaque);
+                            return self.graphics.GetAddressSpace()->WriteTimestampedReleaseChecked(
+                                address, payload, timestamp, self.token);
+                        },
+                        [](void* opaque) {
+                            return static_cast<ReleaseContext*>(opaque)->token.stop_requested();
+                        },
+                    };
+                    const auto status =
+                        Release::Release(puller[4], puller[5], puller[6], value, host);
+                    if (status != Release::Error::None) {
+                        LOG_ERROR(
+                            HW_GPU,
+                            "Native timestamped release failed: upper={:#x}, lower={:#x}, error={}",
+                            puller[4], puller[5], static_cast<u32>(status));
+                    }
+                    return status == Release::Error::None;
+                }
                 if (value == 0x1004) {
                     if (PendingFrontend(context))
                         return false;

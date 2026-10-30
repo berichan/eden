@@ -42,6 +42,8 @@ add_library(video_core STATIC
     control/native_report_semaphore.h
     control/native_semaphore_acquire.cpp
     control/native_semaphore_acquire.h
+    control/native_semaphore_release.cpp
+    control/native_semaphore_release.h
     control/native_inline_upload.cpp
     control/native_inline_upload.h
     control/native_gpu_context.cpp

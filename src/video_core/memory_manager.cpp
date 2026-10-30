@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <atomic>
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -639,6 +640,26 @@ bool MemoryManager::WriteBlockChecked(GPUVAddr address, std::span<const u8> inpu
         return false;
     }
     WriteBlock(address, input.data(), input.size());
+    return true;
+}
+
+bool MemoryManager::WriteTimestampedReleaseChecked(GPUVAddr address, u32 payload, u64 timestamp,
+                                                   std::stop_token stop_token) {
+    std::scoped_lock lock{mapping_guard};
+    if ((address & 15) || !IsValidAccessRange(address, 16, true) || stop_token.stop_requested()) {
+        return false;
+    }
+    // Keep backing stable while publishing the PBDMA's {payload, zero, timestamp} record.
+    // The timestamp must be visible before the payload advertises completion.
+    std::array<u8, 12> tail{};
+    const u64_le wire_timestamp{timestamp};
+    std::memcpy(tail.data() + 4, &wire_timestamp, sizeof(wire_timestamp));
+    WriteBlock(address + 4, tail.data(), tail.size());
+    if (stop_token.stop_requested())
+        return false;
+    std::atomic_thread_fence(std::memory_order_release);
+    const u32_le wire_payload{payload};
+    WriteBlock(address, &wire_payload, sizeof(wire_payload));
     return true;
 }
 

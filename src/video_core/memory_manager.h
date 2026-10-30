@@ -114,6 +114,8 @@ public:
     // and discard writes; unmapped pages and unsupported register I/O fail without a prefix.
     bool ReadBlockChecked(GPUVAddr address, std::span<u8> output) const;
     bool WriteBlockChecked(GPUVAddr address, std::span<const u8> input);
+    bool WriteTimestampedReleaseChecked(GPUVAddr address, u32 payload, u64 timestamp,
+                                        std::stop_token stop_token = {});
     bool IsReadableRange(GPUVAddr address, size_t size) const;
     bool IsWritableRange(GPUVAddr address, size_t size) const;
     bool ModifyPageKindChecked(GPUVAddr address, size_t size, PTEKind kind);

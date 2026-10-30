@@ -712,6 +712,33 @@ TEST_CASE("GPU pins retain real heap pages until partial unlock or process table
         REQUIRE(alias_view->Read<u32>(va + PageSize) == 0xabcdef01);
 
         {
+            std::array<u8, 48> record;
+            record.fill(0xcc);
+            constexpr auto record_start = va + 0x100;
+            constexpr auto release_address = record_start + 16;
+            REQUIRE(view->WriteBlockChecked(record_start, record));
+            REQUIRE(view->WriteTimestampedReleaseChecked(release_address, 0x11223344,
+                                                         0x0102030405060708ULL));
+            REQUIRE(alias_view->ReadBlockChecked(record_start, record));
+            const std::array<u8, 16> wire{0x44, 0x33, 0x22, 0x11, 0, 0, 0, 0,
+                                          8,    7,    6,    5,    4, 3, 2, 1};
+            REQUIRE(std::equal(wire.begin(), wire.end(), record.begin() + 16));
+            REQUIRE(std::all_of(record.begin(), record.begin() + 16,
+                                [](u8 value) { return value == 0xcc; }));
+            REQUIRE(std::all_of(record.begin() + 32, record.end(),
+                                [](u8 value) { return value == 0xcc; }));
+            const auto before = record;
+            REQUIRE_FALSE(view->WriteTimestampedReleaseChecked(release_address + 4, 0, 0));
+            REQUIRE_FALSE(view->WriteTimestampedReleaseChecked(va + size, 0, 0));
+            std::stop_source stop;
+            stop.request_stop();
+            REQUIRE_FALSE(
+                view->WriteTimestampedReleaseChecked(release_address, 0, 0, stop.get_token()));
+            REQUIRE(view->ReadBlockChecked(record_start, record));
+            REQUIRE(record == before);
+        }
+
+        {
             const auto first_backing = view->GpuToCpuAddress(va);
             const auto second_backing = view->GpuToCpuAddress(va + PageSize);
             const auto generation = view->MappingGeneration();
