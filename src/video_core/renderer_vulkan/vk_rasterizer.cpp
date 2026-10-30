@@ -1454,9 +1454,10 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
     const bool has_volume = std::ranges::any_of(sampled_requests, [](const auto& sampled) {
         return sampled.info.type == VideoCommon::ImageType::e3D;
     });
-    const bool record_readbacks = native_draw_readbacks < 32 ||
-                                  (targets->count > 1 && native_mrt_readbacks < 2) ||
-                                  (has_volume && native_volume_readbacks < 2);
+    const bool record_readbacks =
+        native_draw_readbacks < 32 || (targets->count > 1 && native_mrt_readbacks < 2) ||
+        (has_volume && native_volume_readbacks < 2) ||
+        (target->format == Clear::Format::RGBA8Unorm && native_unorm_readbacks < 2);
     std::array<std::vector<u8>, 8> readbacks;
     std::array<u64, 8> before_hashes{};
     if (record_readbacks) {
@@ -1771,6 +1772,8 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
             ++native_mrt_readbacks;
         if (has_volume)
             ++native_volume_readbacks;
+        if (target->format == Clear::Format::RGBA8Unorm)
+            ++native_unorm_readbacks;
     }
     work_drained = true;
     LOG_DEBUG(

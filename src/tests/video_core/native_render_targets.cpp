@@ -74,14 +74,16 @@ TEST_CASE("Native target format identity distinguishes UNORM from sRGB",
     auto registers = ColorRegisters();
     for (auto& target : registers)
         target[4] = 0xd5;
-    const auto targets = Targets::Decode(IdentityControl(8), 0, registers);
-    REQUIRE(targets);
-    for (const auto& target : targets->targets) {
-        REQUIRE(target.color.format == Clear::Format::RGBA8Unorm);
-        REQUIRE(target.registers[4] == 0xd5);
-        REQUIRE(target.color.size_bytes == 0xf0000);
+    for (u32 srgb_write : {0U, 1U}) {
+        const auto targets = Targets::Decode(IdentityControl(8), srgb_write, registers);
+        REQUIRE(targets);
+        for (const auto& target : targets->targets) {
+            REQUIRE(target.color.format == Clear::Format::RGBA8Unorm);
+            REQUIRE(target.registers[4] == 0xd5);
+            REQUIRE(target.color.size_bytes == 0xf0000);
+        }
     }
-    REQUIRE_FALSE(Targets::Decode(IdentityControl(8), 1, registers));
+    REQUIRE_FALSE(Targets::Decode(IdentityControl(8), 2, registers));
     registers[1][4] = 0xd6;
     REQUIRE_FALSE(Targets::Decode(IdentityControl(8), 1, registers));
     registers[1][4] = 0xe0;

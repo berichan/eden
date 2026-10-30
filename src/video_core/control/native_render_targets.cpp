@@ -36,8 +36,7 @@ std::optional<NativeRenderTargets> NativeRenderTargets::Decode(u32 control, u32 
             clear_registers.target[5] = 0;
         }
         const auto color = NativeColorClear::Decode(clear_registers);
-        if (!color || (color->format == NativeColorClear::Format::RGBA8Srgb && srgb_write != 1) ||
-            (color->format == NativeColorClear::Format::RGBA8Unorm && srgb_write != 0)) {
+        if (!color || (color->format == NativeColorClear::Format::RGBA8Srgb && srgb_write != 1)) {
             return std::nullopt;
         }
         const u32 padded_size = single_gob_volume ? 512U << block_depth : color->size_bytes;

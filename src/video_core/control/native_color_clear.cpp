@@ -24,12 +24,10 @@ std::optional<NativeColorClear> NativeColorClear::Decode(const Registers& regs) 
                         : regs.target[4] == 0xd6 ? Format::RGBA8Srgb
                                                  : Format::RGBA8Unorm;
     if (format == Format::RGBA8Unorm) {
-        // The effect of enabling SRGB_WRITE on a linear target is unresolved.
-        // RGB endpoints are invariant under either encoding; alpha is linear.
-        if (regs.srgb_write > 1 ||
-            (regs.srgb_write == 1 &&
-             !std::all_of(regs.color.begin(), regs.color.begin() + 3,
-                          [](u32 value) { return value == 0 || value == 0x3f800000; })))
+        // Follow the format-driven NVIDIA/NIL target mapping: D5 is linear
+        // UNORM and D6 is sRGB. Enabling writes does not select a different
+        // encoding for a linear attachment.
+        if (regs.srgb_write > 1)
             return std::nullopt;
     }
     if (format == Format::RGBA8Srgb) {

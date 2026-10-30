@@ -291,11 +291,13 @@ TEST_CASE("Native UNORM clears preserve the captured format and clipping state",
     REQUIRE(partial->extent_x == 12);
     REQUIRE(partial->extent_y == 12);
     regs.color = {0x3f000000, 0x3e800000, 0x3f400000, 0x3f000000};
-    REQUIRE_FALSE(Clear::Decode(regs));
-    regs.srgb_write = 0;
-    const auto linear = Clear::Decode(regs);
-    REQUIRE(linear);
-    REQUIRE(linear->color == regs.color);
+    for (u32 srgb_write : {0U, 1U}) {
+        regs.srgb_write = srgb_write;
+        const auto linear = Clear::Decode(regs);
+        REQUIRE(linear);
+        REQUIRE(linear->format == Clear::Format::RGBA8Unorm);
+        REQUIRE(linear->color == regs.color);
+    }
     regs.srgb_write = 1;
     regs.color = {0x3f800000, 0, 0x3f800000, 0x3f000000};
     const auto endpoints = Clear::Decode(regs);
