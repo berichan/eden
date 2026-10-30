@@ -410,8 +410,13 @@ void RasterizerVulkan::DrawTexture() {
 
 bool RasterizerVulkan::ClearNativeColor(const Tegra::Control::NativeColorClear& clear,
                                         std::stop_token stop_token) {
-    if (stop_token.stop_requested() || !gpu_memory)
+    const auto reject = [&](std::string_view reason) {
+        LOG_ERROR(HW_GPU, "Native color clear rejected: {}, address={:#x}, extent={}x{}", reason,
+                  clear.address, clear.width, clear.height);
         return false;
+    };
+    if (stop_token.stop_requested() || !gpu_memory)
+        return reject("cancelled or missing address space");
     if (clear.Empty())
         return true;
     VideoCore::Surface::PixelFormat format;
@@ -425,8 +430,12 @@ bool RasterizerVulkan::ClearNativeColor(const Tegra::Control::NativeColorClear& 
         format = VideoCore::Surface::PixelFormat::A8B8G8R8_SRGB;
         host_format = VK_FORMAT_A8B8G8R8_SRGB_PACK32;
         break;
+    case Tegra::Control::NativeColorClear::Format::RGBA8Unorm:
+        format = VideoCore::Surface::PixelFormat::A8B8G8R8_UNORM;
+        host_format = VK_FORMAT_A8B8G8R8_UNORM_PACK32;
+        break;
     default:
-        return false;
+        return reject("unsupported target format");
     }
     const auto image_format =
         MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, false, format);
@@ -440,24 +449,32 @@ bool RasterizerVulkan::ClearNativeColor(const Tegra::Control::NativeColorClear& 
     // fallback (e.g. packed float to RGBA16F) requires an explicit converter.
     if (!image_format.attachable || image_format.format != host_format ||
         view_format.format != host_format ||
-        !device.IsFormatSupported(host_format, required_features, FormatType::Optimal))
-        return false;
+        !device.IsFormatSupported(host_format, required_features, FormatType::Optimal)) {
+        LOG_DEBUG(HW_GPU,
+                  "Native clear host format: expected={}, image={}, view={}, attachable={}, "
+                  "features={:#x}",
+                  static_cast<u32>(host_format), static_cast<u32>(image_format.format),
+                  static_cast<u32>(view_format.format), image_format.attachable, required_features);
+        return reject("host format unavailable or substituted");
+    }
     const auto limit = device.GetPhysical().GetProperties().limits.maxImageDimension2D;
     if (clear.width > limit || clear.height > limit)
-        return false;
+        return reject("host image extent limit");
     FlushWork();
+    // A target may reuse an allocation with a different format. Retire its old
+    // image and views only after all previous host reads and writes complete.
+    scheduler.Finish();
     gpu_memory->FlushCaching();
     auto lease = gpu_memory->AcquireMappingLease();
     const auto backing = lease.ResolveContiguous(clear.address, clear.size_bytes, true);
     if (!backing || stop_token.stop_requested())
-        return false;
+        return reject("target backing or cancellation");
     {
         std::scoped_lock lock{buffer_cache.mutex};
         // Partial clears preserve the previous pixels. The initial native image
         // adapter cannot merge dirty SSBO contents into a cached image yet.
         if (buffer_cache.IsRegionGpuModified(*backing, clear.size_bytes)) {
-            LOG_ERROR(HW_GPU, "Native clear overlaps pending buffer writes");
-            return false;
+            return reject("target overlaps pending buffer writes");
         }
     }
     VideoCommon::ImageInfo info;
@@ -469,16 +486,17 @@ bool RasterizerVulkan::ClearNativeColor(const Tegra::Control::NativeColorClear& 
     info.maybe_unaligned_layer_stride = clear.size_bytes;
     info.layout = Tegra::Texture::BlockLinearLayout::TuringColor2D;
     if (VideoCommon::CalculateGuestSizeInBytes(info) != clear.size_bytes)
-        return false;
+        return reject("target footprint mismatch");
     const auto record_clear = [&] {
         std::scoped_lock lock{texture_cache.mutex};
-        const auto target = texture_cache.PrepareNativeClearTarget(info, clear.address, *backing);
+        const auto target = texture_cache.PrepareNativeClearTarget(info, clear.address, *backing,
+                                                                   false, false, true);
         if (!target || stop_token.stop_requested() ||
             target->framebuffer->RenderArea().width != clear.width ||
             target->framebuffer->RenderArea().height != clear.height ||
             target->framebuffer->NumColorBuffers() != 1 ||
             !target->framebuffer->HasAspectColorBit(0))
-            return false;
+            return reject("cached target preparation, extent or cancellation");
         VkClearValue value{};
         std::memcpy(value.color.uint32, clear.color.data(), sizeof(value.color.uint32));
         const VkClearRect rect{
@@ -934,12 +952,24 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
     const auto* target = &targets->targets[0].color;
     if (read(0x980) > 1 || (target->format == Clear::Format::B10G11R11Float && read(0x980)))
         return reject("unsupported native floating-point color clamp");
-    const auto format = target->format == Clear::Format::RGBA8Srgb
-                            ? VideoCore::Surface::PixelFormat::A8B8G8R8_SRGB
-                            : VideoCore::Surface::PixelFormat::B10G11R11_FLOAT;
-    const VkFormat host_format = target->format == Clear::Format::RGBA8Srgb
-                                     ? VK_FORMAT_A8B8G8R8_SRGB_PACK32
-                                     : VK_FORMAT_B10G11R11_UFLOAT_PACK32;
+    VideoCore::Surface::PixelFormat format;
+    VkFormat host_format;
+    switch (target->format) {
+    case Clear::Format::B10G11R11Float:
+        format = VideoCore::Surface::PixelFormat::B10G11R11_FLOAT;
+        host_format = VK_FORMAT_B10G11R11_UFLOAT_PACK32;
+        break;
+    case Clear::Format::RGBA8Srgb:
+        format = VideoCore::Surface::PixelFormat::A8B8G8R8_SRGB;
+        host_format = VK_FORMAT_A8B8G8R8_SRGB_PACK32;
+        break;
+    case Clear::Format::RGBA8Unorm:
+        format = VideoCore::Surface::PixelFormat::A8B8G8R8_UNORM;
+        host_format = VK_FORMAT_A8B8G8R8_UNORM_PACK32;
+        break;
+    default:
+        return reject("unsupported native color target format");
+    }
     const auto surface_format =
         MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, false, format);
     const auto view_format = MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, true, format);

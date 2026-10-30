@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <limits>
 #include <numeric>
 #include <optional>
 #include <span>
@@ -24,6 +25,7 @@
 #include "common/scratch_buffer.h"
 #include "common/settings.h"
 #include "video_core/compatible_formats.h"
+#include "video_core/control/native_texture_descriptor.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/guest_memory.h"
 #include "video_core/memory_manager.h"
@@ -40,6 +42,23 @@
 namespace VideoCommon {
 
 namespace {
+
+std::optional<u32> NativeColorTargetSize(const ImageInfo& info) {
+    if ((info.format != PixelFormat::B10G11R11_FLOAT && info.format != PixelFormat::A8B8G8R8_SRGB &&
+         info.format != PixelFormat::A8B8G8R8_UNORM) ||
+        info.type != ImageType::e2D || info.resources.levels != 1 || info.resources.layers != 1 ||
+        info.num_samples != 1 || !info.size.width || !info.size.height || info.size.depth != 1 ||
+        info.block.width || info.block.height > 5 || info.block.depth || info.tile_width_spacing ||
+        info.layout != Tegra::Texture::BlockLinearLayout::TuringColor2D || info.rescaleable ||
+        info.is_sparse)
+        return std::nullopt;
+    const u64 pitch = (u64{info.size.width} * 4 + 63) & ~u64{63};
+    const u64 tile_height = u64{8} << info.block.height;
+    const u64 rows = (u64{info.size.height} + tile_height - 1) & ~(tile_height - 1);
+    if (pitch > (std::numeric_limits<u32>::max)() / rows)
+        return std::nullopt;
+    return static_cast<u32>(pitch * rows);
+}
 
 using Tegra::Texture::GOB_SIZE;
 using Tegra::Texture::GOB_SIZE_SHIFT;
@@ -590,6 +609,47 @@ u32 CalculateGuestSizeInBytes(const ImageInfo& info) noexcept {
     } else {
         return CalculateLayerSize(info);
     }
+}
+
+bool IsNativeColorTargetImage(const ImageInfo& info, const ImageBase& image, GPUVAddr address,
+                              DAddr backing_address, bool allow_pitch_padding) {
+    const auto size = NativeColorTargetSize(info);
+    const auto existing_size = NativeColorTargetSize(image.info);
+    constexpr u64 AddressLimit = u64{1} << 40;
+    if (!size || existing_size != size || address >= AddressLimit ||
+        *size > AddressLimit - address ||
+        *size > (std::numeric_limits<DAddr>::max)() - backing_address)
+        return false;
+    const auto& existing = image.info;
+    return image.gpu_addr == address && image.cpu_addr == backing_address &&
+           image.cpu_addr_end == backing_address + *size && image.guest_size_bytes == *size &&
+           existing.format == info.format && existing.type == info.type &&
+           existing.resources == info.resources &&
+           (existing.size.width == info.size.width ||
+            (allow_pitch_padding &&
+             Tegra::Control::NativeColorPitchMatches(info.size.width, existing.size.width))) &&
+           existing.size.height == info.size.height && existing.size.depth == info.size.depth &&
+           existing.block.width == info.block.width && existing.block.height == info.block.height &&
+           existing.block.depth == info.block.depth && existing.layer_stride == info.layer_stride &&
+           existing.maybe_unaligned_layer_stride == info.maybe_unaligned_layer_stride &&
+           image.aliased_images.empty() &&
+           False(image.flags &
+                 (ImageFlagBits::Remapped | ImageFlagBits::Rescaled | ImageFlagBits::Sparse |
+                  ImageFlagBits::Converted | ImageFlagBits::AcceleratedUpload |
+                  ImageFlagBits::AsynchronousDecode | ImageFlagBits::IsDecoding |
+                  ImageFlagBits::Alias));
+}
+
+bool CanReformatNativeColorTargetImage(const ImageInfo& info, const ImageBase& image,
+                                       GPUVAddr address, DAddr backing_address) {
+    if (info.format == image.info.format || !NativeColorTargetSize(info) ||
+        !image.overlapping_images.empty() ||
+        True(image.flags &
+             (ImageFlagBits::GpuModified | ImageFlagBits::BadOverlap | ImageFlagBits::Alias)))
+        return false;
+    auto existing_format = info;
+    existing_format.format = image.info.format;
+    return IsNativeColorTargetImage(existing_format, image, address, backing_address);
 }
 
 u32 CalculateUnswizzledSizeBytes(const ImageInfo& info) noexcept {

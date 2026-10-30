@@ -32,6 +32,13 @@ struct OverlapResult {
 
 [[nodiscard]] u32 CalculateGuestSizeInBytes(const ImageInfo& info) noexcept;
 
+[[nodiscard]] bool IsNativeColorTargetImage(const ImageInfo& info, const ImageBase& image,
+                                            GPUVAddr address, DAddr backing_address,
+                                            bool allow_pitch_padding = false);
+
+[[nodiscard]] bool CanReformatNativeColorTargetImage(const ImageInfo& info, const ImageBase& image,
+                                                     GPUVAddr address, DAddr backing_address);
+
 [[nodiscard]] u32 CalculateUnswizzledSizeBytes(const ImageInfo& info) noexcept;
 
 [[nodiscard]] u32 CalculateConvertedSizeBytes(const ImageInfo& info) noexcept;

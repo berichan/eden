@@ -39,6 +39,16 @@ u32 NativeOffset(u32 x, u32 y, u32 pitch_gobs, u32 block_height) {
            (x / 64) * (512U << block_height) + ((y % block_rows) / 8) * 512 + (x & 15) +
            ((y & 3) << 4) + ((x & 16) << 2) + ((y & 4) << 5) + ((x & 32) << 3);
 }
+
+VideoCommon::ImageInfo NativeTargetInfo(VideoCore::Surface::PixelFormat format) {
+    VideoCommon::ImageInfo info;
+    info.format = format;
+    info.type = VideoCommon::ImageType::e2D;
+    info.size = {16, 8, 1};
+    info.layer_stride = info.maybe_unaligned_layer_stride = 512;
+    info.layout = Layout::TuringColor2D;
+    return info;
+}
 } // namespace
 
 TEST_CASE("Native ASTC color sectors decode clipped edge blocks", "[native-shader]") {
@@ -113,7 +123,7 @@ TEST_CASE("Native clear rejects unsupported surfaces and overflowing allocations
                                                                           {3, 0},
                                                                           {2, 0x10000000},
                                                                           {3, 0x20000},
-                                                                          {4, 0xd5},
+                                                                          {4, 0xd7},
                                                                           {5, 0x41},
                                                                           {5, 0x60},
                                                                           {5, 0x1040},
@@ -244,8 +254,53 @@ TEST_CASE("Native sRGB clears preserve float colors and guard unresolved convers
     regs.srgb_write = 2;
     REQUIRE_FALSE(Clear::Decode(regs));
     regs.srgb_write = 1;
-    regs.target[4] = 0xd5;
+    regs.target[4] = 0xd7;
     REQUIRE_FALSE(Clear::Decode(regs));
+}
+
+TEST_CASE("Native UNORM clears preserve the captured format and clipping state",
+          "[ipc][video_core]") {
+    auto regs = Registers();
+    regs.target[0] = 0x81;
+    regs.target[1] = 0x0fa00000;
+    regs.target[4] = 0xd5;
+    regs.color = {};
+    for (u32 srgb_write : {0U, 1U}) {
+        regs.srgb_write = srgb_write;
+        const auto clear = Clear::Decode(regs);
+        REQUIRE(clear);
+        REQUIRE(clear->format == Clear::Format::RGBA8Unorm);
+        REQUIRE(clear->address == 0x810fa00000ULL);
+        REQUIRE(clear->size_bytes == 0xf00000);
+        REQUIRE(clear->color == regs.color);
+        REQUIRE(clear->x == 0);
+        REQUIRE(clear->y == 0);
+        REQUIRE(clear->extent_x == 2560);
+        REQUIRE(clear->extent_y == 1440);
+    }
+    regs.srgb_write = 2;
+    REQUIRE_FALSE(Clear::Decode(regs));
+    regs.srgb_write = 1;
+    regs.control |= 0x10;
+    regs.rect_x = (19U << 16) | 7;
+    regs.rect_y = (23U << 16) | 11;
+    const auto partial = Clear::Decode(regs);
+    REQUIRE(partial);
+    REQUIRE(partial->x == 7);
+    REQUIRE(partial->y == 11);
+    REQUIRE(partial->extent_x == 12);
+    REQUIRE(partial->extent_y == 12);
+    regs.color = {0x3f000000, 0x3e800000, 0x3f400000, 0x3f000000};
+    REQUIRE_FALSE(Clear::Decode(regs));
+    regs.srgb_write = 0;
+    const auto linear = Clear::Decode(regs);
+    REQUIRE(linear);
+    REQUIRE(linear->color == regs.color);
+    regs.srgb_write = 1;
+    regs.color = {0x3f800000, 0, 0x3f800000, 0x3f000000};
+    const auto endpoints = Clear::Decode(regs);
+    REQUIRE(endpoints);
+    REQUIRE(endpoints->color == regs.color);
 }
 
 TEST_CASE("Texture aliases must agree on native color layout", "[ipc][video_core]") {
@@ -265,6 +320,207 @@ TEST_CASE("Texture aliases must agree on native color layout", "[ipc][video_core
         REQUIRE(VideoCommon::IsSubCopy(legacy, image, 0x100000));
         REQUIRE_FALSE(VideoCommon::IsSubCopy(native, image, 0x100000));
     }
+}
+
+TEST_CASE("Native color target identity and reformatting distinguish all supported format pairs",
+          "[native-shader]") {
+    using namespace VideoCommon;
+    using Format = VideoCore::Surface::PixelFormat;
+    constexpr std::array formats{Format::B10G11R11_FLOAT, Format::A8B8G8R8_SRGB,
+                                 Format::A8B8G8R8_UNORM};
+    constexpr GPUVAddr address = 0x2000100000ULL;
+    constexpr DAddr backing = 0x100000;
+    for (const auto old_format : formats) {
+        for (const auto new_format : formats) {
+            CAPTURE(old_format, new_format);
+            ImageBase image{NativeTargetInfo(old_format), address, backing};
+            const auto requested = NativeTargetInfo(new_format);
+            REQUIRE(IsNativeColorTargetImage(requested, image, address, backing) ==
+                    (old_format == new_format));
+            REQUIRE(CanReformatNativeColorTargetImage(requested, image, address, backing) ==
+                    (old_format != new_format));
+            // CPU backing is authoritative and may be uploaded to the replacement.
+            REQUIRE(True(image.flags & ImageFlagBits::CpuModified));
+            image.flags |= ImageFlagBits::GpuModified;
+            REQUIRE(IsNativeColorTargetImage(requested, image, address, backing) ==
+                    (old_format == new_format));
+            REQUIRE_FALSE(CanReformatNativeColorTargetImage(requested, image, address, backing));
+        }
+    }
+}
+
+TEST_CASE("Native color reformatting rejects aliases overlap and unsafe image states",
+          "[native-shader]") {
+    using namespace VideoCommon;
+    using Format = VideoCore::Surface::PixelFormat;
+    constexpr GPUVAddr address = 0x2000100000ULL;
+    constexpr DAddr backing = 0x100000;
+    const auto old = NativeTargetInfo(Format::B10G11R11_FLOAT);
+    const auto requested = NativeTargetInfo(Format::A8B8G8R8_UNORM);
+    for (const auto flag :
+         {ImageFlagBits::Remapped, ImageFlagBits::Rescaled, ImageFlagBits::Sparse,
+          ImageFlagBits::Converted, ImageFlagBits::AcceleratedUpload,
+          ImageFlagBits::AsynchronousDecode, ImageFlagBits::IsDecoding, ImageFlagBits::Alias}) {
+        CAPTURE(flag);
+        ImageBase image{old, address, backing};
+        image.flags |= flag;
+        REQUIRE_FALSE(IsNativeColorTargetImage(old, image, address, backing));
+        REQUIRE_FALSE(CanReformatNativeColorTargetImage(requested, image, address, backing));
+    }
+    ImageBase alias{old, address, backing};
+    alias.aliased_images.emplace_back();
+    REQUIRE_FALSE(IsNativeColorTargetImage(old, alias, address, backing));
+    REQUIRE_FALSE(CanReformatNativeColorTargetImage(requested, alias, address, backing));
+    ImageBase overlap{old, address, backing};
+    overlap.overlapping_images.emplace_back();
+    REQUIRE(IsNativeColorTargetImage(old, overlap, address, backing));
+    REQUIRE_FALSE(CanReformatNativeColorTargetImage(requested, overlap, address, backing));
+    ImageBase bad_overlap{old, address, backing};
+    bad_overlap.flags |= ImageFlagBits::BadOverlap;
+    REQUIRE_FALSE(CanReformatNativeColorTargetImage(requested, bad_overlap, address, backing));
+}
+
+TEST_CASE("Native color target predicates require canonical matching shapes and strides",
+          "[native-shader]") {
+    using namespace VideoCommon;
+    using Format = VideoCore::Surface::PixelFormat;
+    constexpr GPUVAddr address = 0x2000100000ULL;
+    constexpr DAddr backing = 0x100000;
+    const auto original = NativeTargetInfo(Format::B10G11R11_FLOAT);
+    for (bool change_existing : {false, true}) {
+        for (u32 variant = 0; variant < 23; ++variant) {
+            CAPTURE(change_existing, variant);
+            ImageBase image{original, address, backing};
+            auto requested = original;
+            auto& changed = change_existing ? image.info : requested;
+            switch (variant) {
+            case 0:
+                changed.size.width = 17;
+                break;
+            case 1:
+                changed.size.width = 15;
+                break;
+            case 2:
+                changed.size.height = 7;
+                break;
+            case 3:
+                changed.size.depth = 2;
+                break;
+            case 4:
+                changed.block.width = 1;
+                break;
+            case 5:
+                changed.block.height = 1;
+                break;
+            case 6:
+                changed.block.height = 6;
+                break;
+            case 7:
+                changed.block.depth = 1;
+                break;
+            case 8:
+                changed.resources.levels = 2;
+                break;
+            case 9:
+                changed.resources.layers = 2;
+                break;
+            case 10:
+                changed.num_samples = 2;
+                break;
+            case 11:
+                changed.type = ImageType::e3D;
+                break;
+            case 12:
+                changed.layout = Layout::Tegra;
+                break;
+            case 13:
+                changed.rescaleable = true;
+                break;
+            case 14:
+                changed.is_sparse = true;
+                break;
+            case 15:
+                changed.tile_width_spacing = 1;
+                break;
+            case 16:
+                changed.layer_stride = 1024;
+                break;
+            case 17:
+                changed.maybe_unaligned_layer_stride = 256;
+                break;
+            case 18:
+                changed.format = Format::R8_UNORM;
+                break;
+            case 19:
+                changed.size.width = 0;
+                break;
+            case 20:
+                changed.size.height = 0;
+                break;
+            case 21:
+                changed.size.width = 0xffffffff;
+                break;
+            default:
+                changed.size.height = 0xffffffff;
+                break;
+            }
+            REQUIRE_FALSE(IsNativeColorTargetImage(requested, image, address, backing));
+            if (requested.format == original.format)
+                requested.format = Format::A8B8G8R8_UNORM;
+            REQUIRE_FALSE(CanReformatNativeColorTargetImage(requested, image, address, backing));
+        }
+    }
+    for (u32 variant = 0; variant < 4; ++variant) {
+        ImageBase image{original, address, backing};
+        switch (variant) {
+        case 0:
+            image.gpu_addr += 512;
+            break;
+        case 1:
+            image.cpu_addr += 512;
+            break;
+        case 2:
+            ++image.cpu_addr_end;
+            break;
+        default:
+            image.guest_size_bytes += 512;
+            break;
+        }
+        REQUIRE_FALSE(IsNativeColorTargetImage(original, image, address, backing));
+        auto requested = original;
+        requested.format = Format::A8B8G8R8_UNORM;
+        REQUIRE_FALSE(CanReformatNativeColorTargetImage(requested, image, address, backing));
+    }
+}
+
+TEST_CASE("Native color identity permits only explicit same-pitch source cropping",
+          "[native-shader]") {
+    using namespace VideoCommon;
+    using Format = VideoCore::Surface::PixelFormat;
+    constexpr GPUVAddr address = 0x2000100000ULL;
+    constexpr DAddr backing = 0x100000;
+    auto storage = NativeTargetInfo(Format::B10G11R11_FLOAT);
+    storage.size.width = 48;
+    storage.layer_stride = storage.maybe_unaligned_layer_stride = 1536;
+    ImageBase image{storage, address, backing};
+    auto logical = storage;
+    logical.size.width = 40;
+    REQUIRE_FALSE(IsNativeColorTargetImage(logical, image, address, backing));
+    REQUIRE(IsNativeColorTargetImage(logical, image, address, backing, true));
+    logical.format = Format::A8B8G8R8_UNORM;
+    REQUIRE_FALSE(CanReformatNativeColorTargetImage(logical, image, address, backing));
+    logical = storage;
+    logical.size.width = 49;
+    REQUIRE_FALSE(IsNativeColorTargetImage(logical, image, address, backing, true));
+    logical.size.width = 32;
+    REQUIRE_FALSE(IsNativeColorTargetImage(logical, image, address, backing, true));
+    logical = storage;
+    logical.size.height = 7;
+    REQUIRE_FALSE(IsNativeColorTargetImage(logical, image, address, backing, true));
+    const GPUVAddr boundary = (u64{1} << 40) - 1536;
+    ImageBase last{storage, boundary, backing};
+    REQUIRE(IsNativeColorTargetImage(storage, last, boundary, backing));
+    REQUIRE_FALSE(IsNativeColorTargetImage(storage, last, boundary + 1, backing));
 }
 
 TEST_CASE("Native clear failure cannot retire through the null rasterizer", "[ipc][video_core]") {

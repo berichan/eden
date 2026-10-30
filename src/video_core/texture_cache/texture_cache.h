@@ -1236,45 +1236,60 @@ template <class P>
 std::optional<typename TextureCache<P>::NativeClearTarget>
 TextureCache<P>::PrepareNativeClearTarget(const ImageInfo& info, GPUVAddr address,
                                           DAddr backing_address, bool existing_only,
-                                          bool allow_pitch_padding) {
+                                          bool allow_pitch_padding, bool allow_reformat) {
     if (info.layout != Tegra::Texture::BlockLinearLayout::TuringColor2D ||
         (info.format != PixelFormat::B10G11R11_FLOAT &&
-         info.format != PixelFormat::A8B8G8R8_SRGB) ||
+         info.format != PixelFormat::A8B8G8R8_UNORM && info.format != PixelFormat::A8B8G8R8_SRGB) ||
         info.type != ImageType::e2D || info.resources.levels != 1 || info.resources.layers != 1 ||
         info.num_samples != 1 || info.size.depth != 1 || info.rescaleable || info.is_sparse ||
         gpu_memory->GpuToCpuAddress(address) != std::optional{backing_address})
         return std::nullopt;
     const u32 size = CalculateGuestSizeInBytes(info);
     const auto exact = [&](const Image& image) {
-        const auto& existing = image.info;
-        return image.gpu_addr == address && image.cpu_addr == backing_address &&
-               image.guest_size_bytes == size && existing.format == info.format &&
-               existing.type == info.type && existing.resources == info.resources &&
-               (existing.size.width == info.size.width ||
-                (existing_only && allow_pitch_padding &&
-                 Tegra::Control::NativeColorPitchMatches(info.size.width, existing.size.width))) &&
-               existing.size.height == info.size.height && existing.size.depth == 1 &&
-               existing.num_samples == 1 && existing.block.width == info.block.width &&
-               existing.block.height == info.block.height &&
-               existing.block.depth == info.block.depth &&
-               existing.layer_stride == info.layer_stride && existing.layout == info.layout &&
-               existing.tile_width_spacing == 0 && image.aliased_images.empty() &&
-               False(image.flags &
-                     (ImageFlagBits::Remapped | ImageFlagBits::Rescaled | ImageFlagBits::Sparse |
-                      ImageFlagBits::Converted | ImageFlagBits::AcceleratedUpload |
-                      ImageFlagBits::AsynchronousDecode));
+        return IsNativeColorTargetImage(info, image, address, backing_address,
+                                        existing_only && allow_pitch_padding);
     };
     ImageId id{};
+    bool reformat{};
     bool incompatible{};
     ForEachImageInRegion(backing_address, size, [&](ImageId existing_id, Image& image) {
-        if (!exact(image) || (id && id != existing_id)) {
+        const bool same = exact(image);
+        if ((!same &&
+             (!allow_reformat || existing_only ||
+              !CanReformatNativeColorTargetImage(info, image, address, backing_address))) ||
+            (id && id != existing_id)) {
             incompatible = true;
         } else {
             id = existing_id;
+            reformat = !same;
         }
     });
     if (incompatible)
         return std::nullopt;
+    if (reformat) {
+        auto& previous = slot_images[id];
+        // Clean guest backing is authoritative after the caller drained host
+        // work. Remove every cached view before rebuilding from those bytes.
+        if (gpu_memory->GpuToCpuAddress(address) != std::optional{backing_address} ||
+            !CanReformatNativeColorTargetImage(info, previous, address, backing_address))
+            return std::nullopt;
+        bool registered_here = True(previous.flags & ImageFlagBits::Registered);
+        ForEachGPUPage(address, size, [&](u64 page) {
+            const auto entry = channel_state->gpu_page_table->find(page);
+            if (entry == channel_state->gpu_page_table->end() ||
+                std::ranges::find(entry->second, id) == entry->second.end())
+                registered_here = false;
+        });
+        if (!registered_here)
+            return std::nullopt;
+        LOG_DEBUG(HW_GPU, "Native color target reformat: address={:#x}, old={}, new={}", address,
+                  static_cast<u32>(previous.info.format), static_cast<u32>(info.format));
+        if (True(previous.flags & ImageFlagBits::Tracked))
+            UntrackImage(previous, id);
+        UnregisterImage(id);
+        DeleteImage(id);
+        id = {};
+    }
     if (!id && existing_only)
         return std::nullopt;
     if (!id)

@@ -267,11 +267,11 @@ public:
     };
     // Caller holds the AS mapping lease and cache mutex. Never expand a native
     // target into overlapping images outside the caller's proven backing span.
-    std::optional<NativeClearTarget> PrepareNativeClearTarget(const ImageInfo& info,
-                                                              GPUVAddr address,
-                                                              DAddr backing_address,
-                                                              bool existing_only = false,
-                                                              bool allow_pitch_padding = false);
+    // Reformatting additionally requires completed host work and authoritative
+    // guest backing. It is not permitted by existing-only sampled lookups.
+    std::optional<NativeClearTarget> PrepareNativeClearTarget(
+        const ImageInfo& info, GPUVAddr address, DAddr backing_address, bool existing_only = false,
+        bool allow_pitch_padding = false, bool allow_reformat = false);
 
     struct NativeColorAttachment {
         ImageInfo info;

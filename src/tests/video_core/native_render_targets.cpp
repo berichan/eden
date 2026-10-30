@@ -69,6 +69,25 @@ TEST_CASE("Native render targets preserve regular color footprints",
     }
 }
 
+TEST_CASE("Native target format identity distinguishes UNORM from sRGB",
+          "[native-shader][video_core]") {
+    auto registers = ColorRegisters();
+    for (auto& target : registers)
+        target[4] = 0xd5;
+    const auto targets = Targets::Decode(IdentityControl(8), 0, registers);
+    REQUIRE(targets);
+    for (const auto& target : targets->targets) {
+        REQUIRE(target.color.format == Clear::Format::RGBA8Unorm);
+        REQUIRE(target.registers[4] == 0xd5);
+        REQUIRE(target.color.size_bytes == 0xf0000);
+    }
+    REQUIRE_FALSE(Targets::Decode(IdentityControl(8), 1, registers));
+    registers[1][4] = 0xd6;
+    REQUIRE_FALSE(Targets::Decode(IdentityControl(8), 1, registers));
+    registers[1][4] = 0xe0;
+    REQUIRE_FALSE(Targets::Decode(IdentityControl(8), 1, registers));
+}
+
 TEST_CASE("Native MRT volume slices touch disjoint GOBs despite padded overlap",
           "[native-shader][video_core]") {
     const auto registers = VolumeRegisters();
@@ -130,7 +149,7 @@ TEST_CASE("Native render targets reject unsupported volume shapes and target fie
                                                                          {2, 17},
                                                                          {3, 0},
                                                                          {3, 9},
-                                                                         {4, 0xd5},
+                                                                         {4, 0xd7},
                                                                          {5, 0x10600},
                                                                          {5, 0x11300},
                                                                          {5, 0x10301},

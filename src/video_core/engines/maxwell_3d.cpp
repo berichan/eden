@@ -1045,6 +1045,14 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
             native_action_failed = !clear || override > 2 || HasPendingNativeInlineUpload() ||
                                    HasPendingNativeDraw() || native_instrumentation_pending ||
                                    native_stop_token.stop_requested() || !rasterizer;
+            if (native_action_failed) {
+                LOG_DEBUG(HW_GPU,
+                          "Native clear preflight rejected: decoded={}, override={}, inline={}, "
+                          "draw={}, instrumentation={}, stopped={}, rasterizer={}",
+                          clear.has_value(), override, HasPendingNativeInlineUpload(),
+                          HasPendingNativeDraw(), native_instrumentation_pending,
+                          native_stop_token.stop_requested(), rasterizer != nullptr);
+            }
             if (!native_action_failed && override != 2 && (override == 1 || ShouldExecute()))
                 native_action_failed = !rasterizer->ClearNativeColor(*clear, native_stop_token);
             if (native_action_failed) {
