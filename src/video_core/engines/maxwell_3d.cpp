@@ -636,8 +636,9 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
                 if (NativeVersionRegister(method) || IsNativeVersionSet(method) ||
                     IsNativeConstantBufferBind(method) ||
                     Control::DecodeNativeGraphicsCacheAction(method, value).has_value() ||
-                    method == 0x4e || method == 0x451 || method == 0x674 || method == 0x8c4 ||
-                    method == 0x54 || method == 0x55 || method == 0x6c || method == 0x6d ||
+                    method == 0x4e || method == 0x154 || method == 0x155 || method == 0x556 ||
+                    method == 0x451 || method == 0x674 || method == 0x8c4 || method == 0x54 ||
+                    method == 0x55 || method == 0x6c || method == 0x6d ||
                     (method >= 0x8e4 && method <= 0x8f3)) {
                     self.engine.CallMethod(self.system, method, value, true);
                     return !self.engine.HasNativeMacroFailure();
@@ -662,6 +663,13 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
                 return static_cast<HostContext*>(context)
                     ->engine.native_stop_token.stop_requested();
             },
+            [](void* context, GPUVAddr address, std::span<u32> words) {
+                auto& self = static_cast<HostContext*>(context)->engine;
+                return !self.native_stop_token.stop_requested() &&
+                       self.memory_manager.ReadBlockChecked(
+                           address, {reinterpret_cast<u8*>(words.data()), words.size_bytes()}) &&
+                       !self.native_stop_token.stop_requested();
+            },
         };
         const auto status =
             native_macro_processor->CallMethod(method, method_argument, is_last_call, host);
@@ -675,8 +683,8 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
                           static_cast<u32>(execution.error), execution.entry_point,
                           execution.program_counter, execution.undefined_register);
             }
-            if (status == Control::NativeMacroProcessor::Status::Accepted && method >= 0x45 &&
-                method <= 0x48) {
+            if (status == Control::NativeMacroProcessor::Status::Accepted &&
+                ((method >= 0x45 && method <= 0x48) || method == 0x15d)) {
                 ProcessDirtyRegisters(method, method_argument);
             }
             return;
@@ -697,6 +705,21 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
             // Bit 0 describes shader global stores. A real drain supplies stronger
             // ordering for either value without releasing parked QMD dependencies.
             native_action_failed = method_argument > 1 || !NativeWaitForIdle();
+            return;
+        }
+        if (method == 0x154 || method == 0x155) { // SET_MME_MEM_ADDRESS_A/B
+            native_action_failed =
+                method == 0x154 ? method_argument > 0xff : (method_argument & 3) != 0;
+            if (!native_action_failed)
+                ProcessDirtyRegisters(method, method_argument);
+            return;
+        }
+        if (method == 0x556) { // SET_RENDER_ENABLE_C
+            native_action_failed = method_argument > 1;
+            if (!native_action_failed) {
+                execute_on = method_argument == 1;
+                ProcessDirtyRegisters(method, method_argument);
+            }
             return;
         }
         if (method == 0x674) { // C797 CLEAR_SURFACE

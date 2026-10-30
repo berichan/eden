@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <array>
 #include <span>
 #include <utility>
@@ -529,6 +530,14 @@ struct MethodHost {
     std::vector<std::pair<u32, u32>> writes;
     bool reject_write{};
     bool cancelled{};
+    bool allow_barrier{};
+    bool fail_memory{};
+    bool cancel_in_barrier{};
+    bool change_memory_in_barrier{};
+    u32 barriers{};
+    u32 memory_reads{};
+    GPUVAddr memory_address{0x2100100000ULL};
+    std::vector<u32> memory;
     Processor::Host Bind() {
         return {this,
                 [](void* context, u32 method, u32& value) {
@@ -543,8 +552,24 @@ struct MethodHost {
                     self.writes.emplace_back(method, value);
                     return true;
                 },
-                nullptr,
-                [](void* context) { return static_cast<MethodHost*>(context)->cancelled; }};
+                [](void* context) {
+                    auto& self = *static_cast<MethodHost*>(context);
+                    ++self.barriers;
+                    self.cancelled = self.cancelled || self.cancel_in_barrier;
+                    if (self.change_memory_in_barrier && !self.memory.empty())
+                        self.memory[0] = 0x87654320 + self.barriers;
+                    return self.allow_barrier;
+                },
+                [](void* context) { return static_cast<MethodHost*>(context)->cancelled; },
+                [](void* context, GPUVAddr address, std::span<u32> words) {
+                    auto& self = *static_cast<MethodHost*>(context);
+                    ++self.memory_reads;
+                    if (self.fail_memory || address != self.memory_address ||
+                        words.size() > self.memory.size())
+                        return false;
+                    std::copy_n(self.memory.begin(), words.size(), words.begin());
+                    return true;
+                }};
     }
 };
 std::array<Inst, 3> SumProgram(u32 method) {
@@ -568,7 +593,254 @@ void Upload(Processor& processor, std::span<const Inst> program, MethodHost& hos
     REQUIRE(processor.CallMethod(0x47, slot, true, host.Bind()) == Processor::Status::Accepted);
     REQUIRE(processor.CallMethod(0x48, start, true, host.Bind()) == Processor::Status::Accepted);
 }
+
+std::vector<Inst> FifoProgram(u16 count = 2) {
+    auto address = Method();
+    address.immediate[0] = 0x1154;
+    address.output[0].emit = 3;
+    address.output[1].emit = 4;
+    auto read = Method();
+    read.immediate[0] = 0x158;
+    read.immediate[1] = count;
+    read.output[0].emit = 6;
+    Inst barrier;
+    barrier.alu[0] = {Op::Extended, Z, I, Engine::PairedImmediate};
+    barrier.immediate = {0x1000, 1};
+    auto consume = Method();
+    consume.immediate[0] = 0x1d00;
+    consume.alu[0] = {Op::Add, Z, L0, Z};
+    consume.alu[1] = {Op::Add, Z, L1, Z};
+    consume.output[0].emit = 1;
+    consume.output[1].emit = 2;
+    consume.end_next = true;
+    return {address, read, barrier, consume, Inst{}};
+}
 } // namespace
+
+TEST_CASE("Native macro DMA switches parameter source only at a completed barrier",
+          "[ipc][video_core]") {
+    auto state = std::make_shared<Tegra::Control::AmpereGraphicsState>();
+    Processor processor{state};
+    MethodHost host;
+    host.allow_barrier = true;
+    host.change_memory_in_barrier = true;
+    host.memory = {0x12345678, 0x11223344};
+    Upload(processor, FifoProgram(), host);
+    REQUIRE(processor.CallMethod(0xe0a, 0x21, false, host.Bind()) == Processor::Status::Accepted);
+    REQUIRE(processor.CallMethod(0xe0b, 0x100000, true, host.Bind()) ==
+            Processor::Status::Accepted);
+    REQUIRE(host.barriers == 1);
+    REQUIRE(host.memory_reads == 1);
+    REQUIRE(host.registers[0xd00] == 0x87654321);
+    REQUIRE(host.registers[0xd01] == 0x11223344);
+    REQUIRE(processor.GetExecutionResult().parameters == 4);
+}
+
+TEST_CASE("Native macro DMA failures do not expose staged words", "[ipc][video_core]") {
+    for (u32 failure = 0; failure < 7; ++failure) {
+        auto state = std::make_shared<Tegra::Control::AmpereGraphicsState>();
+        Processor processor{state};
+        MethodHost host;
+        host.allow_barrier = failure != 0;
+        host.fail_memory = failure == 1;
+        host.cancel_in_barrier = failure == 2;
+        host.memory = {0x12345678, 0x11223344};
+        Upload(processor, FifoProgram(), host);
+        REQUIRE(processor.CallMethod(0xe0a, failure == 3 ? 0x100 : 0x21, false, host.Bind()) ==
+                Processor::Status::Accepted);
+        if (failure == 5)
+            REQUIRE(processor.CallMethod(0xe0b, 0x100000, false, host.Bind()) ==
+                    Processor::Status::Accepted);
+        const u32 lower = failure == 4 ? 0x100001 : failure == 6 ? 0x200000 : 0x100000;
+        REQUIRE(processor.CallMethod(0xe0b, lower, true, host.Bind()) == Processor::Status::Failed);
+        REQUIRE(host.registers[0xd00] == 0);
+        REQUIRE(host.registers[0xd01] == 0);
+        REQUIRE(processor.GetError() == Processor::Error::ExecutionFailed);
+        REQUIRE(host.memory_reads == (failure == 1 || failure == 6 ? 1U : 0U));
+    }
+}
+
+TEST_CASE("Native macro DMA bounds FIFO state and rejects unfinished transfers",
+          "[ipc][video_core]") {
+    for (u32 mode = 0; mode < 7; ++mode) {
+        auto state = std::make_shared<Tegra::Control::AmpereGraphicsState>();
+        Processor processor{state};
+        MethodHost host;
+        host.allow_barrier = true;
+        host.memory.resize(4096, 0x12345678);
+        auto program = FifoProgram(mode == 0   ? 0
+                                   : mode == 1 ? 1025
+                                   : mode == 2 ? 1
+                                   : mode == 3 ? 3
+                                               : 2);
+        if (mode == 4)
+            program.insert(program.begin() + 2, program[1]);
+        if (mode == 3)
+            program[3].output = {};
+        if (mode == 5) {
+            program.resize(4);
+            program[2] = Inst{};
+            program[2].end_next = true;
+            program[3] = Inst{};
+        }
+        Upload(processor, program, host);
+        if (mode == 6)
+            REQUIRE(processor.CallMethod(0x15d, 0, true, host.Bind()) ==
+                    Processor::Status::Accepted);
+        REQUIRE(processor.CallMethod(0xe0a, 0x21, false, host.Bind()) ==
+                Processor::Status::Accepted);
+        REQUIRE(processor.CallMethod(0xe0b, 0x100000, true, host.Bind()) ==
+                Processor::Status::Failed);
+        REQUIRE(processor.GetError() == (mode == 3 || mode == 5
+                                             ? Processor::Error::UnfinishedDma
+                                             : Processor::Error::ExecutionFailed));
+        REQUIRE(host.memory_reads == (mode == 2 || mode == 3 ? 1U : 0U));
+    }
+    MethodHost host;
+    Processor invalid{std::make_shared<Tegra::Control::AmpereGraphicsState>()};
+    REQUIRE(invalid.CallMethod(0x15d, 5, true, host.Bind()) == Processor::Status::Failed);
+    REQUIRE(invalid.GetError() == Processor::Error::InvalidDmaConfiguration);
+    Processor pending{std::make_shared<Tegra::Control::AmpereGraphicsState>()};
+    Upload(pending, FifoProgram(), host);
+    REQUIRE(pending.CallMethod(0xe0a, 0x21, false, host.Bind()) == Processor::Status::Accepted);
+    REQUIRE(pending.CallMethod(0x15d, 1, true, host.Bind()) == Processor::Status::Failed);
+    REQUIRE(pending.GetError() == Processor::Error::InvalidInvocation);
+}
+
+TEST_CASE("Unresolved native DMA cannot publish an emitted completion or action",
+          "[ipc][video_core]") {
+    for (u32 action : {0xb0U, 0x674U, 0x6c3U}) {
+        for (bool before_barrier : {false, true}) {
+            Processor processor{std::make_shared<Tegra::Control::AmpereGraphicsState>()};
+            MethodHost host;
+            host.allow_barrier = true;
+            host.memory = {1, 2};
+            auto program = FifoProgram();
+            auto publish = Method();
+            publish.immediate = {static_cast<u16>(action), 1};
+            publish.output[0].emit = 6;
+            program.insert(program.begin() + (before_barrier ? 2 : 3), publish);
+            Upload(processor, program, host);
+            REQUIRE(processor.CallMethod(0xe0a, 0x21, false, host.Bind()) ==
+                    Processor::Status::Accepted);
+            REQUIRE(processor.CallMethod(0xe0b, 0x100000, true, host.Bind()) ==
+                    Processor::Status::Failed);
+            REQUIRE(host.writes.size() == 2);
+            REQUIRE(host.writes[0].first == 0x154);
+            REQUIRE(host.writes[1].first == 0x155);
+        }
+    }
+}
+
+TEST_CASE("Native macro DMA consumes six words and supports successive drained transfers",
+          "[ipc][video_core]") {
+    MethodHost host;
+    host.allow_barrier = true;
+    host.memory = {101, 102, 103, 104, 105, 106};
+    auto program = FifoProgram(6);
+    program.resize(3);
+    for (u8 pair = 0; pair < 3; ++pair) {
+        Inst load;
+        load.alu[0] = {Op::Add, static_cast<u8>(pair * 2), L0, Z};
+        load.alu[1] = {Op::Add, static_cast<u8>(pair * 2 + 1), L1, Z};
+        program.push_back(load);
+    }
+    for (u8 pair = 0; pair < 3; ++pair) {
+        auto emit = Method();
+        emit.immediate[0] = 0x1d00 + pair * 2;
+        emit.alu[0] = {Op::Add, Z, static_cast<u8>(pair * 2), Z};
+        emit.alu[1] = {Op::Add, Z, static_cast<u8>(pair * 2 + 1), Z};
+        emit.output[0].emit = 1;
+        emit.output[1].emit = 2;
+        emit.end_next = pair == 2;
+        program.push_back(emit);
+    }
+    program.push_back(Inst{});
+    Processor processor{std::make_shared<Tegra::Control::AmpereGraphicsState>()};
+    Upload(processor, program, host);
+    REQUIRE(processor.CallMethod(0xe0a, 0x21, false, host.Bind()) == Processor::Status::Accepted);
+    REQUIRE(processor.CallMethod(0xe0b, 0x100000, true, host.Bind()) ==
+            Processor::Status::Accepted);
+    REQUIRE(processor.GetExecutionResult().parameters == 8);
+    for (u32 i = 0; i < 6; ++i)
+        REQUIRE(host.registers[0xd00 + i] == 101 + i);
+
+    MethodHost repeated;
+    repeated.allow_barrier = true;
+    repeated.change_memory_in_barrier = true;
+    repeated.memory = {0, 0x11223344};
+    auto twice = FifoProgram();
+    twice.resize(4);
+    twice[3].end_next = false;
+    const auto second = FifoProgram();
+    twice.insert(twice.end(), second.begin() + 1, second.end());
+    Processor repeat{std::make_shared<Tegra::Control::AmpereGraphicsState>()};
+    Upload(repeat, twice, repeated);
+    REQUIRE(repeat.CallMethod(0xe0a, 0x21, false, repeated.Bind()) == Processor::Status::Accepted);
+    REQUIRE(repeat.CallMethod(0xe0b, 0x100000, true, repeated.Bind()) ==
+            Processor::Status::Accepted);
+    REQUIRE(repeated.barriers == 2);
+    REQUIRE(repeated.memory_reads == 2);
+    REQUIRE(repeated.registers[0xd00] == 0x87654322);
+}
+
+TEST_CASE("Native macro DMA honors explicit capacity and canonical address bounds",
+          "[ipc][video_core]") {
+    for (u16 count : {u16{4096}, u16{4097}}) {
+        Processor processor{std::make_shared<Tegra::Control::AmpereGraphicsState>()};
+        MethodHost host;
+        host.allow_barrier = true;
+        host.memory.resize(4096);
+        auto program = FifoProgram(count);
+        program[3].output = {};
+        Upload(processor, program, host);
+        REQUIRE(processor.CallMethod(0x15d, 4, true, host.Bind()) == Processor::Status::Accepted);
+        REQUIRE(processor.CallMethod(0xe0a, 0x21, false, host.Bind()) ==
+                Processor::Status::Accepted);
+        REQUIRE(processor.CallMethod(0xe0b, 0x100000, true, host.Bind()) ==
+                Processor::Status::Failed);
+        REQUIRE(processor.GetError() == (count == 4096 ? Processor::Error::UnfinishedDma
+                                                       : Processor::Error::ExecutionFailed));
+        REQUIRE(host.memory_reads == (count == 4096 ? 1U : 0U));
+    }
+    Processor overflow{std::make_shared<Tegra::Control::AmpereGraphicsState>()};
+    MethodHost host;
+    host.allow_barrier = true;
+    Upload(overflow, FifoProgram(), host);
+    REQUIRE(overflow.CallMethod(0xe0a, 0xff, false, host.Bind()) == Processor::Status::Accepted);
+    REQUIRE(overflow.CallMethod(0xe0b, 0xfffffffc, true, host.Bind()) == Processor::Status::Failed);
+    REQUIRE(host.memory_reads == 0);
+}
+
+TEST_CASE("Native engines reject pushbuffer FIFO reads and malformed DMA address state",
+          "[ipc][video_core]") {
+    Core::System system;
+    Core::DeviceMemory memory;
+    Tegra::MaxwellDeviceMemoryManager backing{memory};
+    auto space = std::make_shared<Tegra::MemoryManager>(system, backing, 32, 1ULL << 32, 16, 12);
+    auto state = std::make_shared<Tegra::Control::AmpereGraphicsState>();
+    auto context = std::make_shared<Tegra::Control::NativeGpuGraphicsContext>(state, space);
+    for (const auto [method, value] : std::array<std::pair<u32, u32>, 6>{
+             {{0x154, 0x100}, {0x155, 1}, {0x158, 6}, {0x157, 1}, {0x159, 1}, {0x15d, 5}}}) {
+        Tegra::Engines::Maxwell3D graphics{*space};
+        graphics.SetNativeMacroState(state);
+        REQUIRE_FALSE(graphics.CallNativeMethod(system, method, value, true, {}));
+        REQUIRE(graphics.HasNativeMacroFailure());
+        Tegra::Control::NativeCompute compute{context};
+        REQUIRE_FALSE(compute.CallMethod(method, value, true, {}));
+        REQUIRE(compute.GetError() != Tegra::Control::NativeCompute::Error::None);
+    }
+    Tegra::Engines::Maxwell3D graphics{*space};
+    graphics.SetNativeMacroState(state);
+    Tegra::Control::NativeCompute compute{context};
+    for (const auto [method, value] :
+         std::array<std::pair<u32, u32>, 3>{{{0x154, 0xff}, {0x155, 0xfffffffc}, {0x15d, 4}}}) {
+        REQUIRE(graphics.CallNativeMethod(system, method, value, true, {}));
+        REQUIRE(graphics.GetRegisterValue(method) == value);
+        REQUIRE(compute.CallMethod(method, value, true, {}));
+        REQUIRE(compute.ReadRegister(method) == value);
+    }
+}
 
 TEST_CASE("Native macro methods retain parameters across command fragments and share uploads",
           "[ipc][video_core]") {

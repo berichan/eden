@@ -49,6 +49,12 @@ NativeMacroProcessor::Status NativeMacroProcessor::CallMethod(u32 method, u32 va
     if (invocation && method != *invocation + 1) {
         return fail(Error::InvalidInvocation);
     }
+    if (method == 0x15d) { // SET_MME_DATA_FIFO_CONFIG, 0/4/8/12/16 KiB
+        if (value > 4)
+            return fail(Error::InvalidDmaConfiguration);
+        fifo_capacity_words = value * 1024;
+        return Status::Accepted;
+    }
     if (method < MacroMethodStart && !IsUpload(method)) {
         return Status::Unhandled;
     }
@@ -113,16 +119,22 @@ NativeMacroProcessor::Status NativeMacroProcessor::CallMethod(u32 method, u32 va
     struct InvocationHost {
         const Host& host;
         const std::vector<u32>& parameters;
+        u32 fifo_capacity_words;
         size_t cursor{};
-    } invocation_host{host, parameters};
+        std::vector<u32> dma_parameters;
+        GPUVAddr dma_address{};
+        u32 dma_count{};
+        bool dma_active{};
+    } invocation_host{host, parameters, fifo_capacity_words};
     const TuringMacroEngine::Host bindings{
         &invocation_host,
         [](void* context, u32& parameter) {
             auto& self = *static_cast<InvocationHost*>(context);
-            if (self.cursor == self.parameters.size()) {
+            const auto& source = self.dma_active ? self.dma_parameters : self.parameters;
+            if (self.cursor == source.size()) {
                 return false;
             }
-            parameter = self.parameters[self.cursor++];
+            parameter = source[self.cursor++];
             return true;
         },
         [](void* context, u16 address, u32& result) {
@@ -131,14 +143,52 @@ NativeMacroProcessor::Status NativeMacroProcessor::CallMethod(u32 method, u32 va
                    host.read_method(host.context, address / 4, result);
         },
         [](void* context, u16 address, u32 data) {
-            const auto& host = static_cast<InvocationHost*>(context)->host;
+            auto& self = *static_cast<InvocationHost*>(context);
+            const auto& host = self.host;
+            if (address == 0x158 * 4) { // MME_DMA_READ_FIFOED, length in words
+                const auto& source = self.dma_active ? self.dma_parameters : self.parameters;
+                u32 upper{}, lower{};
+                // Do not overwrite an outstanding transfer or unread DMA words.
+                // The switch from method parameters to DMA occurs at the barrier.
+                if (self.dma_count || (self.dma_active && self.cursor != source.size()) ||
+                    data == 0 || data > self.fifo_capacity_words || !host.read_memory ||
+                    !host.read_method || !host.read_method(host.context, 0x154, upper) ||
+                    !host.read_method(host.context, 0x155, lower) || upper > 0xff || (lower & 3))
+                    return false;
+                const GPUVAddr gpu_address = (GPUVAddr{upper} << 32) | lower;
+                if (u64{data} * 4 > (u64{1} << 40) - gpu_address)
+                    return false;
+                self.dma_address = gpu_address;
+                self.dma_count = data;
+                return true;
+            }
+            // Until all DMA input is resolved and consumed, no emitted method
+            // may publish an action or completion ahead of a later FIFO failure.
+            if (self.dma_count || (self.dma_active && self.cursor != self.dma_parameters.size()))
+                return false;
             // Mutating instruction/start RAM during an invocation is not supported.
             return !(address & 3) && address / 4 < MacroMethodStart && !IsUpload(address / 4) &&
                    host.write_method && host.write_method(host.context, address / 4, data);
         },
         [](void* context) {
-            const auto& host = static_cast<InvocationHost*>(context)->host;
-            return host.barrier && host.barrier(host.context);
+            auto& self = *static_cast<InvocationHost*>(context);
+            const auto& host = self.host;
+            const auto& source = self.dma_active ? self.dma_parameters : self.parameters;
+            if (self.dma_count && self.cursor != source.size())
+                return false;
+            if (!host.barrier || !host.barrier(host.context) ||
+                (host.should_stop && host.should_stop(host.context)))
+                return false;
+            if (self.dma_count) {
+                self.dma_parameters.resize(self.dma_count);
+                if (!host.read_memory(host.context, self.dma_address, self.dma_parameters) ||
+                    (host.should_stop && host.should_stop(host.context)))
+                    return false;
+                self.dma_count = 0;
+                self.cursor = 0;
+                self.dma_active = true;
+            }
+            return true;
         },
         [](void* context) {
             const auto& host = static_cast<InvocationHost*>(context)->host;
@@ -176,7 +226,13 @@ NativeMacroProcessor::Status NativeMacroProcessor::CallMethod(u32 method, u32 va
                 inst.output[1].emit);
         }
     }
-    return execution_result.Succeeded() ? Status::Accepted : fail(Error::ExecutionFailed);
+    if (!execution_result.Succeeded())
+        return fail(Error::ExecutionFailed);
+    if (invocation_host.dma_count ||
+        (invocation_host.dma_active &&
+         invocation_host.cursor != invocation_host.dma_parameters.size()))
+        return fail(Error::UnfinishedDma);
+    return Status::Accepted;
 }
 
 NativeMacroProcessor::Error NativeMacroProcessor::GetError() const {

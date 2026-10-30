@@ -5,6 +5,7 @@
 
 #include <memory>
 #include <optional>
+#include <span>
 #include <vector>
 #include "common/common_types.h"
 #include "video_core/turing_macro.h"
@@ -24,6 +25,7 @@ public:
         bool (*write_method)(void*, u32 word_method, u32){};
         bool (*barrier)(void*){};
         bool (*should_stop)(void*){};
+        bool (*read_memory)(void*, GPUVAddr, std::span<u32>){};
     };
     enum class Status { Unhandled, Accepted, Failed };
     enum class ProgramBank { Graphics, Compute };
@@ -35,6 +37,8 @@ public:
         InvalidInvocation,
         ParameterLimit,
         ExecutionFailed,
+        UnfinishedDma,
+        InvalidDmaConfiguration,
     };
 
     explicit NativeMacroProcessor(std::shared_ptr<AmpereGraphicsState> state,
@@ -56,6 +60,8 @@ private:
     std::vector<u32> parameters;
     Error error{};
     TuringMacroEngine::Result execution_result;
+    // Bounded software capacity until explicitly configured; not a hardware reset value.
+    u32 fifo_capacity_words = 1024;
 };
 
 } // namespace Tegra::Control

@@ -26,6 +26,8 @@ bool IsStateMethod(u32 method) {
     case 0xba:
     case 0xbb:
     case 0xc4:  // SET_SPA_VERSION
+    case 0x154: // SET_MME_MEM_ADDRESS_A/B
+    case 0x155:
     case 0x1e4: // SET_SHADER_LOCAL_MEMORY_A
     case 0x1e5:
     case 0x1ec: // SET_SHADER_LOCAL_MEMORY_WINDOW_A
@@ -93,6 +95,11 @@ bool NativeCompute::CallMethod(u32 method, u32 value, bool last, const Host& hos
             const auto& qmd = static_cast<Adapter*>(opaque)->host.qmd;
             return qmd.should_stop && qmd.should_stop(qmd.context);
         },
+        [](void* opaque, GPUVAddr address, std::span<u32> words) {
+            const auto& self = *static_cast<Adapter*>(opaque);
+            return self.owner.context->GetAddressSpace()->ReadBlockChecked(
+                address, {reinterpret_cast<u8*>(words.data()), words.size_bytes()});
+        },
     };
     const auto result = macros.CallMethod(method, value, last, macro_host);
     if (result == NativeMacroProcessor::Status::Failed) {
@@ -106,7 +113,7 @@ bool NativeCompute::CallMethod(u32 method, u32 value, bool last, const Host& hos
         return Fail(Error::MacroFailed);
     }
     if (result == NativeMacroProcessor::Status::Accepted) {
-        if (method >= 0x45 && method <= 0x48) {
+        if ((method >= 0x45 && method <= 0x48) || method == 0x15d) {
             registers[method] = value;
         }
         return true;
@@ -142,6 +149,14 @@ bool NativeCompute::WriteMethod(u32 method, u32 value, const Host& host) {
     case 0x55d: // SET_TEX_HEADER_POOL_A
         // Hardware encodes 49 bits, but the current native address space supports 40.
         if (value > 0xff)
+            return Fail(Error::UnsupportedMethod);
+        break;
+    case 0x154: // SET_MME_MEM_ADDRESS_A, bounded to our canonical 40-bit AS
+        if (value > 0xff)
+            return Fail(Error::UnsupportedMethod);
+        break;
+    case 0x155: // SET_MME_MEM_ADDRESS_B
+        if (value & 3)
             return Fail(Error::UnsupportedMethod);
         break;
     case 0x559: // SET_TEX_SAMPLER_POOL_C, inclusive maximum index
@@ -262,7 +277,7 @@ u32 NativeCompute::ReadRegister(u32 method) const {
 
 bool NativeCompute::ReadMethod(u32 method, u32& value) const {
     if (!IsStateMethod(method) && method != 0x40 && method != 0x44 &&
-        !(method >= 0x45 && method <= 0x49) && method != 0xb0) {
+        !(method >= 0x45 && method <= 0x49) && method != 0xb0 && method != 0x15d) {
         return false;
     }
     value = registers[method];

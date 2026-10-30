@@ -241,4 +241,12 @@ TEST_CASE("Native clears honor unconditional override and guard global predicate
         REQUIRE(engine.CallNativeMethod(system, 0x4e, mode, true, {}) == (mode == 1));
         REQUIRE(engine.HasNativeMacroFailure() == (mode != 1));
     }
+    for (u32 mode : {0U, 1U, 2U, 3U, 4U}) {
+        Tegra::Engines::Maxwell3D engine{space};
+        engine.SetNativeMacroState(std::make_shared<Tegra::Control::AmpereGraphicsState>());
+        REQUIRE(engine.CallNativeMethod(system, 0x556, mode, true, {}) == (mode <= 1));
+        REQUIRE(engine.HasNativeMacroFailure() == (mode > 1));
+        if (mode <= 1)
+            REQUIRE(engine.ShouldExecute() == (mode == 1));
+    }
 }
