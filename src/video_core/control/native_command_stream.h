@@ -41,6 +41,7 @@ public:
         u64 methods{};
         u32 method{};
         u32 subchannel{};
+        u32 value{};
         bool Succeeded() const {
             return error == Error::None;
         }

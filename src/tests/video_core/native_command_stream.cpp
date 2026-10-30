@@ -123,6 +123,7 @@ TEST_CASE("Native packet faults stop before later methods and remain sticky", "[
     REQUIRE(result.address == 0x1008);
     REQUIRE(result.method == 0x101);
     REQUIRE(result.subchannel == 1);
+    REQUIRE(result.value == 2);
     REQUIRE(result.methods == 1);
     REQUIRE(host.calls.size() == 1);
     host.bad_method = 0xffffffff;

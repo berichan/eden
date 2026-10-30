@@ -424,9 +424,10 @@ void NativeGpuSubmission::Execute(Core::System& system, std::stop_token stop_tok
         channel->GetErrorNotifier()->RecordError(information, system.GPU().GetTicks());
         LOG_ERROR(HW_GPU,
                   "Native GPU job failed: error={}, address={:#x}, subchannel={}, method={:#x}, "
+                  "value={:#x}, "
                   "words={}, methods={}",
                   static_cast<u32>(executed.error), executed.address, executed.subchannel,
-                  executed.method, executed.words, executed.methods);
+                  executed.method, executed.value, executed.words, executed.methods);
     } else {
         LOG_DEBUG(HW_GPU, "Native GPU job retired: words={}, methods={}, parked_qmd={}",
                   executed.words, executed.methods, graphics->HasPendingQmd());

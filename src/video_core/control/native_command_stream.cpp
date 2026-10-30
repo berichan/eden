@@ -17,6 +17,7 @@ NativeCommandStream::Result NativeCommandStream::Fail(Error error, GPUVAddr addr
 
 bool NativeCommandStream::Emit(u32 value, bool last, GPUVAddr address, const Host& host) {
     if (!host.method || !host.method(host.context, subchannel, method, value, last)) {
+        result.value = value;
         Fail(Error::MethodFailed, address);
         return false;
     }
