@@ -67,19 +67,20 @@ void LogNativeClearState(const Maxwell3D& engine, u32 argument) {
               engine.GetRegisterValue(base + 4), engine.GetRegisterValue(base + 5),
               engine.GetRegisterValue(base + 6), engine.GetRegisterValue(base + 7),
               engine.GetRegisterValue(base + 8), engine.GetRegisterValue(base + 9));
-    LOG_DEBUG(HW_GPU,
-              "Native clear controls: color={:#x}/{:#x}/{:#x}/{:#x}, control={:#x}, "
-              "rect={:#x}/{:#x}, surface_clip={:#x}/{:#x}, scissor={:#x}/{:#x}/{:#x}, "
-              "viewport_clip={:#x}/{:#x}, msaa={:#x}/{:#x}/{:#x}",
-              engine.GetRegisterValue(0x360), engine.GetRegisterValue(0x361),
-              engine.GetRegisterValue(0x362), engine.GetRegisterValue(0x363),
-              engine.GetRegisterValue(0x43e), engine.GetRegisterValue(0x35b),
-              engine.GetRegisterValue(0x35c), engine.GetRegisterValue(0x340),
-              engine.GetRegisterValue(0x341), engine.GetRegisterValue(0x380),
-              engine.GetRegisterValue(0x381), engine.GetRegisterValue(0x382),
-              engine.GetRegisterValue(0x300), engine.GetRegisterValue(0x301),
-              engine.GetRegisterValue(0x3ee), engine.GetRegisterValue(0x54d),
-              engine.GetRegisterValue(0x574));
+    LOG_DEBUG(
+        HW_GPU,
+        "Native clear controls: color={:#x}/{:#x}/{:#x}/{:#x}, control={:#x}, srgb_write={:#x}, "
+        "rect={:#x}/{:#x}, surface_clip={:#x}/{:#x}, scissor={:#x}/{:#x}/{:#x}, "
+        "viewport_clip={:#x}/{:#x}, msaa={:#x}/{:#x}/{:#x}",
+        engine.GetRegisterValue(0x360), engine.GetRegisterValue(0x361),
+        engine.GetRegisterValue(0x362), engine.GetRegisterValue(0x363),
+        engine.GetRegisterValue(0x43e), engine.GetRegisterValue(0x56e),
+        engine.GetRegisterValue(0x35b), engine.GetRegisterValue(0x35c),
+        engine.GetRegisterValue(0x340), engine.GetRegisterValue(0x341),
+        engine.GetRegisterValue(0x380), engine.GetRegisterValue(0x381),
+        engine.GetRegisterValue(0x382), engine.GetRegisterValue(0x300),
+        engine.GetRegisterValue(0x301), engine.GetRegisterValue(0x3ee),
+        engine.GetRegisterValue(0x54d), engine.GetRegisterValue(0x574));
 }
 } // namespace
 
@@ -744,6 +745,7 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
             snapshot.anti_alias_raster = GetRegisterValue(0x3ee);
             snapshot.anti_alias_enable = GetRegisterValue(0x54d);
             snapshot.anti_alias = GetRegisterValue(0x574);
+            snapshot.srgb_write = GetRegisterValue(0x56e);
             const auto clear = Clear::Decode(snapshot);
             const u32 override = GetRegisterValue(0x651);
             // Conditional mode writes remain guarded. Honor the supported override

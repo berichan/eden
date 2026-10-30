@@ -1235,9 +1235,10 @@ std::optional<typename TextureCache<P>::NativeClearTarget>
 TextureCache<P>::PrepareNativeClearTarget(const ImageInfo& info, GPUVAddr address,
                                           DAddr backing_address) {
     if (info.layout != Tegra::Texture::BlockLinearLayout::TuringColor2D ||
-        info.format != PixelFormat::B10G11R11_FLOAT || info.type != ImageType::e2D ||
-        info.resources.levels != 1 || info.resources.layers != 1 || info.num_samples != 1 ||
-        info.size.depth != 1 || info.rescaleable || info.is_sparse ||
+        (info.format != PixelFormat::B10G11R11_FLOAT &&
+         info.format != PixelFormat::A8B8G8R8_SRGB) ||
+        info.type != ImageType::e2D || info.resources.levels != 1 || info.resources.layers != 1 ||
+        info.num_samples != 1 || info.size.depth != 1 || info.rescaleable || info.is_sparse ||
         gpu_memory->GpuToCpuAddress(address) != std::optional{backing_address})
         return std::nullopt;
     const u32 size = CalculateGuestSizeInBytes(info);

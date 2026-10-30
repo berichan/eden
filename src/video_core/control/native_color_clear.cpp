@@ -13,11 +13,22 @@ std::optional<NativeColorClear> NativeColorClear::Decode(const Registers& regs) 
     if ((regs.argument & 0x3f) != 0x3c || (regs.argument & ~0x3fcU) || target_index >= 8 ||
         regs.target[0] > 0xff || (regs.target[1] & 0x1ff) || (regs.target[2] & 0xf0000000U) ||
         (regs.target[3] & 0xfffe0000U) || regs.target[2] == 0 || regs.target[3] == 0 ||
-        regs.target[4] != 0xe0 || (regs.target[5] & ~0xf0U) || ((regs.target[5] >> 4) & 15) > 5 ||
-        regs.target[6] != 1 || regs.target[8] != 0 || regs.target[9] != 0 ||
-        (regs.control & ~0x1111U) || regs.scissor_enable > 1 || regs.anti_alias_raster != 0 ||
-        regs.anti_alias_enable != 0 || regs.anti_alias != 0) {
+        (regs.target[4] != 0xe0 && regs.target[4] != 0xd6) || (regs.target[5] & ~0xf0U) ||
+        ((regs.target[5] >> 4) & 15) > 5 || regs.target[6] != 1 || regs.target[8] != 0 ||
+        regs.target[9] != 0 || (regs.control & ~0x1111U) || regs.scissor_enable > 1 ||
+        regs.anti_alias_raster != 0 || regs.anti_alias_enable != 0 || regs.anti_alias != 0) {
         return std::nullopt;
+    }
+    const auto format = regs.target[4] == 0xe0 ? Format::B10G11R11Float : Format::RGBA8Srgb;
+    if (format == Format::RGBA8Srgb) {
+        // NVK supplies float clears unchanged to this sRGB target format. An
+        // explicit SRGB_WRITE disable has unverified clear semantics; RGB
+        // endpoints are invariant under either encoding, so remain supported.
+        if (regs.srgb_write > 1 ||
+            (regs.srgb_write == 0 &&
+             !std::all_of(regs.color.begin(), regs.color.begin() + 3,
+                          [](u32 value) { return value == 0 || value == 0x3f800000; })))
+            return std::nullopt;
     }
     const auto address = (GPUVAddr{regs.target[0]} << 32) | regs.target[1];
     const auto width = regs.target[2];
@@ -27,8 +38,9 @@ std::optional<NativeColorClear> NativeColorClear::Decode(const Registers& regs) 
     const u64 tile_height = u64{8} << block_height;
     const u64 aligned_height = (height + tile_height - 1) & ~(tile_height - 1);
     const u64 size = pitch * aligned_height;
-    if (size > (std::numeric_limits<u32>::max)() || size > (u64{1} << 40) - address ||
-        (regs.target[7] != 0 && u64{regs.target[7]} * 4 != size)) {
+    // ARRAY_PITCH is spacing between layers, in DWORDs. It does not bound the
+    // sole layer at index zero, including when a target binds one image mip.
+    if (size > (std::numeric_limits<u32>::max)() || size > (u64{1} << 40) - address) {
         return std::nullopt;
     }
 
@@ -50,6 +62,7 @@ std::optional<NativeColorClear> NativeColorClear::Decode(const Registers& regs) 
     if (regs.control & 0x1000)
         intersect(regs.viewport_x, regs.viewport_y, true);
     return NativeColorClear{address,
+                            format,
                             width,
                             height,
                             block_height,

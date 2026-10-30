@@ -49,6 +49,7 @@ TEST_CASE("Native color clear decodes checked target and clipping state", "[ipc]
     REQUIRE(clear->width == 2560);
     REQUIRE(clear->height == 1440);
     REQUIRE(clear->block_height == 4);
+    REQUIRE(clear->format == Clear::Format::B10G11R11Float);
     REQUIRE(clear->color == regs.color);
     REQUIRE(clear->extent_x == 2560);
     REQUIRE(clear->extent_y == 1440);
@@ -77,7 +78,7 @@ TEST_CASE("Native color clear decodes checked target and clipping state", "[ipc]
 
 TEST_CASE("Native clear rejects unsupported surfaces and overflowing allocations",
           "[ipc][video_core]") {
-    for (const auto [index, value] : std::array<std::pair<u32, u32>, 17>{{{0, 0x100},
+    for (const auto [index, value] : std::array<std::pair<u32, u32>, 15>{{{0, 0x100},
                                                                           {1, 0x100001},
                                                                           {2, 0},
                                                                           {3, 0},
@@ -88,11 +89,9 @@ TEST_CASE("Native clear rejects unsupported surfaces and overflowing allocations
                                                                           {5, 0x60},
                                                                           {5, 0x1040},
                                                                           {6, 2},
-                                                                          {7, 1},
                                                                           {8, 1},
                                                                           {9, 1},
                                                                           {2, 0xfffffff},
-                                                                          {3, 0x1ffff},
                                                                           {5, 0x10000}}}) {
         auto regs = Registers();
         regs.target[index] = value;
@@ -167,6 +166,57 @@ TEST_CASE("Native color tiling matches byte sector coordinates and preserves pad
     REQUIRE(legacy[0x40] == source[128]);
     REQUIRE(native[0x40] == source[16]);
     REQUIRE(native[0x20] == source[128]);
+}
+
+TEST_CASE("Single-layer native clears access the mip footprint independently of array pitch",
+          "[ipc][video_core]") {
+    auto regs = Registers();
+    regs.target[2] = 640;
+    regs.target[3] = 360;
+    regs.target[4] = 0xd6;
+    regs.color = {};
+    for (u32 array_pitch : {0U, 1U, 0x56e00U, 0xffffffffU}) {
+        regs.target[7] = array_pitch;
+        const auto clear = Clear::Decode(regs);
+        REQUIRE(clear);
+        REQUIRE(clear->format == Clear::Format::RGBA8Srgb);
+        REQUIRE(clear->size_bytes == 0xf0000);
+        REQUIRE(clear->extent_x == 640);
+        REQUIRE(clear->extent_y == 360);
+    }
+    regs.target = {0xff, 0xfffffe00, 16, 8, 0xe0, 0, 1, 0xffffffff, 0, 0};
+    const auto boundary = Clear::Decode(regs);
+    REQUIRE(boundary);
+    REQUIRE(boundary->size_bytes == 512);
+    REQUIRE(boundary->address + boundary->size_bytes == (u64{1} << 40));
+    // Neither the argument nor target state can select another array layer.
+    regs.argument |= 1U << 10;
+    REQUIRE_FALSE(Clear::Decode(regs));
+    regs.argument = 0x3c;
+    regs.target[8] = 1;
+    REQUIRE_FALSE(Clear::Decode(regs));
+}
+
+TEST_CASE("Native sRGB clears preserve float colors and guard unresolved conversion state",
+          "[ipc][video_core]") {
+    auto regs = Registers();
+    regs.target[4] = 0xd6;
+    regs.srgb_write = 1;
+    const auto enabled = Clear::Decode(regs);
+    REQUIRE(enabled);
+    REQUIRE(enabled->format == Clear::Format::RGBA8Srgb);
+    REQUIRE(enabled->color == regs.color);
+    regs.srgb_write = 0;
+    REQUIRE_FALSE(Clear::Decode(regs));
+    regs.color = {0, 0x3f800000, 0, 0x3f000000};
+    const auto endpoints = Clear::Decode(regs);
+    REQUIRE(endpoints);
+    REQUIRE(endpoints->color == regs.color);
+    regs.srgb_write = 2;
+    REQUIRE_FALSE(Clear::Decode(regs));
+    regs.srgb_write = 1;
+    regs.target[4] = 0xd5;
+    REQUIRE_FALSE(Clear::Decode(regs));
 }
 
 TEST_CASE("Texture aliases must agree on native color layout", "[ipc][video_core]") {

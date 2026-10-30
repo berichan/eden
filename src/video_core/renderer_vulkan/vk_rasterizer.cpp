@@ -404,10 +404,36 @@ bool RasterizerVulkan::ClearNativeColor(const Tegra::Control::NativeColorClear& 
         return false;
     if (clear.Empty())
         return true;
+    VideoCore::Surface::PixelFormat format;
+    VkFormat host_format;
+    switch (clear.format) {
+    case Tegra::Control::NativeColorClear::Format::B10G11R11Float:
+        format = VideoCore::Surface::PixelFormat::B10G11R11_FLOAT;
+        host_format = VK_FORMAT_B10G11R11_UFLOAT_PACK32;
+        break;
+    case Tegra::Control::NativeColorClear::Format::RGBA8Srgb:
+        format = VideoCore::Surface::PixelFormat::A8B8G8R8_SRGB;
+        host_format = VK_FORMAT_A8B8G8R8_SRGB_PACK32;
+        break;
+    default:
+        return false;
+    }
+    const auto image_format =
+        MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, false, format);
+    const auto view_format = MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, true, format);
+    VkFormatFeatureFlags required_features =
+        VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
+        VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+    if (image_format.storage)
+        required_features |= VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
+    // Native staging has the guest's exact byte representation. A legacy format
+    // fallback (e.g. packed float to RGBA16F) requires an explicit converter.
+    if (!image_format.attachable || image_format.format != host_format ||
+        view_format.format != host_format ||
+        !device.IsFormatSupported(host_format, required_features, FormatType::Optimal))
+        return false;
     const auto limit = device.GetPhysical().GetProperties().limits.maxImageDimension2D;
-    if (clear.width > limit || clear.height > limit ||
-        !device.IsFormatSupported(VK_FORMAT_B10G11R11_UFLOAT_PACK32,
-                                  VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT, FormatType::Optimal))
+    if (clear.width > limit || clear.height > limit)
         return false;
     FlushWork();
     gpu_memory->FlushCaching();
@@ -425,7 +451,7 @@ bool RasterizerVulkan::ClearNativeColor(const Tegra::Control::NativeColorClear& 
         }
     }
     VideoCommon::ImageInfo info;
-    info.format = VideoCore::Surface::PixelFormat::B10G11R11_FLOAT;
+    info.format = format;
     info.type = VideoCommon::ImageType::e2D;
     info.size = {clear.width, clear.height, 1};
     info.block = {0, clear.block_height, 0};
