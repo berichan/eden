@@ -979,6 +979,23 @@ TEST_CASE("Native compute texture cache invalidation executes its backend and pr
         REQUIRE_FALSE(rejected.CallMethod(0x91, value, true, host));
     }
     REQUIRE(header_calls == 1);
+    u32 sampler_calls{};
+    host.qmd.context = &sampler_calls;
+    host.invalidate_caches = [](void* opaque,
+                                const Tegra::Control::NativeCacheInvalidation& action) {
+        ++*static_cast<u32*>(opaque);
+        REQUIRE(action.samplers);
+        REQUIRE_FALSE((action.instructions || action.global_data || action.constants ||
+                       action.texture_data || action.texture_headers));
+        return true;
+    };
+    Compute samplers{context};
+    REQUIRE(samplers.CallMethod(0x509, 0, true, host));
+    for (u32 value : {1U, 0x10U}) {
+        Compute rejected{context};
+        REQUIRE_FALSE(rejected.CallMethod(0x509, value, true, host));
+    }
+    REQUIRE(sampler_calls == 1);
     struct ShaderBackend {
         u32 expected{}, calls{};
     } shader_backend;
