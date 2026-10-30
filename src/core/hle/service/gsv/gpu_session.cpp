@@ -66,6 +66,7 @@ public:
             {101, &KUserWorkerSession::RegisterMemory, "RegisterMemory"},
             {102, &KUserWorkerSession::UnregisterMemory, "UnregisterMemory"},
             {211, &KUserWorkerSession::MapMemory, "NormalMapGpuMemory4K"},
+            {212, &KUserWorkerSession::ModifyKind, "NormalModifyMemoryKind4K"},
             {213, &KUserWorkerSession::UnmapMemory, "NormalUnmapGpuMemory4K"},
             {214, &KUserWorkerSession::CreateSparseRegion, "CreateSparseRegion"},
             {215, &KUserWorkerSession::DestroySparseRegion, "DestroySparseRegion"},
@@ -136,6 +137,36 @@ private:
         IPC::ResponseBuilder rb{ctx, 3};
         rb.Push(result);
         rb.Push<u32>(kind);
+    }
+
+    void ModifyKind(HLERequestContext& ctx) {
+        u8 selected{};
+        const auto result = [&]() -> Result {
+            R_UNLESS(HasInputWords(ctx, 9), Kernel::ResultInvalidSize);
+            IPC::RequestParser rp{ctx};
+            const auto address_space = rp.Pop<u32>();
+            const auto address = rp.Pop<u64>();
+            const auto last = rp.Pop<u64>();
+            // The SDK writes only a byte into each padded word; upper bytes are stale.
+            const auto requested = static_cast<u8>(rp.Pop<u32>());
+            const auto fallback = static_cast<u8>(rp.Pop<u32>());
+            const auto sync = static_cast<u8>(rp.Pop<u32>());
+            const auto event_id = rp.Pop<u32>();
+            const std::scoped_lock lock{m_events->mutex};
+            R_UNLESS(event_id < m_events->events.size() && m_events->events[event_id],
+                     GraphicsDeviceTable::InvalidArgument);
+            const auto modified =
+                sync <= 1 ? m_memory->ModifyKind(&selected, *m_address_spaces, address_space,
+                                                 address, last, requested, fallback)
+                          : GraphicsDeviceTable::InvalidArgument;
+            // This acknowledges the completed operation, including a semantic failure.
+            // The SDK waits for this event even when the response contains an error.
+            const auto signaled = m_events->events[event_id]->Signal(system.Kernel());
+            R_RETURN(modified.IsError() ? modified : signaled);
+        }();
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(result);
+        rb.Push<u32>(selected);
     }
 
     void UnmapMemory(HLERequestContext& ctx) {

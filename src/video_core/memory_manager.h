@@ -116,6 +116,7 @@ public:
     bool WriteBlockChecked(GPUVAddr address, std::span<const u8> input);
     bool IsReadableRange(GPUVAddr address, size_t size) const;
     bool IsWritableRange(GPUVAddr address, size_t size) const;
+    bool ModifyPageKindChecked(GPUVAddr address, size_t size, PTEKind kind);
 
     // Keep mappings and their backing allocations stable through a native GPU dispatch.
     // Acquire before renderer cache locks; finish GPU work before releasing the lease.

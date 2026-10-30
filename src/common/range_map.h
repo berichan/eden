@@ -8,6 +8,7 @@
 
 #include <map>
 #include <type_traits>
+#include <utility>
 
 #include "common/common_types.h"
 
@@ -24,6 +25,12 @@ public:
         container.emplace((std::numeric_limits<KeyT>::min)(), null_value);
     };
     ~RangeMap() = default;
+
+    void Swap(RangeMap& other) noexcept(std::is_nothrow_swappable_v<ValueT>) {
+        using std::swap;
+        swap(null_value, other.null_value);
+        container.swap(other.container);
+    }
 
     void Map(KeyTBase address, KeyTBase address_end, ValueT value) {
         KeyT new_address = static_cast<KeyT>(address);

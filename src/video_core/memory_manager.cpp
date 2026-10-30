@@ -128,7 +128,10 @@ GPUVAddr MemoryManager::PageTableOp(GPUVAddr gpu_addr, [[maybe_unused]] DAddr de
         }
         remaining_size -= page_size;
     }
-    kind_map.Map(gpu_addr, gpu_addr + size, kind);
+    {
+        std::scoped_lock lock{guard};
+        kind_map.Map(gpu_addr, gpu_addr + size, kind);
+    }
     return gpu_addr;
 }
 
@@ -194,6 +197,33 @@ bool MemoryManager::MapIfFree(GPUVAddr gpu_addr, DAddr dev_addr, std::size_t siz
 
 bool MemoryManager::MapIntoSparse(GPUVAddr gpu_addr, DAddr dev_addr, size_t size, PTEKind kind) {
     return MapChecked(gpu_addr, dev_addr, size, kind, true);
+}
+
+bool MemoryManager::ModifyPageKindChecked(GPUVAddr address, size_t size, PTEKind kind) {
+    std::scoped_lock mapping_lock{mapping_guard};
+    if (!IsPageRange(address, size) || kind == PTEKind::INVALID) {
+        return false;
+    }
+    for (GPUVAddr page = address; page < address + size; page += page_size) {
+        if (GetEntry(page, true) != EntryType::Free || GetEntry(page, false) != EntryType::Mapped) {
+            return false;
+        }
+    }
+    if (!IsValidAccessRange(address, size, false)) {
+        return false;
+    }
+    std::scoped_lock kind_lock{guard};
+    if (kind_map.GetValueAt(address) == kind && kind_map.GetContinuousSizeFrom(address) >= size) {
+        return true;
+    }
+    // RangeMap insertion can allocate after erasing boundaries. Commit a prepared
+    // copy so allocation failure leaves both kinds and backing mappings untouched.
+    auto replacement = kind_map;
+    replacement.Map(address, address + size, kind);
+    static_assert(noexcept(kind_map.Swap(replacement)));
+    kind_map.Swap(replacement);
+    mapping_generation.fetch_add(1, std::memory_order_release);
+    return true;
 }
 
 bool MemoryManager::IsPageRange(GPUVAddr address, size_t size) const {

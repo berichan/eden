@@ -55,6 +55,8 @@ public:
                            Tegra::MaxwellDeviceMemoryManager& backing, u32 address_space,
                            u64 gpu_address, u64 last_address, u32 memory_handle, u64 offset,
                            MapOptions options);
+    Result ModifyKind(u8* out_kind, GpuAddressSpacePool& address_spaces, u32 address_space,
+                      u64 gpu_address, u64 last_address, u8 requested, u8 fallback);
     Result Unmap(u32 address_space, u64 gpu_address, u64 last_address, u64* out_unmapped = nullptr);
     Result UnmapSparseMemory(u32 address_space, u64 gpu_address, u64 last_address,
                              u64* out_unmapped = nullptr);

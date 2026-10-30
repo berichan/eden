@@ -236,6 +236,47 @@ Result GpuMemoryPool::MapSparseMemory(u8* out_kind, GpuAddressSpacePool& address
                      memory_handle, offset, options, true));
 }
 
+Result GpuMemoryPool::ModifyKind(u8* out_kind, GpuAddressSpacePool& address_spaces,
+                                 u32 address_space, u64 gpu_address, u64 last_address, u8 requested,
+                                 u8 fallback) {
+    R_UNLESS(last_address >= gpu_address && last_address < (1ULL << 40) &&
+                 Common::IsAligned(gpu_address, Kernel::PageSize) &&
+                 Common::IsAligned(last_address + 1, Kernel::PageSize),
+             InvalidArgument);
+    const std::scoped_lock lock{m_mutex};
+    u8 selected{};
+    Tegra::PTEKind kind{};
+    R_TRY(SelectMemoryKind(&selected, &kind, requested, fallback));
+    const auto manager = address_spaces.Acquire(address_space);
+    R_UNLESS(manager, InvalidMemory);
+    u64 first, last;
+    R_TRY(address_spaces.QueryPartitionRange(&first, &last, address_space,
+                                             GpuAddressSpacePool::Partition::User));
+    R_UNLESS(gpu_address >= first && last_address <= last, InvalidArgument);
+    const u64 end = last_address + 1;
+    for (u64 cursor = gpu_address; cursor < end;) {
+        auto it = m_mappings.upper_bound({address_space, cursor});
+        R_UNLESS(it != m_mappings.begin(), InvalidMemory);
+        --it;
+        R_UNLESS(it->first.first == address_space && it->second.manager == manager &&
+                     cursor >= it->first.second && cursor < it->first.second + it->second.size,
+                 InvalidMemory);
+        cursor = (std::min)(end, it->first.second + it->second.size);
+    }
+    try {
+        R_UNLESS(manager->ModifyPageKindChecked(gpu_address, end - gpu_address, kind),
+                 InvalidMemory);
+    } catch (const std::bad_alloc&) {
+        R_RETURN(OutOfMemory);
+    }
+    *out_kind = selected;
+    LOG_DEBUG(Service,
+              "Native GPU memory kind modified: as={:#x}, gpu={:#x}, size={:#x}, requested={}, "
+              "selected={}",
+              address_space, gpu_address, end - gpu_address, requested, selected);
+    R_SUCCEED();
+}
+
 Result GpuMemoryPool::MapImpl(u8* out_kind, GpuAddressSpacePool& address_spaces,
                               Tegra::MaxwellDeviceMemoryManager& backing, u32 address_space,
                               u64 gpu_address, u64 last_address, u32 memory_handle, u64 offset,

@@ -712,6 +712,81 @@ TEST_CASE("GPU pins retain real heap pages until partial unlock or process table
         REQUIRE(alias_view->Read<u32>(va + PageSize) == 0xabcdef01);
 
         {
+            const auto first_backing = view->GpuToCpuAddress(va);
+            const auto second_backing = view->GpuToCpuAddress(va + PageSize);
+            const auto generation = view->MappingGeneration();
+            REQUIRE(pool.ModifyKind(&selected, spaces, space, va + PageSize, va + size - 1, 0xb, 1)
+                        .IsSuccess());
+            REQUIRE(selected == 1);
+            REQUIRE(view->GetPageKind(va) == Tegra::PTEKind::GENERIC_16BX2);
+            REQUIRE(view->GetPageKind(va + PageSize) == Tegra::PTEKind::Z16);
+            REQUIRE(alias_view->GetPageKind(va + PageSize) == Tegra::PTEKind::GENERIC_16BX2);
+            REQUIRE(view->GpuToCpuAddress(va) == first_backing);
+            REQUIRE(view->GpuToCpuAddress(va + PageSize) == second_backing);
+            REQUIRE(view->Read<u32>(va) == 0x12345678);
+            REQUIRE(view->Read<u32>(va + PageSize) == 0xabcdef01);
+            REQUIRE(view->MappingGeneration() != generation);
+            const auto unchanged_generation = view->MappingGeneration();
+            REQUIRE(pool.ModifyKind(&selected, spaces, space, va + PageSize, va + size - 1, 0xb, 1)
+                        .IsSuccess());
+            REQUIRE(view->MappingGeneration() == unchanged_generation);
+            REQUIRE(pool.ModifyKind(&selected, spaces, space, va, va + size - 1, 8, 6).IsSuccess());
+            REQUIRE(selected == 6);
+            REQUIRE(view->GetPageKind(va + PageSize) == Tegra::PTEKind::GENERIC_16BX2);
+            for (const auto kinds : {std::array<u8, 2>{7, 6}, std::array<u8, 2>{8, 8}}) {
+                selected = 0xfe;
+                REQUIRE(
+                    pool.ModifyKind(&selected, spaces, space, va, va + size - 1, kinds[0], kinds[1])
+                        .IsError());
+                REQUIRE(selected == 0xfe);
+                REQUIRE(view->GetPageKind(va) == Tegra::PTEKind::GENERIC_16BX2);
+            }
+            REQUIRE(
+                pool.ModifyKind(&selected, spaces, space, va + 1, va + size - 1, 1, 1).IsError());
+            REQUIRE(pool.ModifyKind(&selected, spaces, space, va, va + size - 2, 1, 1).IsError());
+            REQUIRE(pool.ModifyKind(&selected, spaces, space, va, va - 1, 1, 1).IsError());
+            REQUIRE(pool.ModifyKind(&selected, spaces, space, va, 1ULL << 40, 1, 1).IsError());
+            REQUIRE(
+                pool.ModifyKind(&selected, spaces, space + 8, va, va + size - 1, 1, 1).IsError());
+            GpuMemoryPool foreign{kernel, &process, devices};
+            REQUIRE(
+                foreign.ModifyKind(&selected, spaces, space, va, va + size - 1, 1, 1).IsError());
+            // Ownership records may outlive a partial GMMU operation. Revalidate actual PTEs.
+            view->Unmap(va + PageSize, PageSize);
+            for (const bool reserved : {false, true}) {
+                if (reserved) {
+                    REQUIRE(view->MapSparse(va + PageSize, PageSize, false) == va + PageSize);
+                }
+                const auto before = view->MappingGeneration();
+                REQUIRE(
+                    pool.ModifyKind(&selected, spaces, space, va, va + size - 1, 1, 1).IsError());
+                REQUIRE(view->MappingGeneration() == before);
+                REQUIRE(view->GetPageKind(va) == Tegra::PTEKind::GENERIC_16BX2);
+            }
+            view->Unmap(va + PageSize, PageSize);
+            REQUIRE(view->MapIfFree(va + PageSize, *second_backing, PageSize,
+                                    Tegra::PTEKind::GENERIC_16BX2));
+            constexpr u64 adjacent = va + 16 * PageSize;
+            REQUIRE(pool.Map(&selected, spaces, backing, space, adjacent, adjacent + PageSize - 1,
+                             handle, 0, options)
+                        .IsSuccess());
+            REQUIRE(pool.Map(&selected, spaces, backing, space, adjacent + PageSize,
+                             adjacent + 2 * PageSize - 1, handle, 2 * PageSize, options)
+                        .IsSuccess());
+            const auto adjacent_first = view->GpuToCpuAddress(adjacent);
+            const auto adjacent_second = view->GpuToCpuAddress(adjacent + PageSize);
+            REQUIRE(pool.ModifyKind(&selected, spaces, space, adjacent, adjacent + 2 * PageSize - 1,
+                                    0xb, 1)
+                        .IsSuccess());
+            REQUIRE(selected == 1);
+            REQUIRE(view->GetPageKind(adjacent) == Tegra::PTEKind::Z16);
+            REQUIRE(view->GetPageKind(adjacent + PageSize) == Tegra::PTEKind::Z16);
+            REQUIRE(view->GpuToCpuAddress(adjacent) == adjacent_first);
+            REQUIRE(view->GpuToCpuAddress(adjacent + PageSize) == adjacent_second);
+            REQUIRE(pool.Unmap(space, adjacent, adjacent + 2 * PageSize - 1).IsSuccess());
+        }
+
+        {
             std::array<u8, 8> transfer;
             transfer.fill(0xcc);
             REQUIRE_FALSE(view->ReadBlockChecked(va + size - 4, transfer));

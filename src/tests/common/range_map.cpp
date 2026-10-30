@@ -14,6 +14,26 @@ enum class MappedEnum : u32 {
     Valid_3 = 3,
 };
 
+TEST_CASE("Range Map swap commits prepared boundaries and preserves the previous map",
+          "[common][ipc]") {
+    Common::RangeMap<u64, MappedEnum> current{MappedEnum::Invalid};
+    current.Map(0x1000, 0x3000, MappedEnum::Valid_1);
+    auto prepared = current;
+    prepared.Map(0x2000, 0x3000, MappedEnum::Valid_2);
+    REQUIRE(current.GetValueAt(0x2000) == MappedEnum::Valid_1);
+    static_assert(noexcept(current.Swap(prepared)));
+    current.Swap(prepared);
+    REQUIRE(current.GetValueAt(0x1000) == MappedEnum::Valid_1);
+    REQUIRE(current.GetValueAt(0x2000) == MappedEnum::Valid_2);
+    REQUIRE(current.GetValueAt(0x3000) == MappedEnum::Invalid);
+    REQUIRE(prepared.GetValueAt(0x2000) == MappedEnum::Valid_1);
+    Common::RangeMap<u64, MappedEnum> other{MappedEnum::Valid_3};
+    current.Swap(other);
+    REQUIRE(current.GetValueAt(0) == MappedEnum::Valid_3);
+    REQUIRE(other.GetValueAt(0) == MappedEnum::Invalid);
+    REQUIRE(other.GetValueAt(0x2000) == MappedEnum::Valid_2);
+}
+
 TEST_CASE("Range Map: Setup", "[video_core]") {
     Common::RangeMap<u64, MappedEnum> my_map(MappedEnum::Invalid);
     my_map.Map(3000, 3500, MappedEnum::Valid_1);
