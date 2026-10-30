@@ -208,6 +208,13 @@ TEST_CASE("Native mapping leases validate backing and exclude concurrent unmap",
         auto moved = std::move(lease);
         REQUIRE_FALSE(lease.ResolveContiguous(base, 4, false));
         REQUIRE(lease.ContiguousPrefix(base, 4, false) == 0);
+        std::array<u8, 4> checked;
+        checked.fill(0xcc);
+        REQUIRE_FALSE(lease.ReadBlockChecked(base, checked));
+        REQUIRE_FALSE(moved.ReadBlockChecked(base + 3 * Kernel::PageSize - 2, checked));
+        REQUIRE(checked == std::array<u8, 4>{0xcc, 0xcc, 0xcc, 0xcc});
+        REQUIRE(moved.ReadBlockChecked(base, checked));
+        REQUIRE(checked == std::array<u8, 4>{0x44, 0x33, 0x22, 0x11});
         std::stop_source cancelled;
         cancelled.request_stop();
         REQUIRE(moved.ContiguousPrefix(base, 4, false, cancelled.get_token()) == 0);
@@ -927,6 +934,21 @@ TEST_CASE("GPU pins retain real heap pages until partial unlock or process table
             REQUIRE(constants_a.ReadCbufValue(1, 0) == 11);
             REQUIRE(constants_b.ReadCbufValue(1, 0) == 22);
             REQUIRE_THROWS_AS(constants_a.ReadCbufValue(1, 13), Shader::RuntimeError);
+            auto rescheduled = native;
+            rescheduled.back().words[3] ^=
+                0x200; // Scheduling delay, without changing EXIT semantics.
+            REQUIRE(Shader::Ampere::LowerToMaxwell(rescheduled).instructions ==
+                    Shader::Ampere::LowerToMaxwell(native).instructions);
+            REQUIRE(view->WriteBlockChecked(
+                va + code_offset,
+                {reinterpret_cast<const u8*>(rescheduled.data()), sizeof(rescheduled)}));
+            VideoCommon::ComputeEnvironment constants_rescheduled{compute, *view, va + code_offset,
+                                                                  0};
+            REQUIRE(constants_rescheduled.ReadInstruction(0x50) ==
+                    constants_b.ReadInstruction(0x50));
+            REQUIRE(constants_rescheduled.CalculateHash() != constants_b.CalculateHash());
+            REQUIRE(view->WriteBlockChecked(
+                va + code_offset, {reinterpret_cast<const u8*>(native.data()), sizeof(native)}));
             REQUIRE(compute.ConfigureNativeLaunch(descriptor));
             env.SetCachedSize(env.CachedSizeBytes());
             REQUIRE_THROWS_AS(env.SetCachedSize(env.CachedSizeBytes() + 8), Shader::RuntimeError);

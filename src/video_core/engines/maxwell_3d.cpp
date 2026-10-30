@@ -12,6 +12,10 @@
 #include "common/settings.h"
 #include "core/core.h"
 #include "core/core_timing.h"
+#include "shader_recompiler/exception.h"
+#include "shader_recompiler/frontend/ampere/graphics_header.h"
+#include "shader_recompiler/frontend/maxwell/translate_program.h"
+#include "shader_recompiler/host_translate_info.h"
 #include "video_core/control/native_cache.h"
 #include "video_core/control/native_color_clear.h"
 #include "video_core/control/native_constant_buffer.h"
@@ -24,6 +28,7 @@
 #include "video_core/gpu.h"
 #include "video_core/memory_manager.h"
 #include "video_core/rasterizer_interface.h"
+#include "video_core/shader_environment.h"
 #include "video_core/textures/texture.h"
 
 namespace Tegra::Engines {
@@ -81,6 +86,131 @@ void LogNativeClearState(const Maxwell3D& engine, u32 argument) {
         engine.GetRegisterValue(0x382), engine.GetRegisterValue(0x300),
         engine.GetRegisterValue(0x301), engine.GetRegisterValue(0x3ee),
         engine.GetRegisterValue(0x54d), engine.GetRegisterValue(0x574));
+}
+
+void LogNativeDrawState(Maxwell3D& engine, MemoryManager& memory, u32 begin,
+                        std::span<const u32> parameters, bool inspect_memory,
+                        std::stop_token stop) {
+    LOG_DEBUG(HW_GPU,
+              "Native draw context: begin={:#x}, parameters={}, index_size={:#x}/{:#x}, "
+              "index={:#x}/{:#x}, format={}, first={}, base_vertex={:#x}, base_instance={:#x}, "
+              "restart={:#x}/{:#x}, rt_control={:#x}, zeta_enable={:#x}",
+              begin, parameters.size(), engine.GetRegisterValue(0x8e),
+              engine.GetRegisterValue(0x8f), engine.GetRegisterValue(0x5f2),
+              engine.GetRegisterValue(0x5f3), engine.GetRegisterValue(0x5f6),
+              engine.GetRegisterValue(0x5f7), engine.GetRegisterValue(0x50d),
+              engine.GetRegisterValue(0x50e), engine.GetRegisterValue(0x591),
+              engine.GetRegisterValue(0x592), engine.GetRegisterValue(0x487),
+              engine.GetRegisterValue(0x54e));
+    // This common indexed-draw shape programs its index state after BEGIN.
+    // Report only the bounded, typed candidate, without dumping arbitrary input.
+    if (parameters.size() == 5 && parameters[0] == begin && parameters[1] <= 0xff &&
+        parameters[3] <= 2) {
+        LOG_DEBUG(HW_GPU,
+                  "Native indexed macro candidate: address={:#x}/{:#x}, format={}, count={}",
+                  parameters[1], parameters[2], parameters[3], parameters[4]);
+    }
+    using Header = Shader::Ampere::GraphicsHeader;
+    for (u32 stage = 0; stage < 6 && !stop.stop_requested(); ++stage) {
+        const u32 base = 0x800 + stage * 0x10;
+        const u32 control = engine.GetRegisterValue(base);
+        const u32 upper = engine.GetRegisterValue(base + 5);
+        const u32 lower = engine.GetRegisterValue(base + 6);
+        LOG_DEBUG(HW_GPU, "Native shader state: stage={}, control={:#x}, address={:#x}/{:#x}",
+                  stage, control, upper, lower);
+        if (!inspect_memory || (!(control & 1) && stage != 1) || upper > 0xff ||
+            (upper == 0 && lower == 0) || (lower & 15))
+            continue;
+        const GPUVAddr address = (GPUVAddr{upper} << 32) | lower;
+        Header::Words words{};
+        if (!memory.ReadBlockChecked(address,
+                                     {reinterpret_cast<u8*>(words.data()), sizeof(words)})) {
+            LOG_DEBUG(HW_GPU, "Native shader header unreadable: stage={}, address={:#x}", stage,
+                      address);
+            continue;
+        }
+        u32 nonzero{}, extension{};
+        for (u32 i = 0; i < words.size(); ++i) {
+            if (words[i]) {
+                nonzero |= 1U << i;
+                if (i >= 20)
+                    extension |= 1U << (i - 20);
+            }
+        }
+        const auto decoded =
+            Header::Decode(words, stage == 5 ? Header::Stage::Fragment : Header::Stage::Vertex);
+        LOG_DEBUG(HW_GPU,
+                  "Native shader header: stage={}, type={}, version={}, shader_type={}, sass={}, "
+                  "local_low={:#x}, local_high={:#x}, crs_reserved={:#x}, nonzero={:#x}, "
+                  "extension={:#x}, decode_error={}, unsupported_words={:#x}",
+                  stage, words[0] & 31, (words[0] >> 5) & 31, (words[0] >> 10) & 15,
+                  (words[0] >> 17) & 15, words[1] & 0xffffff, words[2] & 0xffffff,
+                  words[3] & 0xffffff, nonzero, extension, static_cast<u32>(decoded.error),
+                  decoded.unsupported_words);
+        if (decoded.header && (stage == 1 || stage == 5)) {
+            try {
+                VideoCommon::GraphicsEnvironment captured{
+                    engine, memory,
+                    stage == 1 ? Maxwell3D::Regs::ShaderType::VertexB
+                               : Maxwell3D::Regs::ShaderType::Pixel,
+                    VideoCommon::GraphicsEnvironment::NativeProgram{address, stop}};
+                LOG_DEBUG(HW_GPU,
+                          "Native graphics capture: stage={}, source_bytes={}, lowered_bytes={}, "
+                          "hash={:#x}",
+                          stage, captured.SourceSizeBytes(), captured.CachedSizeBytes(),
+                          captured.CalculateHash());
+                Shader::ObjectPool<Shader::Maxwell::Flow::Block> flow_pool;
+                Shader::ObjectPool<Shader::IR::Inst> inst_pool;
+                Shader::ObjectPool<Shader::IR::Block> block_pool;
+                Shader::Maxwell::Flow::CFG cfg{captured, flow_pool, captured.StartAddress()};
+                Shader::HostTranslateInfo host_info;
+                host_info.ApplyDescriptorLimitPolicy();
+                const auto program = Shader::Maxwell::TranslateProgram(inst_pool, block_pool,
+                                                                       captured, cfg, host_info);
+                const auto& info = program.info;
+                u32 generic_inputs{}, generic_outputs{}, color_outputs{};
+                for (u32 i = 0; i < 32; ++i) {
+                    generic_inputs |= u32{info.loads.Generic(i)} << i;
+                    generic_outputs |= u32{info.stores.Generic(i)} << i;
+                }
+                for (u32 i = 0; i < info.stores_frag_color.size(); ++i)
+                    color_outputs |= u32{info.stores_frag_color[i]} << i;
+                LOG_DEBUG(
+                    HW_GPU,
+                    "Native graphics IR: stage={}, generic_inputs={:#x}, generic_outputs={:#x}, "
+                    "color_outputs={:#x}, cbuf_mask={:#x}, storage={}, textures={}, images={}, "
+                    "render_area={}",
+                    stage, generic_inputs, generic_outputs, color_outputs,
+                    info.constant_buffer_mask, info.storage_buffers_descriptors.size(),
+                    info.texture_descriptors.size() + info.texture_buffer_descriptors.size(),
+                    info.image_descriptors.size() + info.image_buffer_descriptors.size(),
+                    info.uses_render_area);
+            } catch (const Shader::Exception& error) {
+                LOG_DEBUG(HW_GPU, "Native graphics capture rejected: stage={}, reason={}", stage,
+                          error.what());
+            }
+        }
+    }
+    for (u32 stage = 0; stage < engine.state.shader_stages.size(); ++stage) {
+        const auto& buffers = engine.state.shader_stages[stage].const_buffers;
+        u32 reported{}, enabled{};
+        for (u32 slot = 0; slot < buffers.size(); ++slot) {
+            const auto& buffer = buffers[slot];
+            if (!buffer.enabled)
+                continue;
+            enabled |= 1U << slot;
+            if (reported == 4)
+                continue;
+            LOG_DEBUG(HW_GPU, "Native graphics CBUF: stage={}, slot={}, address={:#x}, size={:#x}",
+                      stage, slot, buffer.address, buffer.size);
+            ++reported;
+        }
+        LOG_DEBUG(HW_GPU, "Native graphics CBUF mask: stage={}, enabled={:#x}", stage, enabled);
+    }
+    LOG_DEBUG(HW_GPU, "Native texture pools: header={:#x}/{:#x}/{:#x}, sampler={:#x}/{:#x}/{:#x}",
+              engine.GetRegisterValue(0x55d), engine.GetRegisterValue(0x55e),
+              engine.GetRegisterValue(0x55f), engine.GetRegisterValue(0x557),
+              engine.GetRegisterValue(0x558), engine.GetRegisterValue(0x559));
 }
 } // namespace
 
@@ -648,6 +778,11 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
                 if (!self.engine.IsNativeStateMethod(method)) {
                     if (method == 0x674)
                         LogNativeClearState(self.engine, value);
+                    if (method == 0x586)
+                        LogNativeDrawState(
+                            self.engine, self.engine.memory_manager, value,
+                            self.engine.native_macro_processor->InvocationParameters(),
+                            self.engine.NativeWaitForIdle(), self.engine.native_stop_token);
                     LOG_ERROR(HW_GPU,
                               "Unsupported native graphics macro output method={:#x}, value={:#x}",
                               method, value);
@@ -979,6 +1114,9 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
         if (!IsNativeStateMethod(method)) {
             if (method == 0x674)
                 LogNativeClearState(*this, method_argument);
+            if (method == 0x586)
+                LogNativeDrawState(*this, memory_manager, method_argument, {}, NativeWaitForIdle(),
+                                   native_stop_token);
             native_action_failed = true;
             return;
         }

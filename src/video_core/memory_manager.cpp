@@ -703,6 +703,13 @@ MemoryManager::MappingLease MemoryManager::AcquireMappingLease() {
     return MappingLease{*this};
 }
 
+bool MemoryManager::MappingLease::ReadBlockChecked(GPUVAddr address, std::span<u8> output) const {
+    if (!lock.owns_lock() || !manager->IsValidAccessRange(address, output.size(), false))
+        return false;
+    manager->ReadBlock(address, output.data(), output.size());
+    return true;
+}
+
 u64 MemoryManager::MappingGeneration() const {
     return mapping_generation.load(std::memory_order_acquire);
 }

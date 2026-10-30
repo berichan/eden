@@ -247,4 +247,8 @@ bool NativeMacroProcessor::HasPendingInvocation() const {
     return invocation.has_value();
 }
 
+std::span<const u32> NativeMacroProcessor::InvocationParameters() const {
+    return parameters;
+}
+
 } // namespace Tegra::Control

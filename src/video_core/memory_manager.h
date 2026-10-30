@@ -137,6 +137,7 @@ public:
         std::optional<DAddr> ResolveContiguous(GPUVAddr address, size_t size, bool write) const;
         size_t ContiguousPrefix(GPUVAddr address, size_t max_size, bool write,
                                 std::stop_token stop_token = {}) const;
+        bool ReadBlockChecked(GPUVAddr address, std::span<u8> output) const;
 
     private:
         friend class MemoryManager;

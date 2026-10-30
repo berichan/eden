@@ -49,6 +49,8 @@ public:
     Error GetError() const;
     const TuringMacroEngine::Result& GetExecutionResult() const;
     bool HasPendingInvocation() const;
+    // GPU-worker callback view, valid only until the current CallMethod returns.
+    std::span<const u32> InvocationParameters() const;
 
 private:
     struct PrivateProgram;

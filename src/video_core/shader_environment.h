@@ -13,15 +13,17 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <stop_token>
 #include <type_traits>
-#include "common/container/unordered_map.h"
 #include <vector>
+#include "common/container/unordered_map.h"
 
 #include "common/common_types.h"
 #include "common/polyfill_thread.h"
 #include "common/unique_function.h"
 #include "shader_recompiler/environment.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/memory_manager.h"
 
 namespace Tegra {
 class Memorymanager;
@@ -78,7 +80,8 @@ public:
 protected:
     std::optional<u64> TryFindSize();
 
-    void InitializeNativeCode(u32 source_header_size);
+    void InitializeNativeCode(u32 source_header_size, std::stop_token stop = {},
+                              const Tegra::MemoryManager::MappingLease* mapping = nullptr);
     size_t native_source_size{};
     u64 native_specialization_hash{};
 
@@ -114,11 +117,21 @@ protected:
 
 class GraphicsEnvironment final : public GenericEnvironment {
 public:
+    struct NativeProgram {
+        GPUVAddr header_address;
+        std::stop_token stop;
+    };
     explicit GraphicsEnvironment() = default;
     explicit GraphicsEnvironment(Tegra::Engines::Maxwell3D& maxwell3d_,
                                  Tegra::MemoryManager& gpu_memory_,
                                  Tegra::Engines::Maxwell3D::Regs::ShaderType program,
                                  GPUVAddr program_base_, u32 start_address_);
+    // Capture on the GPU thread after draining prior writes, before renderer cache
+    // locks. Re-capture before native pipeline lookup; legacy page identity is insufficient.
+    explicit GraphicsEnvironment(Tegra::Engines::Maxwell3D& maxwell3d_,
+                                 Tegra::MemoryManager& gpu_memory_,
+                                 Tegra::Engines::Maxwell3D::Regs::ShaderType program,
+                                 NativeProgram native);
 
     ~GraphicsEnvironment() override = default;
 
@@ -137,6 +150,11 @@ public:
 private:
     Tegra::Engines::Maxwell3D* maxwell3d{};
     size_t stage_index{};
+    std::array<Tegra::Engines::ConstBufferInfo, Tegra::Engines::Maxwell3D::Regs::MaxConstBuffers>
+        native_constant_buffers{};
+    u64 native_mapping_generation{};
+    const Tegra::MemoryManager::MappingLease* native_capture_mapping{};
+    std::vector<u8> native_driver_constants;
 };
 
 class ComputeEnvironment final : public GenericEnvironment {

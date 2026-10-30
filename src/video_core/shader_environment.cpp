@@ -20,9 +20,11 @@
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
 #include "common/logging.h"
+#include "common/scope_exit.h"
 #include "common/settings.h"
 #include "shader_recompiler/environment.h"
 #include "shader_recompiler/exception.h"
+#include "shader_recompiler/frontend/ampere/graphics_header.h"
 #include "shader_recompiler/frontend/ampere/lower_to_maxwell.h"
 #include "shader_recompiler/frontend/ampere/program_address_map.h"
 #include "shader_recompiler/frontend/ampere/program_capture.h"
@@ -213,7 +215,8 @@ size_t GenericEnvironment::ReadSizeBytes() const noexcept {
 }
 
 bool GenericEnvironment::CanBeSerialized() const noexcept {
-    return !has_unbound_instructions;
+    // The current disk format cannot retain native source/specialization identity.
+    return !native_source_size && !has_unbound_instructions;
 }
 
 u64 GenericEnvironment::CalculateHash() const {
@@ -317,7 +320,8 @@ std::optional<u64> GenericEnvironment::TryFindSize() {
     return std::nullopt;
 }
 
-void GenericEnvironment::InitializeNativeCode(u32 source_header_size) {
+void GenericEnvironment::InitializeNativeCode(u32 source_header_size, std::stop_token stop,
+                                              const Tegra::MemoryManager::MappingLease* mapping) {
     using Shader::Ampere::Instruction;
     if (!gpu_memory->IsWithinGPUAddressRange(program_base)) {
         throw Shader::RuntimeError("Invalid native shader base: {:#x}", program_base);
@@ -326,11 +330,14 @@ void GenericEnvironment::InitializeNativeCode(u32 source_header_size) {
     std::vector<Instruction> native;
     bool complete{};
     for (u32 index = 0; index < capture.MaximumInstructions; ++index) {
+        if (stop.stop_requested())
+            throw Shader::RuntimeError("Native shader capture cancelled");
         const GPUVAddr address =
             program_base + source_header_size + u64{index} * sizeof(Instruction);
         Instruction instruction;
-        if (!gpu_memory->ReadBlockChecked(
-                address, {reinterpret_cast<u8*>(&instruction), sizeof(instruction)})) {
+        const std::span output{reinterpret_cast<u8*>(&instruction), sizeof(instruction)};
+        if (!(mapping ? mapping->ReadBlockChecked(address, output)
+                      : gpu_memory->ReadBlockChecked(address, output))) {
             throw Shader::RuntimeError("Unmapped native shader instruction: {:#x}", address);
         }
         native.push_back(instruction);
@@ -347,10 +354,15 @@ void GenericEnvironment::InitializeNativeCode(u32 source_header_size) {
         throw Shader::RuntimeError("Native shader exceeds capture limit");
     }
     const auto lowered = Shader::Ampere::LowerToMaxwell(native);
+    if (stop.stop_requested())
+        throw Shader::RuntimeError("Native shader capture cancelled");
     if (!lowered) {
         throw Shader::RuntimeError("Native shader at {:#x}, instruction {:#x}: {}", program_base,
                                    lowered.error_offset, lowered.error);
     }
+    native_specialization_hash =
+        Common::CityHash64WithSeed(reinterpret_cast<const char*>(native.data()),
+                                   native.size() * sizeof(Instruction), native_specialization_hash);
     if (lowered.required_texture_buffer != ~0U) {
         texture_bound = lowered.required_texture_buffer;
     }
@@ -428,7 +440,112 @@ GraphicsEnvironment::GraphicsEnvironment(Tegra::Engines::Maxwell3D& maxwell3d_,
         maxwell3d->engine_state == Tegra::Engines::Maxwell3D::EngineHint::OnHLEMacro;
 }
 
+GraphicsEnvironment::GraphicsEnvironment(Tegra::Engines::Maxwell3D& maxwell3d_,
+                                         Tegra::MemoryManager& gpu_memory_,
+                                         Maxwell::ShaderType program, NativeProgram native)
+    : GenericEnvironment{gpu_memory_, native.header_address, 0}, maxwell3d{&maxwell3d_} {
+    using Header = Shader::Ampere::GraphicsHeader;
+    if (native.stop.stop_requested())
+        throw Shader::RuntimeError("Native graphics capture cancelled");
+    if (program != Maxwell::ShaderType::VertexB && program != Maxwell::ShaderType::Pixel)
+        throw Shader::RuntimeError("Unsupported native graphics stage: {}",
+                                   static_cast<u32>(program));
+    constexpr u64 AddressLimit = u64{1} << 40;
+    if (program_base >= AddressLimit || Header::SizeBytes > AddressLimit - program_base ||
+        (program_base & 15))
+        throw Shader::RuntimeError("Invalid native graphics header address: {:#x}", program_base);
+    auto mapping = gpu_memory->AcquireMappingLease();
+    native_mapping_generation = gpu_memory->MappingGeneration();
+    native_capture_mapping = &mapping;
+    SCOPE_EXIT {
+        native_capture_mapping = nullptr;
+    };
+    Header::Words source{};
+    if (!mapping.ReadBlockChecked(program_base,
+                                  {reinterpret_cast<u8*>(source.data()), sizeof(source)}))
+        throw Shader::RuntimeError("Unmapped native graphics header: {:#x}", program_base);
+    const bool vertex = program == Maxwell::ShaderType::VertexB;
+    const auto decoded =
+        Header::Decode(source, vertex ? Header::Stage::Vertex : Header::Stage::Fragment);
+    if (!decoded.header)
+        throw Shader::RuntimeError("Unsupported native graphics header: error={}, words={:#x}",
+                                   static_cast<u32>(decoded.error), decoded.unsupported_words);
+    sph = decoded.header->metadata;
+    local_memory_size = decoded.header->local_memory_size;
+    stage = vertex ? Shader::Stage::VertexB : Shader::Stage::Fragment;
+    stage_index = vertex ? 0 : 4;
+    native_constant_buffers = maxwell3d->state.shader_stages[stage_index].const_buffers;
+    initial_offset = sizeof(sph);
+    is_proprietary_driver = true;
+    texture_bound = maxwell3d->regs.bindless_texture_const_buffer_slot;
+    viewport_transform_state = maxwell3d->GetRegisterValue(0x64b);
+    if (viewport_transform_state > 1)
+        throw Shader::RuntimeError("Invalid native viewport transform state");
+    native_specialization_hash =
+        Common::CityHash64(reinterpret_cast<const char*>(source.data()), sizeof(source));
+    native_specialization_hash =
+        Common::CityHash64WithSeed(reinterpret_cast<const char*>(&viewport_transform_state),
+                                   sizeof(viewport_transform_state), native_specialization_hash);
+    const auto& driver = native_constant_buffers[1];
+    if (driver.enabled) {
+        if (driver.size == 0 || driver.size > 0x1ffff || driver.address >= AddressLimit ||
+            driver.size > AddressLimit - driver.address)
+            throw Shader::RuntimeError("Invalid native graphics driver constant range");
+        native_driver_constants.resize(driver.size);
+        if (!mapping.ReadBlockChecked(driver.address, native_driver_constants))
+            throw Shader::RuntimeError("Unmapped native graphics driver constants");
+        native_specialization_hash = Common::CityHash64WithSeed(
+            reinterpret_cast<const char*>(native_driver_constants.data()),
+            native_driver_constants.size(), native_specialization_hash);
+    }
+    InitializeNativeCode(Header::SizeBytes, native.stop, &mapping);
+    start_address = sizeof(sph);
+    Shader::ObjectPool<Shader::Maxwell::Flow::Block> flow_pool;
+    Shader::Maxwell::Flow::CFG cfg{*this, flow_pool, start_address};
+    std::vector<std::pair<u64, u32>> dependencies{cbuf_values.begin(), cbuf_values.end()};
+    std::ranges::sort(dependencies);
+    for (const auto& [key, value] : dependencies) {
+        const std::array<u64, 2> dependency{key, value};
+        native_specialization_hash =
+            Common::CityHash64WithSeed(reinterpret_cast<const char*>(dependency.data()),
+                                       sizeof(dependency), native_specialization_hash);
+    }
+    if (native.stop.stop_requested())
+        throw Shader::RuntimeError("Native graphics capture cancelled");
+}
+
 u32 GraphicsEnvironment::ReadCbufValue(u32 cbuf_index, u32 cbuf_offset) {
+    if (native_source_size) {
+        const auto& buffers = native_constant_buffers;
+        if (cbuf_index >= buffers.size())
+            throw Shader::RuntimeError("Invalid native graphics constant buffer index");
+        const auto& buffer = buffers[cbuf_index];
+        if (!buffer.enabled || cbuf_offset > buffer.size ||
+            sizeof(u32) > buffer.size - cbuf_offset || buffer.address >= (u64{1} << 40) ||
+            buffer.size > (u64{1} << 40) - buffer.address)
+            throw Shader::RuntimeError("Invalid native graphics constant buffer range");
+        const auto key = MakeCbufKey(cbuf_index, cbuf_offset);
+        if (const auto cached = cbuf_values.find(key); cached != cbuf_values.end())
+            return cached->second;
+        u32 value{};
+        if (cbuf_index == 1) {
+            if (cbuf_offset > native_driver_constants.size() ||
+                sizeof(value) > native_driver_constants.size() - cbuf_offset)
+                throw Shader::RuntimeError("Invalid native graphics driver constant read");
+            std::memcpy(&value, native_driver_constants.data() + cbuf_offset, sizeof(value));
+        } else {
+            const std::span output{reinterpret_cast<u8*>(&value), sizeof(value)};
+            if (native_mapping_generation != gpu_memory->MappingGeneration() ||
+                !(native_capture_mapping
+                      ? native_capture_mapping->ReadBlockChecked(buffer.address + cbuf_offset,
+                                                                 output)
+                      : gpu_memory->ReadBlockChecked(buffer.address + cbuf_offset, output)) ||
+                native_mapping_generation != gpu_memory->MappingGeneration())
+                throw Shader::RuntimeError("Unmapped or changed native graphics constant buffer");
+        }
+        cbuf_values.emplace(key, value);
+        return value;
+    }
     const auto& cbuf{maxwell3d->state.shader_stages[stage_index].const_buffers[cbuf_index]};
     ASSERT(cbuf.enabled);
     u32 value{};
@@ -491,6 +608,8 @@ bool GraphicsEnvironment::IsTexturePixelFormatInteger(u32 handle) {
 }
 
 u32 GraphicsEnvironment::ReadViewportTransformState() {
+    if (native_source_size)
+        return viewport_transform_state;
     const auto& regs{maxwell3d->regs};
     viewport_transform_state = regs.viewport_scale_offset_enabled;
     return viewport_transform_state;
@@ -511,7 +630,7 @@ ComputeEnvironment::ComputeEnvironment(Tegra::Engines::KeplerCompute& kepler_com
     if (kepler_compute->IsNativeMode()) {
         is_proprietary_driver = true;
         initial_offset = sizeof(sph);
-        InitializeNativeCode(0);
+        InitializeNativeCode(0, kepler_compute->GetNativeStopToken());
         start_address = sizeof(sph);
         // The frontend folds the proprietary driver's constant buffer and resolves indirect
         // branch tables during compilation. Include those inputs in pipeline identity.
@@ -521,9 +640,9 @@ ComputeEnvironment::ComputeEnvironment(Tegra::Engines::KeplerCompute& kepler_com
                 throw Shader::RuntimeError("Unmapped native driver constants");
             }
             if (!native_driver_constants.empty()) {
-                native_specialization_hash = Common::CityHash64(
+                native_specialization_hash = Common::CityHash64WithSeed(
                     reinterpret_cast<const char*>(native_driver_constants.data()),
-                    native_driver_constants.size());
+                    native_driver_constants.size(), native_specialization_hash);
             }
         }
         Shader::ObjectPool<Shader::Maxwell::Flow::Block> flow_pool;
