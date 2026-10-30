@@ -3284,6 +3284,94 @@ TEST_CASE("Native capture distinguishes forward branches from call targets beyon
             Capture::Result::InvalidTarget);
 }
 
+TEST_CASE("Native capture finishes predicated reconvergence transfers without inventing returns",
+          "[native-shader]") {
+    using Capture = Shader::Ampere::ProgramCaptureState;
+    const u32 predicate = GENERATE(0U, 8U);
+    Capture loop;
+    REQUIRE(loop.Observe(Native{{0x0944U | (predicate << 12), 16, 0x03c00000, 0}}, 1) ==
+            Capture::Result::Continue);
+    REQUIRE(loop.Observe(Native{{0x7947, 0xffffffe0, 0x0383ffff, 0}}, 2) ==
+            Capture::Result::Continue);
+    REQUIRE(loop.Observe(Native{{0x7941, 0, 0x03800000, 0}}, 3) == Capture::Result::Continue);
+    REQUIRE(loop.Observe(VertexTransform.back(), 4) == Capture::Result::Complete);
+    // Other displacements and incrementing calls cannot inherit that exception.
+    for (const auto call :
+         std::array<Native, 2>{{{{0x0944U | (predicate << 12), 32, 0x03c00000, 0}},
+                                {{0x0944U | (predicate << 12), 16, 0x03800000, 0}}}}) {
+        Capture function;
+        REQUIRE(function.Observe(call, 1) == Capture::Result::Continue);
+        REQUIRE(function.Observe(VertexTransform.back(), 2) == Capture::Result::Continue);
+        REQUIRE(function.Observe(Native{{0x08007950, 0, 0, 0}}, 4) == Capture::Result::Complete);
+    }
+    // Capture is not execution approval: an incomplete lookahead shape must
+    // still fail lowering instead of becoming a call-free executable.
+    const std::array<Native, 3> malformed{{
+        {{0x0944U | (predicate << 12), 16, 0x03c00000, 0}},
+        {{0x7918, 0, 0, 0}},
+        VertexTransform.back(),
+    }};
+    const auto rejected = Shader::Ampere::LowerToMaxwell(malformed);
+    REQUIRE_FALSE(rejected);
+    REQUIRE(rejected.instructions.empty());
+    const std::array<Native, 3> final_exit{{
+        malformed.front(),
+        {{0x7947, 0xffffffe0, 0x0383ffff, 0}},
+        VertexTransform.back(),
+    }};
+    const auto exit_branch = Shader::Ampere::LowerToMaxwell(final_exit);
+    REQUIRE(exit_branch);
+    REQUIRE(exit_branch.source_size == sizeof(final_exit));
+    REQUIRE(Shader::Maxwell::Decode(exit_branch.instructions.front()) ==
+            Shader::Maxwell::Opcode::BRA);
+    const auto branch_predicate =
+        Shader::Maxwell::Instruction{exit_branch.instructions.front()}.Pred();
+    REQUIRE(branch_predicate.index == (predicate & 7));
+    REQUIRE(branch_predicate.negated == ((predicate & 8) != 0));
+    auto conditional_exit = final_exit;
+    conditional_exit.back().words[0] &= ~0xf000U;
+    const auto conditional = Shader::Ampere::LowerToMaxwell(conditional_exit);
+    REQUIRE_FALSE(conditional);
+    REQUIRE(conditional.instructions.empty());
+    auto special_exit = final_exit;
+    special_exit.back().words[2] |= 1U << 20;
+    const auto special = Shader::Ampere::LowerToMaxwell(special_exit);
+    REQUIRE_FALSE(special);
+    REQUIRE(special.instructions.empty());
+}
+
+TEST_CASE("Native predicated loop breaks skip only a proven unconditional backedge",
+          "[native-shader]") {
+    const u32 predicate = GENERATE(0U, 8U);
+    std::array<Native, 4> code{{
+        {{0x944U | (predicate << 12), 16, 0x03c00000, 0}},
+        {{0x7947, 0xffffffe0, 0x0383ffff, 0}},
+        {{0x00057802, 42, 0xf00, 0}},
+        VertexTransform.back(),
+    }};
+    const auto lowered = Shader::Ampere::LowerToMaxwell(code);
+    REQUIRE(lowered);
+    REQUIRE(lowered.source_size == sizeof(code));
+    REQUIRE(Shader::Maxwell::Decode(lowered.instructions.front()) == Shader::Maxwell::Opcode::BRA);
+    const auto pred = Shader::Maxwell::Instruction{lowered.instructions.front()}.Pred();
+    REQUIRE(pred.index == (predicate & 7));
+    REQUIRE(pred.negated == ((predicate & 8) != 0));
+    for (const auto [word, bit] : std::array<std::pair<u32, u32>, 3>{{{0, 15}, {2, 23}, {1, 0}}}) {
+        auto invalid = code;
+        invalid[1].words[word] ^= 1U << bit;
+        const auto rejected = Shader::Ampere::LowerToMaxwell(invalid);
+        REQUIRE_FALSE(rejected);
+        REQUIRE(rejected.instructions.empty());
+    }
+    auto forward = code;
+    forward[1].words[1] = 0;
+    forward[1].words[2] = 0x03800000;
+    REQUIRE_FALSE(Shader::Ampere::LowerToMaxwell(forward));
+    auto malformed = code;
+    malformed[0].words[0] |= 1U << 16;
+    REQUIRE_FALSE(Shader::Ampere::LowerToMaxwell(malformed));
+}
+
 TEST_CASE("Native implicit volume sample preserves XYZ and all four split channels",
           "[native-shader]") {
     const std::array<Native, 2> input{

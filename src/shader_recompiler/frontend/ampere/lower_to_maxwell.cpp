@@ -1727,11 +1727,24 @@ LoweredProgram LowerToMaxwell(std::span<const Instruction> code) {
             break;
         }
         case 0x944: { // Verified CALL.REL.NOINC with R55 holding the return PC
-            // A predicated NOINC forward transfer can terminate a loop at its
-            // reconvergence point without a return-link setup or matching RET.
-            if (native_predicate != 7 && insn.words[1] == 16 && insn.words[2] == 0x03c00000 &&
-                index + 2 < code.size() && code[index + 1].Bits(0, 12) == 0x947 &&
-                code[index + 2].Bits(0, 12) == 0x941) {
+            // A predicated NOINC transfer can skip an unconditional backedge or
+            // reach reconvergence/EXIT without a return-link setup.
+            bool loop_backedge{};
+            if (index + 2 < code.size()) {
+                const auto& backedge = code[index + 1];
+                const u64 raw = backedge.words[1] | (u64{backedge.words[2] & 0x3ffff} << 32);
+                const s64 relative = static_cast<s64>(raw << 14) >> 14;
+                const s64 target = s64{index + 2} * 16 + relative;
+                loop_backedge = backedge.words[0] == 0x7947 &&
+                                (backedge.words[2] & ~0x3ffffU) == 0x03800000 && target >= 0 &&
+                                target % 16 == 0 && target <= s64{index} * 16;
+            }
+            if (native_predicate != 7 && insn.words[0] == (0x944U | (native_predicate << 12)) &&
+                insn.words[1] == 16 && insn.words[2] == 0x03c00000 && index + 2 < code.size() &&
+                code[index + 1].Bits(0, 12) == 0x947 &&
+                (loop_backedge || code[index + 2].Bits(0, 12) == 0x941 ||
+                 (code[index + 2].Bits(0, 12) == 0x94d && code[index + 2].Bits(12, 4) == 7 &&
+                  code[index + 2].Bits(84, 2) == 0 && code[index + 2].Bits(87, 4) == 7))) {
                 relocations.push_back({static_cast<u32>(result.instructions.size()), index + 2});
                 emit(0xe24000000000000fULL | predicate);
                 break;

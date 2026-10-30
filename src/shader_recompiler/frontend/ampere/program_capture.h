@@ -23,7 +23,14 @@ public:
             const s64 target = s64{index} * 16 + 16 + relative;
             if (target < 0 || target % 16 || target >= MaximumInstructions * 16)
                 return Result::InvalidTarget;
-            if (opcode == 0x944) {
+            // The lowerer can represent a predicated NOINC +16 transfer as a
+            // loop exit. It verifies the following backedge or reconvergence
+            // shape before execution; collecting it must not require a RET.
+            // Software-linked calls use an unpredicated transfer and still
+            // require their epilogue beyond the main EXIT.
+            const bool loop_exit = opcode == 0x944 && instruction.Bits(12, 4) != 7 &&
+                                   instruction.words[1] == 16 && instruction.words[2] == 0x03c00000;
+            if (opcode == 0x944 && !loop_exit) {
                 last_call_target = std::max(last_call_target, static_cast<u32>(target / 16));
             } else {
                 last_forward_target = std::max(last_forward_target, static_cast<u32>(target / 16));

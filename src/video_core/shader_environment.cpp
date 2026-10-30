@@ -353,12 +353,43 @@ void GenericEnvironment::InitializeNativeCode(u32 source_header_size, std::stop_
         }
     }
     if (!complete) {
+        std::array<u32, 4> counts{};
+        for (u32 index = 0; index < native.size(); ++index) {
+            const auto& instruction = native[index];
+            const u32 opcode = instruction.Bits(0, 12);
+            const u32 kind = opcode == 0x94d ? 0 : opcode == 0x950 ? 1 : opcode == 0x944 ? 2 : 3;
+            if (kind == 3 && opcode != 0x947 && opcode != 0x945)
+                continue;
+            if (counts[kind]++ < 4) {
+                LOG_DEBUG(HW_GPU,
+                          "Native capture control: address={:#x}, index={}, opcode={:#x}, "
+                          "predicate={:#x}, displacement={:#x}/{:#x}",
+                          program_base, index, opcode, instruction.Bits(12, 4),
+                          instruction.words[1],
+                          instruction.words[2] & (opcode == 0x945 ? 0 : 0x3ffffU));
+            }
+        }
+        LOG_DEBUG(HW_GPU,
+                  "Native capture limit: address={:#x}, instructions={}, exits={}, returns={}, "
+                  "calls={}, branches={}",
+                  program_base, native.size(), counts[0], counts[1], counts[2], counts[3]);
         throw Shader::RuntimeError("Native shader exceeds capture limit");
     }
     const auto lowered = Shader::Ampere::LowerToMaxwell(native);
     if (stop.stop_requested())
         throw Shader::RuntimeError("Native shader capture cancelled");
     if (!lowered) {
+        const u32 failed = lowered.error_offset / sizeof(Instruction);
+        const u32 first = failed > 2 ? failed - 2 : 0;
+        const u32 last = static_cast<u32>((std::min)(u64{native.size()}, u64{failed} + 4));
+        for (u32 index = first; index < last; ++index) {
+            const auto& instruction = native[index];
+            LOG_DEBUG(HW_GPU,
+                      "Native lowering context: address={:#x}, index={}, failed={}, "
+                      "words={:#x}/{:#x}/{:#x}/{:#x}",
+                      program_base, index, index == failed, instruction.words[0],
+                      instruction.words[1], instruction.words[2], instruction.words[3]);
+        }
         throw Shader::RuntimeError("Native shader at {:#x}, instruction {:#x}: {}", program_base,
                                    lowered.error_offset, lowered.error);
     }
