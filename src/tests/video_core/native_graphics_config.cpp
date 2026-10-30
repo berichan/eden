@@ -162,3 +162,80 @@ TEST_CASE("Native texture LOD initialization preserves separate masked fields",
     REQUIRE(host.waits == 3);
     REQUIRE(config.TextureLodDebug() == 3);
 }
+
+TEST_CASE("Native SWDX bundle initialization retains each independently masked context field",
+          "[ipc][video_core]") {
+    Config config;
+    Host host;
+    constexpr std::array<std::array<u32, 3>, 22> writes{{
+        {0x418e40, 0x7, 0xf},
+        {0x418e58, 0x842, 0xffff},
+        {0x418e40, 0x70, 0xf0},
+        {0x418e58, 0x04f10000, 0xffff0000},
+        {0x418e40, 0x700, 0xf00},
+        {0x418e5c, 0x53, 0xffff},
+        {0x418e40, 0x7000, 0xf000},
+        {0x418e5c, 0x00e90000, 0xffff0000},
+        {0x418e40, 0x70000, 0xf0000},
+        {0x418e60, 0xea, 0xffff},
+        {0x418e40, 0x700000, 0xf00000},
+        {0x418e60, 0x00eb0000, 0xffff0000},
+        {0x418e40, 0x7000000, 0xf000000},
+        {0x418e64, 0x208, 0xffff},
+        {0x418e40, 0x70000000, 0xf0000000},
+        {0x418e64, 0x02090000, 0xffff0000},
+        {0x418e44, 0x7, 0xf},
+        {0x418e68, 0x20a, 0xffff},
+        {0x418e44, 0x70, 0xf0},
+        {0x418e68, 0x020b0000, 0xffff0000},
+        {0x418e44, 0x700, 0xf00},
+        {0x418e6c, 0x644, 0xffff},
+    }};
+    REQUIRE(config.ApplyMaskedRegister(0x418800, 1, 1, host.Bind()) == Config::Error::None);
+    REQUIRE(config.SwdxBundle(0x418e40)->known_mask == 0);
+    for (const auto& write : writes) {
+        REQUIRE(config.ApplyMaskedRegister(write[0], write[1], write[2], host.Bind()) ==
+                Config::Error::None);
+    }
+    REQUIRE(config.SwdxBundle(0x418e40)->value == 0x77777777);
+    REQUIRE(config.SwdxBundle(0x418e40)->known_mask == 0xffffffff);
+    REQUIRE(config.SwdxBundle(0x418e44)->value == 0x777);
+    REQUIRE(config.SwdxBundle(0x418e44)->known_mask == 0xfff);
+    REQUIRE(config.SwdxBundle(0x418e58)->value == 0x04f10842);
+    REQUIRE(config.SwdxBundle(0x418e5c)->value == 0x00e90053);
+    REQUIRE(config.SwdxBundle(0x418e60)->value == 0x00eb00ea);
+    REQUIRE(config.SwdxBundle(0x418e64)->value == 0x02090208);
+    REQUIRE(config.SwdxBundle(0x418e68)->value == 0x020b020a);
+    REQUIRE(config.SwdxBundle(0x418e6c)->value == 0x644);
+    REQUIRE(config.SwdxBundle(0x418e6c)->known_mask == 0xffff);
+    REQUIRE(config.PolygonOffsetNanIsZero());
+    REQUIRE(host.waits == 23);
+}
+
+TEST_CASE("Native SWDX bundle writes cannot acknowledge unsupported or unfinished settings",
+          "[ipc][video_core]") {
+    Config config;
+    Host host;
+    for (u32 address : {0x418e48U, 0x418e4cU, 0x418e50U, 0x418e54U, 0x418e70U}) {
+        REQUIRE_FALSE(config.SwdxBundle(address));
+        REQUIRE(config.ApplyMaskedRegister(address, 7, 0xf, host.Bind()) ==
+                Config::Error::UnsupportedRegister);
+    }
+    REQUIRE(config.ApplyMaskedRegister(0x418e44, 0x7000, 0xf000, host.Bind()) ==
+            Config::Error::UnsupportedMask);
+    REQUIRE(config.ApplyMaskedRegister(0x418e40, 0x77, 0xff, host.Bind()) ==
+            Config::Error::UnsupportedMask);
+    REQUIRE(config.ApplyMaskedRegister(0x418e6c, 0, 0xffff0000, host.Bind()) ==
+            Config::Error::UnsupportedMask);
+    REQUIRE(config.ApplyMaskedRegister(0x418e40, 0xf, 0xf, host.Bind()) ==
+            Config::Error::UnsupportedValue);
+    REQUIRE(host.waits == 0);
+    host.accept = false;
+    REQUIRE(config.ApplyMaskedRegister(0x418e40, 7, 0xf, host.Bind()) == Config::Error::WaitFailed);
+    REQUIRE(config.SwdxBundle(0x418e40)->known_mask == 0);
+    host.accept = true;
+    host.cancel_during_wait = true;
+    REQUIRE(config.ApplyMaskedRegister(0x418e40, 7, 0xf, host.Bind()) == Config::Error::Cancelled);
+    REQUIRE(config.SwdxBundle(0x418e40)->known_mask == 0);
+    REQUIRE(config.SwdxBundle(0x418e40)->value == 0);
+}

@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <array>
+#include <optional>
 #include "common/common_types.h"
 
 namespace Tegra::Control {
@@ -33,6 +35,11 @@ public:
     u32 TextureSamplerDebugKnownMask() const;
     u32 TextureLodDebug() const;
     u32 TextureLodDebugKnownMask() const;
+    struct MaskedValue {
+        u32 value{};
+        u32 known_mask{};
+    };
+    std::optional<MaskedValue> SwdxBundle(u32 address) const;
 
 private:
     u32 setup_debug_value{};
@@ -42,6 +49,7 @@ private:
     u32 texture_sampler_debug_known_mask{};
     u32 texture_lod_debug{};
     u32 texture_lod_debug_known_mask{};
+    std::array<MaskedValue, 8> swdx_bundles{};
 };
 
 } // namespace Tegra::Control
