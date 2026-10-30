@@ -71,7 +71,7 @@ private:
     void Release();
     void Finish(State state, Tegra::Control::NativeCommandStream::Result result);
     bool ReleaseSyncpoint(Core::System& system, u32 upper, u32 lower, u32 payload, u32 operation,
-                          std::stop_token stop_token);
+                          std::stop_token stop_token, bool compute);
 
     const std::shared_ptr<NativeGpuChannel> channel;
     const std::shared_ptr<const NativeGpuChannel::CommandRing> ring;

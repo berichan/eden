@@ -91,8 +91,31 @@ bool KeplerCompute::CallNativeMethod(u32 method, u32 value, bool last, std::stop
             const auto& self = static_cast<HostContext*>(context)->owner;
             return self.rasterizer && self.rasterizer->InvalidateNativeCaches(action);
         },
+        {&context,
+         [](void* opaque, GPUVAddr address, size_t size) {
+             return static_cast<HostContext*>(opaque)->owner.memory_manager.IsWritableRange(address,
+                                                                                            size);
+         },
+         [](void* opaque) {
+             const auto& self = static_cast<HostContext*>(opaque)->owner;
+             return self.rasterizer && self.rasterizer->SynchronizeNativeWork();
+         },
+         [](void* opaque, GPUVAddr address, u32 payload) {
+             return static_cast<HostContext*>(opaque)->owner.memory_manager.WriteBlockChecked(
+                 address, {reinterpret_cast<const u8*>(&payload), sizeof(payload)});
+         },
+         [](void* opaque) {
+             return static_cast<HostContext*>(opaque)->stop_token.stop_requested();
+         }},
     };
     return native_compute->CallMethod(method, value, last, host);
+}
+
+std::optional<std::array<u32, 3>> KeplerCompute::GetNativeReportSemaphore() const {
+    if (!native_compute)
+        return std::nullopt;
+    return std::array{native_compute->ReadRegister(0x6c0), native_compute->ReadRegister(0x6c1),
+                      native_compute->ReadRegister(0x6c2)};
 }
 
 bool KeplerCompute::HasNativeMethodFailure() const {

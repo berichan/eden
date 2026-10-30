@@ -6,10 +6,13 @@
 namespace Tegra::Control {
 
 NativeReportSemaphore::Error NativeReportSemaphore::Release(u32 upper, u32 lower, u32 payload,
-                                                            u32 operation, const Host& host) {
-    // C797: RELEASE, after all preceding writes, ALL pipeline, ONE_WORD structure.
+                                                            u32 operation, const Host& host,
+                                                            Engine engine) {
+    // C797: RELEASE after all preceding writes, ALL pipeline. C7C0: plain RELEASE.
+    // Both supported encodings use a ONE_WORD structure and a real host drain.
     // Reports, timestamps, reductions, acquire and four-word structures need other adapters.
-    if (operation != 0x1000f010) {
+    if ((engine != Engine::Graphics && engine != Engine::Compute) ||
+        operation != (engine == Engine::Graphics ? 0x1000f010U : 0x10000000U)) {
         return Error::UnsupportedOperation;
     }
     if (upper > 0xff || (lower & 3)) {

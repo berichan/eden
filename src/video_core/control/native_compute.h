@@ -9,6 +9,7 @@
 #include "video_core/control/native_gpu_context.h"
 #include "video_core/control/native_inline_upload.h"
 #include "video_core/control/native_macro_processor.h"
+#include "video_core/control/native_report_semaphore.h"
 
 namespace Tegra::Control {
 
@@ -20,6 +21,7 @@ public:
         NativeGpuGraphicsContext::QmdBackend qmd;
         bool (*barrier)(void*){};
         bool (*invalidate_caches)(void*, const NativeCacheInvalidation&){};
+        NativeReportSemaphore::Host report;
     };
     enum class Error {
         None,
@@ -29,7 +31,8 @@ public:
         QmdFailed,
         Cancelled,
         UploadFailed,
-        CacheFailed
+        CacheFailed,
+        ReportFailed
     };
 
     explicit NativeCompute(std::shared_ptr<const NativeGpuGraphicsContext> context);

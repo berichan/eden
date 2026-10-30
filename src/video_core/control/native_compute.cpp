@@ -32,6 +32,9 @@ bool IsStateMethod(u32 method) {
     case 0x1ed:
     case 0x365: // SET_SHADER_CACHE_CONTROL
     case 0x379: // SET_SM_TIMEOUT_INTERVAL
+    case 0x6c0: // SET_REPORT_SEMAPHORE_A-C
+    case 0x6c1:
+    case 0x6c2:
         return true;
     default:
         return (method >= 0x60 && method <= 0x6b) ||  // inline-DMA parameters
@@ -70,6 +73,9 @@ bool NativeCompute::CallMethod(u32 method, u32 value, bool last, const Host& hos
         },
         [](void* opaque, u32 method, u32 value) {
             auto& self = *static_cast<Adapter*>(opaque);
+            // Macro output cannot bypass the GPU channel's cross-engine pending checks.
+            if (method == 0x6c3)
+                return self.owner.Fail(Error::UnsupportedMethod);
             return self.owner.WriteMethod(method, value, self.host);
         },
         [](void* opaque) {
@@ -210,6 +216,14 @@ bool NativeCompute::WriteMethod(u32 method, u32 value, const Host& host) {
         qmd_result = context->SignalQmd(GPUVAddr{registers[0xad]} << 8, value, host.qmd);
         if (!qmd_result.Succeeded()) {
             return Fail(Error::QmdFailed);
+        }
+        break;
+    case 0x6c3: // SET_REPORT_SEMAPHORE_D, direct packets only
+        if (inline_upload.IsPending() ||
+            NativeReportSemaphore::Release(
+                registers[0x6c0], registers[0x6c1], registers[0x6c2], value, host.report,
+                NativeReportSemaphore::Engine::Compute) != NativeReportSemaphore::Error::None) {
+            return Fail(Error::ReportFailed);
         }
         break;
     default:

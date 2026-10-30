@@ -61,6 +61,7 @@ public:
 
     void SetNativeContext(std::shared_ptr<const Control::NativeGpuGraphicsContext> context);
     bool CallNativeMethod(u32 method, u32 value, bool last, std::stop_token stop_token = {});
+    std::optional<std::array<u32, 3>> GetNativeReportSemaphore() const;
     bool HasNativeMethodFailure() const;
     bool HasPendingNativeMacro() const;
     bool HasPendingNativeInlineUpload() const;

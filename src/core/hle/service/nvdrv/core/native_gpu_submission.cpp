@@ -62,7 +62,8 @@ struct NativeGpuChannel::Backend {
         // macros whose output could publish a release before the scope is closed.
         const bool restricted_scope =
             atomic_sequence.IsActive() || payload.maxwell_3d.HasPendingNativeInstrumentation();
-        if (classes[subchannel] == 0xc797 && method == 0x6c3 && PendingFrontend(context)) {
+        if ((classes[subchannel] == 0xc797 || classes[subchannel] == 0xc7c0) && method == 0x6c3 &&
+            PendingFrontend(context)) {
             LOG_ERROR(HW_GPU, "Native report release blocked by unfinished frontend work");
             return false;
         }
@@ -318,7 +319,8 @@ const std::vector<u64>& NativeGpuSubmission::GetEntries() const {
 }
 
 bool NativeGpuSubmission::ReleaseSyncpoint(Core::System& system, u32 upper, u32 lower, u32 payload,
-                                           u32 operation, std::stop_token stop_token) {
+                                           u32 operation, std::stop_token stop_token,
+                                           bool compute) {
     const auto base = graphics->GetAddressSpace()->GetSyncpointShimAddress();
     if (!base) {
         return false;
@@ -357,7 +359,9 @@ bool NativeGpuSubmission::ReleaseSyncpoint(Core::System& system, u32 upper, u32 
         },
         [](void* opaque) { return static_cast<Host*>(opaque)->token.stop_requested(); },
     };
-    const auto release_result = Report::Release(upper, lower, payload, operation, bindings);
+    const auto release_result =
+        Report::Release(upper, lower, payload, operation, bindings,
+                        compute ? Report::Engine::Compute : Report::Engine::Graphics);
     if (release_result != Report::Error::None) {
         LOG_ERROR(
             HW_GPU,
@@ -448,18 +452,31 @@ void NativeGpuSubmission::Execute(Core::System& system, std::stop_token stop_tok
             },
             [](void* opaque, u32 subchannel, u32 method, u32 value, bool last) {
                 auto& self = *static_cast<Host*>(opaque);
-                if (self.backend.classes[subchannel] == 0xc797 && method == 0x6c3) {
-                    const auto& engine = self.backend.channel->payload->maxwell_3d;
-                    const auto upper = engine.GetRegisterValue(0x6c0);
-                    const auto lower = engine.GetRegisterValue(0x6c1);
+                const auto class_id = self.backend.classes[subchannel];
+                if ((class_id == 0xc797 || class_id == 0xc7c0) && method == 0x6c3) {
+                    const bool compute = class_id == 0xc7c0;
+                    std::optional<std::array<u32, 3>> report;
+                    if (compute) {
+                        report = self.backend.channel->payload->kepler_compute
+                                     .GetNativeReportSemaphore();
+                    } else {
+                        const auto& engine = self.backend.channel->payload->maxwell_3d;
+                        report = std::array{engine.GetRegisterValue(0x6c0),
+                                            engine.GetRegisterValue(0x6c1),
+                                            engine.GetRegisterValue(0x6c2)};
+                    }
+                    if (!report)
+                        return false;
+                    const auto upper = (*report)[0];
+                    const auto lower = (*report)[1];
                     const GPUVAddr address = (GPUVAddr{upper} << 32) | lower;
                     const auto base = self.graphics.GetAddressSpace()->GetSyncpointShimAddress();
                     if (base && address >= *base &&
                         address - *base < Tegra::Host1x::SyncpointShim::Size) {
                         return !self.backend.PendingFrontend(self.graphics) &&
                                self.submission.ReleaseSyncpoint(self.system, upper, lower,
-                                                                engine.GetRegisterValue(0x6c2),
-                                                                value, self.token);
+                                                                (*report)[2], value, self.token,
+                                                                compute);
                     }
                 }
                 return self.backend.Call(self.system, self.graphics, subchannel, method, value,

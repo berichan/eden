@@ -10,6 +10,7 @@ namespace Tegra::Control {
 
 class NativeReportSemaphore {
 public:
+    enum class Engine { Graphics, Compute };
     struct Host {
         void* context{};
         bool (*is_writable)(void*, GPUVAddr, size_t){};
@@ -26,7 +27,8 @@ public:
         Cancelled
     };
 
-    static Error Release(u32 upper, u32 lower, u32 payload, u32 operation, const Host& host);
+    static Error Release(u32 upper, u32 lower, u32 payload, u32 operation, const Host& host,
+                         Engine engine = Engine::Graphics);
 };
 
 } // namespace Tegra::Control

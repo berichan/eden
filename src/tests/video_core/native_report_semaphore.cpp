@@ -73,6 +73,26 @@ TEST_CASE("Native report semaphore releases retain full addresses and order writ
     REQUIRE(unaligned.checks == 0);
 }
 
+TEST_CASE("Native report encodings remain specific to graphics and compute classes",
+          "[ipc][video_core]") {
+    Host compute;
+    REQUIRE(Semaphore::Release(0xff, 0xfffffffc, 0x12345678, 0x10000000, compute.Bind(),
+                               Semaphore::Engine::Compute) == Semaphore::Error::None);
+    REQUIRE(compute.address == 0xfffffffffcULL);
+    REQUIRE(compute.data == 0x12345678);
+    Host rejected;
+    REQUIRE(Semaphore::Release(0, 0, 1, 0x10000000, rejected.Bind()) ==
+            Semaphore::Error::UnsupportedOperation);
+    REQUIRE(Semaphore::Release(0, 0, 1, ReleaseAfterWrites, rejected.Bind(),
+                               Semaphore::Engine::Compute) ==
+            Semaphore::Error::UnsupportedOperation);
+    REQUIRE(Semaphore::Release(0, 0, 1, 0x10000004, rejected.Bind(), Semaphore::Engine::Compute) ==
+            Semaphore::Error::UnsupportedOperation);
+    REQUIRE(rejected.checks == 0);
+    REQUIRE(rejected.waits == 0);
+    REQUIRE(rejected.writes == 0);
+}
+
 TEST_CASE("Native report semaphore failures never publish an uncompleted payload",
           "[ipc][video_core]") {
     Host unmapped;

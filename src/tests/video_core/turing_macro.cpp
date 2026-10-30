@@ -1024,6 +1024,62 @@ TEST_CASE("Native compute texture cache invalidation executes its backend and pr
     }
 }
 
+TEST_CASE("Native compute reports validate direct packets and reject macro-emitted releases",
+          "[ipc][video_core]") {
+    Core::System system;
+    Core::DeviceMemory memory;
+    Tegra::MaxwellDeviceMemoryManager backing{memory};
+    auto space = std::make_shared<Tegra::MemoryManager>(system, backing, 32, 1ULL << 32, 16, 12);
+    auto state = std::make_shared<Tegra::Control::AmpereGraphicsState>();
+    auto context = std::make_shared<Tegra::Control::NativeGpuGraphicsContext>(state, space);
+    using Compute = Tegra::Control::NativeCompute;
+    struct Backend {
+        u32 writes{}, waits{};
+        GPUVAddr address{};
+        u32 payload{};
+    } backend;
+    Compute::Host host{};
+    host.report = {&backend, [](void*, GPUVAddr, size_t size) { return size == sizeof(u32); },
+                   [](void* opaque) {
+                       ++static_cast<Backend*>(opaque)->waits;
+                       return true;
+                   },
+                   [](void* opaque, GPUVAddr address, u32 payload) {
+                       auto& self = *static_cast<Backend*>(opaque);
+                       ++self.writes;
+                       self.address = address;
+                       self.payload = payload;
+                       return true;
+                   },
+                   nullptr};
+    Compute direct{context};
+    REQUIRE(direct.CallMethod(0x6c0, 0x21, true, host));
+    REQUIRE(direct.CallMethod(0x6c1, 0x1000, true, host));
+    REQUIRE(direct.CallMethod(0x6c2, 0x12345678, true, host));
+    REQUIRE(direct.CallMethod(0x6c3, 0x10000000, true, host));
+    REQUIRE(backend.waits == 1);
+    REQUIRE(backend.writes == 1);
+    REQUIRE(backend.address == 0x2100001000ULL);
+    REQUIRE(backend.payload == 0x12345678);
+    REQUIRE_FALSE(direct.CallMethod(0x6c3, 0x1000f010, true, host));
+    REQUIRE(backend.writes == 1);
+    Processor uploader{state};
+    MethodHost upload_host;
+    Upload(uploader, SumProgram(0x6c3), upload_host);
+    Compute macro{context};
+    REQUIRE(macro.CallMethod(0xe0a, 0x10000000, false, host));
+    REQUIRE_FALSE(macro.CallMethod(0xe0b, 0, true, host));
+    REQUIRE(backend.writes == 1);
+    REQUIRE(backend.waits == 1);
+    Tegra::Engines::KeplerCompute engine{*space};
+    REQUIRE_FALSE(engine.GetNativeReportSemaphore().has_value());
+    engine.SetNativeContext(context);
+    REQUIRE(engine.CallNativeMethod(0x6c0, 0x21, true));
+    REQUIRE(engine.CallNativeMethod(0x6c1, 0x1000, true));
+    REQUIRE(engine.CallNativeMethod(0x6c2, 0x12345678, true));
+    REQUIRE(engine.GetNativeReportSemaphore() == std::array<u32, 3>{0x21, 0x1000, 0x12345678});
+}
+
 TEST_CASE("Native compute methods fail unsupported actions without invoking legacy compute",
           "[ipc][video_core]") {
     Core::System system;
