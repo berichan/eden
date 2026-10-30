@@ -175,6 +175,10 @@ private:
         ClientAppletResourceUserId aruid,
         InArray<Core::HID::VibrationDeviceHandle, BufferAttr_HipcPointer> vibration_handles,
         InArray<Core::HID::VibrationValue, BufferAttr_HipcPointer> vibration_values);
+    Result SendVibrationValuesInMode(
+        u16 mode, AppletResourceUserId aruid,
+        InArray<Core::HID::VibrationDeviceHandle, BufferAttr_HipcPointer> vibration_handles,
+        InArray<Core::HID::VibrationValue, BufferAttr_HipcPointer> vibration_values);
     Result SendVibrationGcErmCommand(Core::HID::VibrationDeviceHandle vibration_device_handle,
                                      ClientAppletResourceUserId aruid,
                                      Core::HID::VibrationGcErmCommand gc_erm_command);

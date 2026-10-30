@@ -29,6 +29,7 @@ public:
     ~DisplaySession() override;
 
 private:
+    enum class DisplayChange { HdrStatus, HdrPaperWhite };
     void GetMaxEventId(HLERequestContext& ctx);
     void GetMaxSemaphoreId(HLERequestContext& ctx);
     void GetMaxTimestampRecorderId(HLERequestContext& ctx);
@@ -43,6 +44,11 @@ private:
     void SelectDisplayLayer(HLERequestContext& ctx);
     void LinkVsyncSemaphore(HLERequestContext& ctx);
     void UnlinkVsyncSemaphore(HLERequestContext& ctx);
+    void LinkHdrStatusSemaphore(HLERequestContext& ctx);
+    void UnlinkHdrStatusSemaphore(HLERequestContext& ctx);
+    void LinkHdrPaperWhiteSemaphore(HLERequestContext& ctx);
+    void UnlinkHdrPaperWhiteSemaphore(HLERequestContext& ctx);
+    void SetDisplayChangeSemaphore(HLERequestContext& ctx, DisplayChange change, bool link);
     void ReleaseDisplay();
     void CreateLayer(HLERequestContext& ctx);
     void DestroyLayer(HLERequestContext& ctx);
@@ -72,6 +78,7 @@ private:
     std::shared_ptr<VI::Container> m_container;
     std::optional<DisplayRegistration> m_display;
     std::array<std::optional<u64>, 8> m_vsync_displays{};
+    std::array<std::array<std::optional<u64>, 8>, 2> m_display_change_semaphores{};
     std::array<std::optional<LayerRegistration>, 16> m_layers{};
     std::optional<u64> m_selected_layer;
     std::optional<u32> m_timestamp_recorder_count;

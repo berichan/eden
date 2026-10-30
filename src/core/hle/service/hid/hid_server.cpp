@@ -132,6 +132,7 @@ IHidServer::IHidServer(Core::System& system_, std::shared_ptr<ResourceManager> r
         {210, C<&IHidServer::EndPermitVibrationSession>, "EndPermitVibrationSession"},
         {211, C<&IHidServer::IsVibrationDeviceMounted>, "IsVibrationDeviceMounted"},
         {212, C<&IHidServer::SendVibrationValueInBool>, "SendVibrationValueInBool"},
+        {214, C<&IHidServer::SendVibrationValuesInMode>, "SendVibrationValuesInMode"},
         {300, C<&IHidServer::ActivateConsoleSixAxisSensor>, "ActivateConsoleSixAxisSensor"},
         {301, C<&IHidServer::StartConsoleSixAxisSensor>, "StartConsoleSixAxisSensor"},
         {302, C<&IHidServer::StopConsoleSixAxisSensor>, "StopConsoleSixAxisSensor"},
@@ -982,6 +983,16 @@ Result IHidServer::SendVibrationValues(
     }
 
     R_SUCCEED();
+}
+
+Result IHidServer::SendVibrationValuesInMode(
+    u16 mode, AppletResourceUserId aruid,
+    InArray<Core::HID::VibrationDeviceHandle, BufferAttr_HipcPointer> vibration_handles,
+    InArray<Core::HID::VibrationValue, BufferAttr_HipcPointer> vibration_values) {
+    // Mode 2 carries the same 16-byte values as command 206, with an explicit ARUID.
+    R_UNLESS(mode == 2, IPC::ResultNotSupported);
+    R_RETURN(SendVibrationValues(ClientAppletResourceUserId{aruid.pid}, vibration_handles,
+                                 vibration_values));
 }
 
 Result IHidServer::SendVibrationGcErmCommand(

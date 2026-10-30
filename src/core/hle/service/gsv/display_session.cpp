@@ -64,6 +64,10 @@ DisplaySession::DisplaySession(Core::System& system, Kernel::KProcess* process,
         {252, &DisplaySession::UnbindLayer, "UnbindLayer"},
         {261, &DisplaySession::LinkVsyncSemaphore, "LinkVsyncSemaphore"},
         {262, &DisplaySession::UnlinkVsyncSemaphore, "UnlinkVsyncSemaphore"},
+        {265, &DisplaySession::LinkHdrStatusSemaphore, "LinkHdrStatusSemaphore"},
+        {266, &DisplaySession::UnlinkHdrStatusSemaphore, "UnlinkHdrStatusSemaphore"},
+        {267, &DisplaySession::LinkHdrPaperWhiteSemaphore, "LinkHdrPaperWhiteSemaphore"},
+        {268, &DisplaySession::UnlinkHdrPaperWhiteSemaphore, "UnlinkHdrPaperWhiteSemaphore"},
     };
     RegisterHandlersTipc(functions);
 }
@@ -261,6 +265,11 @@ void DisplaySession::ReleaseDisplay() {
             }
         }
         m_container->CloseDisplay(m_display->display_id);
+        for (auto& subscriptions : m_display_change_semaphores) {
+            for (auto& display : subscriptions) {
+                display.reset();
+            }
+        }
         m_display.reset();
     }
 }
@@ -300,6 +309,51 @@ void DisplaySession::UnlinkVsyncSemaphore(HLERequestContext& ctx) {
         m_vsync_displays[id].reset();
     }
     Reply(ctx, ResultSuccess);
+}
+
+void DisplaySession::LinkHdrStatusSemaphore(HLERequestContext& ctx) {
+    SetDisplayChangeSemaphore(ctx, DisplayChange::HdrStatus, true);
+}
+
+void DisplaySession::UnlinkHdrStatusSemaphore(HLERequestContext& ctx) {
+    SetDisplayChangeSemaphore(ctx, DisplayChange::HdrStatus, false);
+}
+
+void DisplaySession::LinkHdrPaperWhiteSemaphore(HLERequestContext& ctx) {
+    SetDisplayChangeSemaphore(ctx, DisplayChange::HdrPaperWhite, true);
+}
+
+void DisplaySession::UnlinkHdrPaperWhiteSemaphore(HLERequestContext& ctx) {
+    SetDisplayChangeSemaphore(ctx, DisplayChange::HdrPaperWhite, false);
+}
+
+void DisplaySession::SetDisplayChangeSemaphore(HLERequestContext& ctx, DisplayChange change,
+                                               bool link) {
+    const auto result = [&]() -> Result {
+        R_UNLESS(HasInputWords(ctx, 3), Kernel::ResultInvalidSize);
+        IPC::RequestParser rp{ctx};
+        const auto name = rp.PopRaw<std::array<char, 8>>();
+        const auto id = rp.Pop<u32>();
+        auto& subscriptions = m_display_change_semaphores[static_cast<size_t>(change)];
+        if (!link) {
+            if (name == DefaultDisplayName && m_display && id < subscriptions.size() &&
+                subscriptions[id] == m_display->display_id) {
+                subscriptions[id].reset();
+            }
+            R_SUCCEED();
+        }
+        R_UNLESS((name != std::array<char, 8>{}) && id < subscriptions.size(),
+                 ResultInvalidArgument);
+        R_UNLESS(name == DefaultDisplayName && m_display && m_semaphores[id], ResultNotFound);
+        R_UNLESS(!subscriptions[id], ResultInvalidState);
+        // The virtual display has fixed SDR state. Retain change subscriptions without
+        // treating registration or periodic vsync as an HDR transition.
+        subscriptions[id] = m_display->display_id;
+        LOG_DEBUG(Service, "Native display change semaphore linked: display_id={}, kind={}, id={}",
+                  m_display->display_id, static_cast<u32>(change), id);
+        R_SUCCEED();
+    }();
+    Reply(ctx, result);
 }
 
 Result DisplaySession::EnsureContainer() {

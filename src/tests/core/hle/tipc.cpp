@@ -848,6 +848,16 @@ TEST_CASE("Native display registration validates names, notification slots, and 
     REQUIRE(RequestWords(caller, service, 262, {}).first == Kernel::ResultInvalidSize);
     REQUIRE(RequestWords(caller, service, 262, unregistered_display).first.IsSuccess());
     REQUIRE(RequestWords(caller, service, 262, invalid_semaphore).first.IsSuccess());
+    for (const u32 command : {265U, 267U}) {
+        REQUIRE(RequestWords(caller, service, command, {}).first == Kernel::ResultInvalidSize);
+        REQUIRE(RequestWords(caller, service, command, invalid_semaphore).first ==
+                Result{ErrorModule::VI, 4});
+        REQUIRE(RequestWords(caller, service, command, unregistered_display).first ==
+                Result{ErrorModule::VI, 7});
+        REQUIRE(RequestWords(caller, service, command + 1, {}).first == Kernel::ResultInvalidSize);
+        REQUIRE(RequestWords(caller, service, command + 1, unregistered_display).first.IsSuccess());
+        REQUIRE(RequestWords(caller, service, command + 1, invalid_semaphore).first.IsSuccess());
+    }
 }
 
 TEST_CASE("Copied guest objects remain referenced until the IPC reply is released", "[core][ipc]") {
