@@ -308,8 +308,8 @@ TEST_CASE("Native narrowed views require ordinary normalized base-mip sampling s
     REQUIRE(texture);
     REQUIRE(sampler);
     REQUIRE(SelectNativeSampledMip(*texture, *sampler));
-    for (const auto [word, bit] : std::array<std::pair<u32, u32>, 7>{
-             {{1, 5}, {2, 17}, {3, 6}, {4, 22}, {5, 31}, {6, 6}, {7, 0}}}) {
+    for (const auto [word, bit] :
+         std::array<std::pair<u32, u32>, 6>{{{1, 5}, {2, 17}, {3, 6}, {5, 31}, {6, 6}, {7, 0}}}) {
         auto changed = image;
         changed[word] ^= 1U << bit;
         const auto decoded = NativeTextureDescriptor::Decode(changed);
@@ -323,6 +323,49 @@ TEST_CASE("Native narrowed views require ordinary normalized base-mip sampling s
         const auto decoded = NativeSamplerDescriptor::Decode(changed);
         REQUIRE(decoded);
         REQUIRE_FALSE(SelectNativeSampledMip(*texture, *decoded));
+    }
+}
+
+TEST_CASE("Native linear and sRGB color samples retain distinct encoding with the same footprint",
+          "[native-shader]") {
+    NativeDescriptorWords image{};
+    image[0] = 8;
+    for (u32 i = 0; i < 4; ++i)
+        image[0] |= (2U << (7 + 3 * i)) | ((i + 2) << (19 + 3 * i));
+    image[1] = 0x0fa00000;
+    image[2] = (3U << 21) | 0x40081;
+    image[3] = 4U << 3;
+    image[4] = 2559U | (1U << 23);
+    image[5] = 1439U | (1U << 31);
+    NativeDescriptorWords state{};
+    state[0] = 2U | (2U << 3) | (2U << 6) | 0x26000;
+    state[1] = 2U | (2U << 4) | (3U << 6);
+    state[2] = 15U << 20;
+    const auto sampler = NativeSamplerDescriptor::Decode(state);
+    REQUIRE(sampler);
+    for (bool srgb : {false, true}) {
+        image[4] = 2559U | (1U << 23) | (u32{srgb} << 22);
+        const auto texture = NativeTextureDescriptor::Decode(image);
+        REQUIRE(texture);
+        REQUIRE(texture->words == image);
+        REQUIRE(texture->IsRgba8Unorm2D());
+        REQUIRE(texture->srgb == srgb);
+        const auto mip = SelectNativeSampledMip(*texture, *sampler);
+        REQUIRE(mip);
+        REQUIRE(mip->address == 0x810fa00000ULL);
+        REQUIRE(mip->width == 2560);
+        REQUIRE(mip->height == 1440);
+        REQUIRE(mip->size_bytes == 0xf00000);
+        REQUIRE(mip->block_height == 4);
+        auto unsupported = *texture;
+        unsupported.component_types[0] = 7;
+        REQUIRE_FALSE(SelectNativeSampledMip(unsupported, *sampler));
+        unsupported = *texture;
+        unsupported.depth = 2;
+        REQUIRE_FALSE(SelectNativeSampledMip(unsupported, *sampler));
+        unsupported = *texture;
+        unsupported.address = (u64{1} << 40) - 512;
+        REQUIRE_FALSE(SelectNativeSampledMip(unsupported, *sampler));
     }
 }
 

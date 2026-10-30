@@ -714,10 +714,11 @@ const GraphicsEnvironment::NativeTextureBinding& GraphicsEnvironment::CaptureNat
     }
     LOG_DEBUG(HW_GPU,
               "Native texture metadata: stage={}, handle={:#x}, address={:#x}, extent={}x{}, "
+              "format={:#x}, srgb={}, "
               "mips={}..{}, reserved_word2={:#x}, sampler_lod={}..{}",
               stage_index, handle, texture->address, texture->width, texture->height,
-              texture->view_min_mip, texture->view_max_mip, texture->reserved[2], sampler->min_lod,
-              sampler->max_lod);
+              texture->format, texture->srgb, texture->view_min_mip, texture->view_max_mip,
+              texture->reserved[2], sampler->min_lod, sampler->max_lod);
     native_textures.push_back({handle, *texture, *sampler});
     return native_textures.back();
 }

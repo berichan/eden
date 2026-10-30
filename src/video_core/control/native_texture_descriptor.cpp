@@ -134,7 +134,7 @@ std::optional<NativeSampledMip> SelectNativeSampledMip(const NativeTextureDescri
                                                        const NativeSamplerDescriptor& sampler) {
     const bool astc = texture.IsAstc4x4Unorm2D();
     const bool volume = texture.IsB10G11R11Float3D();
-    if (!(((texture.IsRgba8Unorm2D() || astc) && texture.srgb) || texture.IsB10G11R11Float2D() ||
+    if (!(texture.IsRgba8Unorm2D() || (astc && texture.srgb) || texture.IsB10G11R11Float2D() ||
           volume) ||
         !texture.normalized || texture.block_width || (!volume && texture.block_depth) ||
         texture.tile_width || texture.gob3d || texture.gob_depth_offset || texture.view_min_mip ||

@@ -1321,8 +1321,17 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
                 return reject("uncaptured native sampled-image handle");
             const auto mip =
                 Tegra::Control::SelectNativeSampledMip(binding->texture, binding->sampler);
-            if (!mip)
+            if (!mip) {
+                const auto& tic = binding->texture.words;
+                const auto& tsc = binding->sampler.words;
+                LOG_DEBUG(HW_GPU,
+                          "Native sampled state rejected: handle={:#x}, "
+                          "tic={:#x}/{:#x}/{:#x}/{:#x}/{:#x}/{:#x}/{:#x}/{:#x}, "
+                          "tsc={:#x}/{:#x}/{:#x}/{:#x}/{:#x}/{:#x}/{:#x}/{:#x}",
+                          handle, tic[0], tic[1], tic[2], tic[3], tic[4], tic[5], tic[6], tic[7],
+                          tsc[0], tsc[1], tsc[2], tsc[3], tsc[4], tsc[5], tsc[6], tsc[7]);
                 return reject("unsupported native fixed-mip sampling state");
+            }
             const bool volume = binding->texture.IsB10G11R11Float3D();
             if (descriptor.type !=
                 (volume ? Shader::TextureType::Color3D : Shader::TextureType::Color2D))
@@ -1350,8 +1359,10 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
                 features |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
             const bool packed_float = binding->texture.IsB10G11R11Float2D() || volume;
             const bool astc = binding->texture.IsAstc4x4Unorm2D();
-            const VkFormat sampled_format =
-                packed_float ? VK_FORMAT_B10G11R11_UFLOAT_PACK32 : VK_FORMAT_A8B8G8R8_SRGB_PACK32;
+            const VkFormat sampled_format = packed_float ? VK_FORMAT_B10G11R11_UFLOAT_PACK32
+                                            : binding->texture.srgb
+                                                ? VK_FORMAT_A8B8G8R8_SRGB_PACK32
+                                                : VK_FORMAT_A8B8G8R8_UNORM_PACK32;
             if (astc) {
                 const auto host_surface =
                     MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, false,
@@ -1373,7 +1384,9 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
             VideoCommon::ImageInfo sampled;
             sampled.format = packed_float ? VideoCore::Surface::PixelFormat::B10G11R11_FLOAT
                              : astc       ? VideoCore::Surface::PixelFormat::ASTC_2D_4X4_SRGB
-                                          : VideoCore::Surface::PixelFormat::A8B8G8R8_SRGB;
+                             : binding->texture.srgb
+                                 ? VideoCore::Surface::PixelFormat::A8B8G8R8_SRGB
+                                 : VideoCore::Surface::PixelFormat::A8B8G8R8_UNORM;
             sampled.type = volume ? VideoCommon::ImageType::e3D : VideoCommon::ImageType::e2D;
             sampled.size = {mip->width, mip->height, mip->depth};
             sampled.block = {0, mip->block_height, mip->block_depth};

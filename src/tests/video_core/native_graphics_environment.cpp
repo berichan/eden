@@ -208,7 +208,10 @@ TEST_CASE("Native graphics capture separates source headers, code and constant s
         Environment environment{engine, memory, Program::Pixel,
                                 Environment::NativeProgram{header_address, {}}};
         REQUIRE(environment.ReadTextureType(Handle) == Shader::TextureType::Color2D);
-        (void)environment.ReadTexturePixelFormat(Handle);
+        REQUIRE(static_cast<VideoCore::Surface::PixelFormat>(
+                    environment.ReadTexturePixelFormat(Handle)) ==
+                ((texture[4] & (1U << 22)) ? VideoCore::Surface::PixelFormat::A8B8G8R8_SRGB
+                                           : VideoCore::Surface::PixelFormat::A8B8G8R8_UNORM));
         environment.FinalizeNativeResources();
         REQUIRE(environment.NativeTextures().size() == 1);
         REQUIRE(environment.NativeTextures()[0].texture.width == 16);
