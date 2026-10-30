@@ -15,6 +15,7 @@
 #include "core/hle/service/nvdrv/core/native_gpu_submission.h"
 #include "core/hle/service/nvdrv/devices/nvhost_native_gpu.h"
 #include "video_core/control/channel_state_cache.inc"
+#include "video_core/control/native_report_semaphore.h"
 #include "video_core/gpu_thread.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/memory_manager.h"
@@ -265,6 +266,108 @@ TEST_CASE("Cancelling an earlier native counted reservation cannot bridge a fenc
                                                1) == NvResult::InvalidState);
     REQUIRE(fixture.syncpoints.GetHostSyncpointValue(17) == 0);
     REQUIRE(fixture.syncpoints.GetGuestSyncpointValue(17) == 0);
+}
+
+TEST_CASE("Native fence metadata is consumed only by executed stream increments", "[core][ipc]") {
+    Tegra::Host1x::SyncpointManager syncpoints;
+    NvCore::NativeGpuFenceProgress progress{17, 2, 2};
+    REQUIRE_FALSE(progress.IsComplete());
+    REQUIRE(progress.HasRemaining());
+    REQUIRE(syncpoints.GetHostSyncpointValue(17) == 0);
+    REQUIRE(progress.Signal(syncpoints));
+    REQUIRE(progress.GetExecuted() == 1);
+    REQUIRE_FALSE(progress.IsComplete());
+    REQUIRE(syncpoints.GetHostSyncpointValue(17) == 1);
+    REQUIRE(syncpoints.GetGuestSyncpointValue(17) == 1);
+    // Inspecting or failing a later stream prefix cannot fill the missing increment.
+    REQUIRE_FALSE(progress.IsComplete());
+    REQUIRE(syncpoints.GetHostSyncpointValue(17) == 1);
+    REQUIRE(progress.Signal(syncpoints));
+    REQUIRE(progress.IsComplete());
+    REQUIRE_FALSE(progress.HasRemaining());
+    REQUIRE_FALSE(progress.Signal(syncpoints));
+    REQUIRE(progress.GetExecuted() == 2);
+    REQUIRE(syncpoints.GetHostSyncpointValue(17) == 2);
+    REQUIRE(syncpoints.GetGuestSyncpointValue(17) == 2);
+    REQUIRE(syncpoints.GetHostSyncpointValue(18) == 0);
+    NvCore::NativeGpuFenceProgress empty{17, 2, 0};
+    REQUIRE(empty.IsComplete());
+    REQUIRE_FALSE(empty.Signal(syncpoints));
+    NvCore::NativeGpuFenceProgress invalid{17, 1, 2};
+    REQUIRE_FALSE(invalid.HasRemaining());
+    REQUIRE_FALSE(invalid.IsComplete());
+    REQUIRE_FALSE(invalid.Signal(syncpoints));
+    NvCore::NativeGpuFenceProgress wrong_order{17, 4, 1};
+    REQUIRE_FALSE(wrong_order.Signal(syncpoints));
+    REQUIRE(wrong_order.GetExecuted() == 0);
+    REQUIRE(syncpoints.GetHostSyncpointValue(17) == 2);
+}
+
+TEST_CASE("Native shim report guards reject foreign writes and retain completed prefix increments",
+          "[core][ipc]") {
+    using Report = Tegra::Control::NativeReportSemaphore;
+    struct Context {
+        Tegra::Host1x::SyncpointManager syncpoints;
+        NvCore::NativeGpuFenceProgress progress{17, 2, 2};
+        GPUVAddr owned{0xc000110000};
+        bool stopped{}, cancel_in_wait{};
+        u32 waits{}, writes{};
+        Report::Host Bind() {
+            return {this,
+                    [](void* opaque, GPUVAddr address, size_t size) {
+                        auto& self = *static_cast<Context*>(opaque);
+                        return self.progress.CanWriteCounter(self.owned, address, size);
+                    },
+                    [](void* opaque) {
+                        auto& self = *static_cast<Context*>(opaque);
+                        ++self.waits;
+                        self.stopped = self.cancel_in_wait;
+                        return true;
+                    },
+                    [](void* opaque, GPUVAddr, u32) {
+                        auto& self = *static_cast<Context*>(opaque);
+                        ++self.writes;
+                        return self.progress.Signal(self.syncpoints);
+                    },
+                    [](void* opaque) { return static_cast<Context*>(opaque)->stopped; }};
+        }
+    };
+    Context guarded;
+    for (u32 lower : {0x120000U, 0x110004U}) {
+        REQUIRE(Report::Release(0xc0, lower, 1, 0x1000f010, guarded.Bind()) ==
+                Report::Error::MemoryFault);
+    }
+    REQUIRE_FALSE(guarded.progress.CanWriteCounter(guarded.owned, guarded.owned, 8));
+    REQUIRE(guarded.waits == 0);
+    REQUIRE(guarded.writes == 0);
+    Context cancelled;
+    cancelled.cancel_in_wait = true;
+    REQUIRE(Report::Release(0xc0, 0x110000, 1, 0x1000f010, cancelled.Bind()) ==
+            Report::Error::Cancelled);
+    REQUIRE(cancelled.writes == 0);
+    REQUIRE(cancelled.syncpoints.GetHostSyncpointValue(17) == 0);
+    Context prefix;
+    using Stream = Tegra::Control::NativeCommandStream;
+    Stream stream;
+    Stream::Host host{};
+    host.context = &prefix;
+    host.method = [](void* opaque, u32, u32 method, u32 value, bool) {
+        auto& self = *static_cast<Context*>(opaque);
+        return method == 0x6c3 && Report::Release(0xc0, 0x110000, 0xffffffff, value, self.Bind()) ==
+                                      Report::Error::None;
+    };
+    const std::array<u32, 4> words{0x200106c3, 0x1000f010, 0x20010100, 0};
+    REQUIRE(stream.Process(words, 0x1000, host).error == Stream::Error::MethodFailed);
+    REQUIRE(prefix.progress.GetExecuted() == 1);
+    REQUIRE_FALSE(prefix.progress.IsComplete());
+    REQUIRE(prefix.syncpoints.GetHostSyncpointValue(17) == 1);
+    REQUIRE(prefix.syncpoints.GetGuestSyncpointValue(17) == 1);
+    REQUIRE(Report::Release(0xc0, 0x110000, 0, 0x1000f010, prefix.Bind()) == Report::Error::None);
+    REQUIRE(prefix.progress.IsComplete());
+    REQUIRE(prefix.syncpoints.GetHostSyncpointValue(17) == 2);
+    REQUIRE(Report::Release(0xc0, 0x110000, 1, 0x1000f010, prefix.Bind()) ==
+            Report::Error::MemoryFault);
+    REQUIRE(prefix.syncpoints.GetHostSyncpointValue(17) == 2);
 }
 
 TEST_CASE("Native completion publishes both counters before all ready notifications",

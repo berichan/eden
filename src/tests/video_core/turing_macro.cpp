@@ -961,6 +961,50 @@ TEST_CASE("Native compute texture cache invalidation executes its backend and pr
     REQUIRE_FALSE(cancelled.CallMethod(0x4a2, 0, true, host));
     REQUIRE(cancelled.GetError() == Compute::Error::Cancelled);
     REQUIRE(backend.calls == 3);
+    u32 header_calls{};
+    host.qmd.context = &header_calls;
+    host.qmd.should_stop = nullptr;
+    host.invalidate_caches = [](void* opaque,
+                                const Tegra::Control::NativeCacheInvalidation& action) {
+        ++*static_cast<u32*>(opaque);
+        REQUIRE(action.texture_headers);
+        REQUIRE_FALSE((action.instructions || action.global_data || action.constants ||
+                       action.texture_data || action.samplers));
+        return true;
+    };
+    Compute headers{context};
+    REQUIRE(headers.CallMethod(0x91, 0, true, host));
+    for (u32 value : {1U, 0x10U}) {
+        Compute rejected{context};
+        REQUIRE_FALSE(rejected.CallMethod(0x91, value, true, host));
+    }
+    REQUIRE(header_calls == 1);
+    struct ShaderBackend {
+        u32 expected{}, calls{};
+    } shader_backend;
+    host.qmd.context = &shader_backend;
+    host.qmd.should_stop = nullptr;
+    host.invalidate_caches = [](void* opaque,
+                                const Tegra::Control::NativeCacheInvalidation& action) {
+        auto& state = *static_cast<ShaderBackend*>(opaque);
+        ++state.calls;
+        REQUIRE(action.instructions == ((state.expected & 1) != 0));
+        REQUIRE(action.global_data == ((state.expected & 0x10) != 0));
+        REQUIRE(action.constants == ((state.expected & 0x1000) != 0));
+        REQUIRE_FALSE((action.texture_data || action.samplers || action.texture_headers));
+        return true;
+    };
+    for (u32 value : {0U, 1U, 0x10U, 0x1000U, 0x1011U}) {
+        Compute shader{context};
+        shader_backend.expected = value;
+        REQUIRE(shader.CallMethod(0x5a6, value, true, host));
+    }
+    REQUIRE(shader_backend.calls == 5);
+    for (u32 value : {2U, 4U, 0x10000U}) {
+        Compute rejected{context};
+        REQUIRE_FALSE(rejected.CallMethod(0x5a6, value, true, host));
+        REQUIRE(shader_backend.calls == 5);
+    }
 }
 
 TEST_CASE("Native compute methods fail unsupported actions without invoking legacy compute",

@@ -17,6 +17,38 @@ class System;
 
 namespace Service::Nvidia::NvCore {
 
+// The submit count reserves increments already present in the guest stream.
+// Only an executed, synchronized shim write may consume one reservation unit.
+class NativeGpuFenceProgress {
+public:
+    NativeGpuFenceProgress(u32 id_, u32 target_, u32 requested_)
+        : id{id_}, target{target_}, requested{requested_} {}
+    bool HasRemaining() const {
+        return requested <= target && executed < requested;
+    }
+    bool IsComplete() const {
+        return requested <= target && executed == requested;
+    }
+    u32 GetExecuted() const {
+        return executed;
+    }
+    bool CanWriteCounter(GPUVAddr owned_address, GPUVAddr address, size_t size) const {
+        return HasRemaining() && size == sizeof(u32) && address == owned_address;
+    }
+    bool Signal(Tegra::Host1x::SyncpointManager& manager) {
+        if (!HasRemaining() ||
+            !manager.PublishNativeCompletion(id, target - requested + executed + 1, 1)) {
+            return false;
+        }
+        ++executed;
+        return true;
+    }
+
+private:
+    const u32 id, target, requested;
+    u32 executed{};
+};
+
 class NativeGpuSubmission {
 public:
     // Complete retires this FIFO stream and drains issued work. Dependency-gated QMDs
@@ -38,13 +70,15 @@ private:
                         NvFence fence, u32 increments);
     void Release();
     void Finish(State state, Tegra::Control::NativeCommandStream::Result result);
+    bool ReleaseSyncpoint(Core::System& system, u32 upper, u32 lower, u32 payload, u32 operation,
+                          std::stop_token stop_token);
 
     const std::shared_ptr<NativeGpuChannel> channel;
     const std::shared_ptr<const NativeGpuChannel::CommandRing> ring;
     const std::shared_ptr<const Tegra::Control::NativeGpuGraphicsContext> graphics;
     const std::vector<u64> entries;
     const NvFence fence;
-    const u32 increments;
+    NativeGpuFenceProgress fence_progress;
     const std::optional<u32> timeout;
     u64 sequence{};
     std::atomic<State> state{State::Reserved};

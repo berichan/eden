@@ -15,8 +15,11 @@
 #include "video_core/control/channel_state.h"
 #include "video_core/control/native_atomic_sequence.h"
 #include "video_core/control/native_gpu_context.h"
+#include "video_core/control/native_report_semaphore.h"
+#include "video_core/control/native_semaphore_acquire.h"
 #include "video_core/gpu.h"
 #include "video_core/host1x/host1x.h"
+#include "video_core/host1x/syncpoint_shim.h"
 #include "video_core/memory_manager.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/renderer_base.h"
@@ -101,6 +104,50 @@ struct NativeGpuChannel::Backend {
             case 0xc:
                 break;
             case 7: { // SEMAPHORED: plain four-byte RELEASE only
+                if (value == 0x1004) {
+                    if (PendingFrontend(context))
+                        return false;
+                    using Acquire = Tegra::Control::NativeSemaphoreAcquire;
+                    struct AcquireContext {
+                        const Tegra::Control::NativeGpuGraphicsContext& graphics;
+                        VideoCore::RasterizerInterface& rasterizer;
+                        std::stop_token token;
+                    } acquire_context{context, rasterizer, stop_token};
+                    const Acquire::Host host{
+                        &acquire_context,
+                        [](void* opaque, GPUVAddr address, size_t size) {
+                            return static_cast<AcquireContext*>(opaque)
+                                ->graphics.GetAddressSpace()
+                                ->IsReadableRange(address, size);
+                        },
+                        [](void* opaque) {
+                            return static_cast<AcquireContext*>(opaque)
+                                ->rasterizer.SynchronizeNativeWork();
+                        },
+                        [](void* opaque, GPUVAddr address, u32& output) {
+                            u32_le data{};
+                            if (!static_cast<AcquireContext*>(opaque)
+                                     ->graphics.GetAddressSpace()
+                                     ->ReadBlockChecked(
+                                         address, {reinterpret_cast<u8*>(&data), sizeof(data)}))
+                                return false;
+                            output = data;
+                            return true;
+                        },
+                        [](void* opaque) {
+                            return static_cast<AcquireContext*>(opaque)->token.stop_requested();
+                        },
+                    };
+                    const auto status =
+                        Acquire::Check(puller[4], puller[5], puller[6], value, host);
+                    if (status != Acquire::Error::None) {
+                        LOG_ERROR(HW_GPU,
+                                  "Native semaphore acquire cannot continue: upper={:#x}, "
+                                  "lower={:#x}, payload={:#x}, error={}",
+                                  puller[4], puller[5], puller[6], static_cast<u32>(status));
+                    }
+                    return status == Acquire::Error::None;
+                }
                 if ((value & ~0x0110001fU) || (value & 0x1f) != 2 || !(value & (1U << 24)) ||
                     PendingFrontend(context) ||
                     (!(value & (1U << 20)) && context.HasPendingQmd())) {
@@ -193,7 +240,8 @@ NativeGpuSubmission::NativeGpuSubmission(std::shared_ptr<NativeGpuChannel> chann
                                          std::vector<u64> entries_, NvFence fence_, u32 increments_)
     : channel{std::move(channel_)}, ring{channel->command_ring},
       graphics{channel->graphics_context}, entries{std::move(entries_)}, fence{fence_},
-      increments{increments_}, timeout{channel->timeout} {}
+      fence_progress{static_cast<u32>(fence_.id), fence_.value, increments_},
+      timeout{channel->timeout} {}
 
 NativeGpuSubmission::~NativeGpuSubmission() {
     Release();
@@ -269,6 +317,56 @@ const std::vector<u64>& NativeGpuSubmission::GetEntries() const {
     return entries;
 }
 
+bool NativeGpuSubmission::ReleaseSyncpoint(Core::System& system, u32 upper, u32 lower, u32 payload,
+                                           u32 operation, std::stop_token stop_token) {
+    const auto base = graphics->GetAddressSpace()->GetSyncpointShimAddress();
+    if (!base) {
+        return false;
+    }
+    struct Host {
+        NativeGpuSubmission& submission;
+        Core::System& system;
+        std::stop_token token;
+        GPUVAddr address;
+    } host{*this, system, stop_token,
+           *base + u64{static_cast<u32>(fence.id)} * Tegra::Host1x::SyncpointShim::Stride};
+    using Report = Tegra::Control::NativeReportSemaphore;
+    const Report::Host bindings{
+        &host,
+        [](void* opaque, GPUVAddr address, size_t size) {
+            const auto& self = *static_cast<Host*>(opaque);
+            return self.submission.fence_progress.CanWriteCounter(self.address, address, size);
+        },
+        [](void* opaque) {
+            auto& self = *static_cast<Host*>(opaque);
+            return self.system.GPU().Renderer().ReadRasterizer()->SynchronizeNativeWork();
+        },
+        [](void* opaque, GPUVAddr, u32) {
+            auto& self = *static_cast<Host*>(opaque);
+            {
+                std::scoped_lock lock{self.submission.channel->mutex};
+                if (!self.submission.channel->open || self.submission.channel->faulted ||
+                    self.token.stop_requested()) {
+                    return false;
+                }
+            }
+            // NVIDIA's shim increments once for any written payload. Notify only after
+            // this actual stream position drained, with no channel lock held in callbacks.
+            return self.submission.fence_progress.Signal(
+                self.system.Host1x().GetSyncpointManager());
+        },
+        [](void* opaque) { return static_cast<Host*>(opaque)->token.stop_requested(); },
+    };
+    const auto release_result = Report::Release(upper, lower, payload, operation, bindings);
+    if (release_result != Report::Error::None) {
+        LOG_ERROR(
+            HW_GPU,
+            "Native syncpoint report rejected: upper={:#x}, lower={:#x}, expected={:#x}, error={}",
+            upper, lower, host.address, static_cast<u32>(release_result));
+    }
+    return release_result == Report::Error::None;
+}
+
 void NativeGpuSubmission::Execute(Core::System& system, std::stop_token stop_token) {
     State expected = State::Queued;
     if (!state.compare_exchange_strong(expected, State::Running)) {
@@ -336,7 +434,8 @@ void NativeGpuSubmission::Execute(Core::System& system, std::stop_token stop_tok
             const Tegra::Control::NativeGpuGraphicsContext& graphics;
             Core::System& system;
             std::stop_token token;
-        } host{backend, *graphics, system, token};
+            NativeGpuSubmission& submission;
+        } host{backend, *graphics, system, token, *this};
         const Stream::Host bindings{
             &host,
             [](void* opaque, GPUVAddr address, size_t size) {
@@ -349,6 +448,20 @@ void NativeGpuSubmission::Execute(Core::System& system, std::stop_token stop_tok
             },
             [](void* opaque, u32 subchannel, u32 method, u32 value, bool last) {
                 auto& self = *static_cast<Host*>(opaque);
+                if (self.backend.classes[subchannel] == 0xc797 && method == 0x6c3) {
+                    const auto& engine = self.backend.channel->payload->maxwell_3d;
+                    const auto upper = engine.GetRegisterValue(0x6c0);
+                    const auto lower = engine.GetRegisterValue(0x6c1);
+                    const GPUVAddr address = (GPUVAddr{upper} << 32) | lower;
+                    const auto base = self.graphics.GetAddressSpace()->GetSyncpointShimAddress();
+                    if (base && address >= *base &&
+                        address - *base < Tegra::Host1x::SyncpointShim::Size) {
+                        return !self.backend.PendingFrontend(self.graphics) &&
+                               self.submission.ReleaseSyncpoint(self.system, upper, lower,
+                                                                engine.GetRegisterValue(0x6c2),
+                                                                value, self.token);
+                    }
+                }
                 return self.backend.Call(self.system, self.graphics, subchannel, method, value,
                                          last, self.token);
             },
@@ -392,27 +505,9 @@ void NativeGpuSubmission::Execute(Core::System& system, std::stop_token stop_tok
     if (token.stop_requested() && executed.Succeeded()) {
         executed.error = Stream::Error::Cancelled;
     }
-    if (executed.Succeeded() && increments) {
-        bool committed{};
-        {
-            std::scoped_lock lock{channel->mutex};
-            if (channel->open && !channel->faulted && !token.stop_requested()) {
-                const auto found =
-                    std::ranges::find(channel->pending_submissions, sequence,
-                                      &NativeGpuChannel::PendingSubmission::sequence);
-                ASSERT(found != channel->pending_submissions.end());
-                found->completion_committed = true;
-                committed = true;
-            }
-        }
-        // Issued GPU work has actually drained. Parked QMDs retain their own dependencies
-        // and releases; this publishes the driver's FIFO completion, not a QMD completion.
-        if (!committed) {
-            executed.error = Stream::Error::Cancelled;
-        } else if (!system.Host1x().GetSyncpointManager().PublishNativeCompletion(
-                       static_cast<u32>(fence.id), fence.value, increments)) {
-            executed.error = Stream::Error::MethodFailed;
-        }
+    if (executed.Succeeded() && !fence_progress.IsComplete()) {
+        // Submission metadata reserves stream increments; it never supplies missing work.
+        executed.error = Stream::Error::MethodFailed;
     }
     const bool was_cancelled = token.stop_requested();
     if (!executed.Succeeded()) {
@@ -433,8 +528,13 @@ void NativeGpuSubmission::Execute(Core::System& system, std::stop_token stop_tok
                   static_cast<u32>(executed.error), executed.address, executed.subchannel,
                   executed.method, executed.value, executed.words, executed.methods);
     } else {
-        LOG_DEBUG(HW_GPU, "Native GPU job retired: words={}, methods={}, parked_qmd={}",
-                  executed.words, executed.methods, graphics->HasPendingQmd());
+        LOG_DEBUG(HW_GPU,
+                  "Native GPU job retired: words={}, methods={}, parked_qmd={}, increments={}, "
+                  "counter={}",
+                  executed.words, executed.methods, graphics->HasPendingQmd(),
+                  fence_progress.GetExecuted(),
+                  system.Host1x().GetSyncpointManager().GetHostSyncpointValue(
+                      static_cast<u32>(fence.id)));
     }
     Finish(executed.Succeeded() ? State::Complete
            : was_cancelled      ? State::Cancelled

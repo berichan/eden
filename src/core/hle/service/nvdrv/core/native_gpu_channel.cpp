@@ -433,7 +433,7 @@ void NativeGpuChannel::ReleaseSubmission(u64 sequence, bool completed) {
                                           [](const auto& job) { return job.released; });
             if (!found->published && tail) {
                 reserved_fence -= found->increments;
-            } else if (!found->completion_committed) {
+            } else {
                 // Never let later completions bridge a cancelled fence and report it ready.
                 faulted = true;
                 cancel_channel = true;

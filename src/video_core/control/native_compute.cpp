@@ -136,12 +136,21 @@ bool NativeCompute::WriteMethod(u32 method, u32 value, const Host& host) {
         // This configures future switch callbacks; it does not invoke either macro.
         break;
     }
-    case 0x4a2: { // INVALIDATE_TEXTURE_DATA_CACHE_NO_WFI, ALL lines
-        if (value != 0 || inline_upload.IsPending()) {
+    case 0x91:    // INVALIDATE_TEXTURE_HEADER_CACHE_NO_WFI, ALL lines
+    case 0x4a2:   // INVALIDATE_TEXTURE_DATA_CACHE_NO_WFI, ALL lines
+    case 0x5a6: { // INVALIDATE_SHADER_CACHES_NO_WFI
+        if ((method == 0x5a6 ? (value & ~0x1011U) != 0 : value != 0) || inline_upload.IsPending()) {
             return Fail(Error::UnsupportedMethod);
         }
         NativeCacheInvalidation action;
-        action.texture_data = true;
+        if (method != 0x5a6) {
+            action.texture_data = method == 0x4a2;
+            action.texture_headers = method == 0x91;
+        } else {
+            action.instructions = (value & 1) != 0;
+            action.global_data = (value & 0x10) != 0;
+            action.constants = (value & 0x1000) != 0;
+        }
         if (!host.invalidate_caches || !host.invalidate_caches(host.qmd.context, action)) {
             return Fail(Error::CacheFailed);
         }

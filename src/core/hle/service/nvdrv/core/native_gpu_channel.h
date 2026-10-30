@@ -147,7 +147,6 @@ private:
         bool released{};
         bool published{};
         u32 increments{};
-        bool completion_committed{};
     };
     std::deque<PendingSubmission> pending_submissions;
     u64 next_submission{1};

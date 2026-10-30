@@ -38,6 +38,7 @@ add_executable(tests
     video_core/native_cache.cpp
     video_core/native_constant_buffer.cpp
     video_core/native_report_semaphore.cpp
+    video_core/native_semaphore_acquire.cpp
     video_core/native_inline_upload.cpp
     video_core/native_graphics_config.cpp
     video_core/native_command_stream.cpp
