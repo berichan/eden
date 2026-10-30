@@ -26,6 +26,8 @@ public:
 
     Error ApplyMaskedRegister(u32 address, u32 value, u32 mask, const Host& host);
     bool PolygonOffsetNanIsZero() const;
+    u32 SetupDebug() const;
+    u32 SetupDebugKnownMask() const;
     bool HelperInvocationLoadsEnabled() const;
     u32 TextureSamplerDebug() const;
     u32 TextureSamplerDebugKnownMask() const;
@@ -33,7 +35,8 @@ public:
     u32 TextureLodDebugKnownMask() const;
 
 private:
-    bool polygon_offset_nan_is_zero{};
+    u32 setup_debug_value{};
+    u32 setup_debug_known_mask{};
     bool helper_invocation_loads_enabled{};
     u32 texture_sampler_debug{};
     u32 texture_sampler_debug_known_mask{};

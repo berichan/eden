@@ -34,6 +34,7 @@ add_executable(tests
     video_core/native_compute.cpp
     video_core/native_atomic_sequence.cpp
     video_core/native_constant_buffer.cpp
+    video_core/native_inline_upload.cpp
     video_core/native_graphics_config.cpp
     video_core/native_command_stream.cpp
     video_core/native_qmd.cpp

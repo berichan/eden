@@ -15,6 +15,7 @@
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/memory_manager.h"
+#include "video_core/renderer_null/null_rasterizer.h"
 #include "video_core/turing_macro.h"
 
 namespace {
@@ -614,6 +615,61 @@ TEST_CASE("Native graphics configuration survives channel binding in the same gr
     second.SetNativeMacroState(std::make_shared<Tegra::Control::AmpereGraphicsState>());
     REQUIRE_FALSE(second.GetNativeGraphicsConfig().PolygonOffsetNanIsZero());
     REQUIRE(state->graphics_config.PolygonOffsetNanIsZero());
+}
+
+TEST_CASE("Native constant-buffer bindings retain canonical addresses without physical cache binds",
+          "[ipc][video_core]") {
+    Core::System system;
+    Core::DeviceMemory memory;
+    Tegra::MaxwellDeviceMemoryManager backing{memory};
+    Tegra::GPU gpu{system, false, false};
+    Null::RasterizerNull rasterizer{gpu};
+    Tegra::MemoryManager space{system, backing, 32, 1ULL << 32, 16, 12};
+    space.BindRasterizer(&rasterizer);
+    constexpr GPUVAddr base = 0x8000000;
+    REQUIRE(space.MapSparse(base, 0x1000, false) == base);
+    Tegra::Engines::Maxwell3D engine{space};
+    engine.SetNativeMacroState(std::make_shared<Tegra::Control::AmpereGraphicsState>());
+    REQUIRE(engine.CallNativeMethod(system, 0x8e0, 32, true, {}));
+    REQUIRE(engine.CallNativeMethod(system, 0x8e1, 0, true, {}));
+    REQUIRE(engine.CallNativeMethod(system, 0x8e2, base + 0x100, true, {}));
+    REQUIRE(engine.CallNativeMethod(system, 0x8e3, 0xffffffff, true, {}));
+    for (u32 stage = 0; stage < 5; ++stage) {
+        REQUIRE(engine.CallNativeMethod(system, 0x904 + stage * 8, 0x111, true, {}));
+        const auto& binding = engine.state.shader_stages[stage].const_buffers[17];
+        REQUIRE(binding.enabled);
+        REQUIRE(binding.address == base + 0x100);
+        REQUIRE(binding.size == 32);
+    }
+    REQUIRE(engine.CallNativeMethod(system, 0x8e0, 0xffffffff, true, {}));
+    REQUIRE(engine.CallNativeMethod(system, 0x8e1, 0xffffffff, true, {}));
+    REQUIRE(engine.CallNativeMethod(system, 0x904, 0x110, true, {}));
+    REQUIRE_FALSE(engine.state.shader_stages[0].const_buffers[17].enabled);
+    REQUIRE_FALSE(engine.CallNativeMethod(system, 0x904, 0x120, true, {}));
+    REQUIRE(engine.HasNativeMacroFailure());
+}
+
+TEST_CASE("Native constant-buffer bindings reject bad fields and incomplete readable ranges",
+          "[ipc][video_core]") {
+    Core::System system;
+    Core::DeviceMemory memory;
+    Tegra::MaxwellDeviceMemoryManager backing{memory};
+    Tegra::GPU gpu{system, false, false};
+    Null::RasterizerNull rasterizer{gpu};
+    Tegra::MemoryManager space{system, backing, 32, 1ULL << 32, 16, 12};
+    space.BindRasterizer(&rasterizer);
+    constexpr GPUVAddr base = 0x8000000;
+    REQUIRE(space.MapSparse(base, 0x1000, false) == base);
+    for (u32 invalid : {0U, 1U, 2U, 3U}) {
+        Tegra::Engines::Maxwell3D engine{space};
+        engine.SetNativeMacroState(std::make_shared<Tegra::Control::AmpereGraphicsState>());
+        REQUIRE(engine.CallNativeMethod(system, 0x8e0, 32, true, {}));
+        REQUIRE(engine.CallNativeMethod(system, 0x8e1, invalid == 0 ? 0x100 : 0, true, {}));
+        REQUIRE(engine.CallNativeMethod(system, 0x8e2, base + 0xff0, true, {}));
+        const u32 raw = invalid == 2 ? 0x121 : (invalid == 3 ? 3 : 1);
+        REQUIRE_FALSE(engine.CallNativeMethod(system, 0x904, raw, true, {}));
+        REQUIRE_FALSE(engine.state.shader_stages[0].const_buffers[0].enabled);
+    }
 }
 
 TEST_CASE("Native instrumentation initialization retains only its complete metadata pair",

@@ -17,10 +17,15 @@ NativeGraphicsConfig::Error NativeGraphicsConfig::ApplyMaskedRegister(u32 addres
         return Error::UnsupportedRegister;
     }
     const u32 expected_mask = setup_debug ? 1U : (sampler_debug ? 0x10U : 8U);
-    if ((lod_debug && mask != 1 && mask != 2) || (!lod_debug && mask != expected_mask)) {
+    const bool conservative_setup = setup_debug && mask == 0x01800000;
+    if (!conservative_setup &&
+        ((lod_debug && mask != 1 && mask != 2) || (!lod_debug && mask != expected_mask))) {
         return Error::UnsupportedMask;
     }
-    const bool valid_value = lod_debug ? value == mask : (setup_debug ? value <= 1 : value == 0);
+    const bool valid_value = conservative_setup ? value == 0
+                             : lod_debug        ? value == mask
+                             : setup_debug      ? value <= 1
+                                                : value == 0;
     if (!valid_value) {
         return Error::UnsupportedValue;
     }
@@ -34,7 +39,10 @@ NativeGraphicsConfig::Error NativeGraphicsConfig::ApplyMaskedRegister(u32 addres
         return Error::Cancelled;
     }
     if (setup_debug) {
-        polygon_offset_nan_is_zero = value != 0;
+        // Conservative-raster initialization clears bits23/24 independently of bit0.
+        // Draws remain guarded until the renderer implements these context policies.
+        setup_debug_value = (setup_debug_value & ~mask) | value;
+        setup_debug_known_mask |= mask;
     } else if (sm_dispatch_control) {
         // GA10B SM_DISP_CTRL.KILLED_LD_IS_NOP: clearing bit3 enables helper loads.
         helper_invocation_loads_enabled = true;
@@ -54,7 +62,15 @@ NativeGraphicsConfig::Error NativeGraphicsConfig::ApplyMaskedRegister(u32 addres
 }
 
 bool NativeGraphicsConfig::PolygonOffsetNanIsZero() const {
-    return polygon_offset_nan_is_zero;
+    return (setup_debug_value & 1) != 0;
+}
+
+u32 NativeGraphicsConfig::SetupDebug() const {
+    return setup_debug_value;
+}
+
+u32 NativeGraphicsConfig::SetupDebugKnownMask() const {
+    return setup_debug_known_mask;
 }
 
 bool NativeGraphicsConfig::HelperInvocationLoadsEnabled() const {

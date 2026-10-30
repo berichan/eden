@@ -36,6 +36,8 @@ add_library(video_core STATIC
     control/native_atomic_sequence.h
     control/native_constant_buffer.cpp
     control/native_constant_buffer.h
+    control/native_inline_upload.cpp
+    control/native_inline_upload.h
     control/native_gpu_context.cpp
     control/native_gpu_context.h
     control/native_graphics_config.cpp

@@ -66,6 +66,30 @@ TEST_CASE("Unsupported or cancelled native setup updates preserve existing conte
     REQUIRE(config.PolygonOffsetNanIsZero());
 }
 
+TEST_CASE("Native conservative setup preserves the polygon offset field in the same register",
+          "[ipc][video_core]") {
+    Config config;
+    Host host;
+    REQUIRE(config.ApplyMaskedRegister(0x418800, 1, 1, host.Bind()) == Config::Error::None);
+    host.accept = false;
+    REQUIRE(config.ApplyMaskedRegister(0x418800, 0, 0x1800000, host.Bind()) ==
+            Config::Error::WaitFailed);
+    REQUIRE(config.SetupDebugKnownMask() == 1);
+    host.accept = true;
+    REQUIRE(config.ApplyMaskedRegister(0x418800, 0, 0x1800000, host.Bind()) == Config::Error::None);
+    REQUIRE(config.PolygonOffsetNanIsZero());
+    REQUIRE(config.SetupDebug() == 1);
+    REQUIRE(config.SetupDebugKnownMask() == 0x1800001);
+    REQUIRE(config.ApplyMaskedRegister(0x418800, 0x800000, 0x1800000, host.Bind()) ==
+            Config::Error::UnsupportedValue);
+    REQUIRE(config.ApplyMaskedRegister(0x418800, 0, 0x1800001, host.Bind()) ==
+            Config::Error::UnsupportedMask);
+    REQUIRE(host.waits == 3);
+    REQUIRE(config.ApplyMaskedRegister(0x418800, 0, 1, host.Bind()) == Config::Error::None);
+    REQUIRE_FALSE(config.PolygonOffsetNanIsZero());
+    REQUIRE(config.SetupDebugKnownMask() == 0x1800001);
+}
+
 TEST_CASE("Native texture setup records only established initialization bits",
           "[ipc][video_core]") {
     Config config;

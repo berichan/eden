@@ -37,6 +37,7 @@ class System;
 namespace Tegra::Control {
 struct AmpereGraphicsState;
 class NativeMacroProcessor;
+class NativeInlineUpload;
 } // namespace Tegra::Control
 
 namespace Tegra {
@@ -73,6 +74,7 @@ public:
     bool HasNativeMacroFailure() const;
     bool HasPendingNativeMacro() const;
     bool HasPendingNativeInstrumentation() const;
+    bool HasPendingNativeInlineUpload() const;
     // GPU-worker access only, like the native context settings themselves.
     const Control::NativeGraphicsConfig& GetNativeGraphicsConfig() const;
     bool CallNativeMethod(Core::System& system, u32 method, u32 value, bool last,
@@ -3285,6 +3287,7 @@ private:
     /// Interpreter for the macro codes uploaded to the GPU.
     MacroEngine macro_engine;
     std::unique_ptr<Control::NativeMacroProcessor> native_macro_processor;
+    std::unique_ptr<Control::NativeInlineUpload> native_inline_upload;
     bool native_action_failed{};
     bool native_instrumentation_pending{};
     std::shared_ptr<Control::AmpereGraphicsState> native_graphics_state;

@@ -14,6 +14,7 @@
 #include "core/core_timing.h"
 #include "video_core/control/native_constant_buffer.h"
 #include "video_core/control/native_gpu_context.h"
+#include "video_core/control/native_inline_upload.h"
 #include "video_core/control/native_macro_processor.h"
 #include "video_core/dirty_flags.h"
 #include "video_core/engines/maxwell_3d.h"
@@ -42,6 +43,9 @@ u32 NativeVersionRegister(u32 method) {
 }
 bool IsNativeVersionSet(u32 method) {
     return method == 0x58e || method == 0x5a9 || method == 0x5e4;
+}
+bool IsNativeConstantBufferBind(u32 method) {
+    return method >= 0x904 && method <= 0x924 && (method - 0x904) % 8 == 0;
 }
 } // namespace
 
@@ -75,6 +79,8 @@ void Maxwell3D::SetNativeMacroState(std::shared_ptr<Control::AmpereGraphicsState
     native_macro_processor =
         native_state ? std::make_unique<Control::NativeMacroProcessor>(std::move(native_state))
                      : nullptr;
+    native_inline_upload =
+        native_macro_processor ? std::make_unique<Control::NativeInlineUpload>() : nullptr;
     if (native_macro_processor) {
         execution_mask.set();
     } else {
@@ -96,6 +102,10 @@ bool Maxwell3D::HasPendingNativeMacro() const {
 
 bool Maxwell3D::HasPendingNativeInstrumentation() const {
     return native_instrumentation_pending;
+}
+
+bool Maxwell3D::HasPendingNativeInlineUpload() const {
+    return native_inline_upload && native_inline_upload->IsPending();
 }
 
 const Control::NativeGraphicsConfig& Maxwell3D::GetNativeGraphicsConfig() const {
@@ -589,22 +599,14 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
                     return self.engine.NativeWaitForIdle();
                 }
                 if (NativeVersionRegister(method) || IsNativeVersionSet(method) ||
-                    method == 0x8c4 || method == 0x54 || method == 0x55 ||
+                    IsNativeConstantBufferBind(method) || method == 0x8c4 || method == 0x54 ||
+                    method == 0x55 || method == 0x6c || method == 0x6d ||
                     (method >= 0x8e4 && method <= 0x8f3)) {
                     self.engine.CallMethod(self.system, method, value, true);
                     return !self.engine.HasNativeMacroFailure();
                 }
                 // Native draw/action adapters must opt in before MME can execute those methods.
                 if (!self.engine.IsNativeStateMethod(method)) {
-                    if (method == 0x6c) {
-                        LOG_ERROR(
-                            HW_GPU,
-                            "Unsupported native inline DMA: flags={:#x}, bytes={:#x}, "
-                            "lines={:#x}, upper={:#x}, lower={:#x}, pitch={:#x}",
-                            value, self.engine.GetRegisterValue(0x60),
-                            self.engine.GetRegisterValue(0x61), self.engine.GetRegisterValue(0x62),
-                            self.engine.GetRegisterValue(0x63), self.engine.GetRegisterValue(0x64));
-                    }
                     LOG_ERROR(HW_GPU,
                               "Unsupported native graphics macro output method={:#x}, value={:#x}",
                               method, value);
@@ -643,11 +645,76 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
             native_action_failed = !NativeWaitForIdle();
             return;
         }
+        if (IsNativeConstantBufferBind(method)) {
+            const u32 slot = (method_argument >> 4) & 0x1f;
+            if ((method_argument & ~0x1f1U) || slot >= Regs::MaxConstBuffers) {
+                native_action_failed = true;
+                return;
+            }
+            ConstBufferInfo binding{};
+            binding.enabled = (method_argument & 1) != 0;
+            if (binding.enabled) {
+                const u32 upper = GetRegisterValue(0x8e1);
+                binding.address = (GPUVAddr{upper} << 32) | GetRegisterValue(0x8e2);
+                binding.size = GetRegisterValue(0x8e0);
+                if (upper > 0xff || binding.size == 0 || binding.size > 0x1ffff ||
+                    binding.size > (u64{1} << 40) - binding.address ||
+                    !memory_manager.IsReadableRange(binding.address, binding.size)) {
+                    native_action_failed = true;
+                    return;
+                }
+            }
+            // Preserve canonical GPUVA state. The legacy cache binder assumes one
+            // contiguous physical mapping; native draws remain guarded until resolved.
+            state.shader_stages[(method - 0x904) / 8].const_buffers[slot] = binding;
+            ProcessDirtyRegisters(method, method_argument);
+            return;
+        }
+        if (method == 0x6c || method == 0x6d) {
+            if (native_instrumentation_pending) {
+                native_action_failed = true;
+                return;
+            }
+            using Transfer = Control::NativeInlineUpload;
+            const Transfer::Host upload_host{
+                this,
+                [](void* context, GPUVAddr address, size_t size) {
+                    return static_cast<Maxwell3D*>(context)->memory_manager.IsWritableRange(address,
+                                                                                            size);
+                },
+                [](void* context) { return static_cast<Maxwell3D*>(context)->NativeWaitForIdle(); },
+                [](void* context, GPUVAddr address, std::span<const u8> bytes) {
+                    return static_cast<Maxwell3D*>(context)->memory_manager.WriteBlockChecked(
+                        address, bytes);
+                },
+                [](void* context) {
+                    return static_cast<Maxwell3D*>(context)->native_stop_token.stop_requested();
+                },
+            };
+            const auto error =
+                method == 0x6c
+                    ? native_inline_upload->Launch({GetRegisterValue(0x60), GetRegisterValue(0x61),
+                                                    GetRegisterValue(0x62), GetRegisterValue(0x63),
+                                                    GetRegisterValue(0x64)},
+                                                   method_argument, upload_host)
+                    : native_inline_upload->PushWord(method_argument, upload_host);
+            if (error != Transfer::Error::None) {
+                LOG_ERROR(HW_GPU,
+                          "Native inline DMA failed: method={:#x}, argument={:#x}, error={}, "
+                          "bytes={:#x}, lines={:#x}",
+                          method, method_argument, static_cast<u32>(error), GetRegisterValue(0x60),
+                          GetRegisterValue(0x61));
+                native_action_failed = true;
+                return;
+            }
+            ProcessDirtyRegisters(method, method_argument);
+            return;
+        }
         if (method == 0x54 || method == 0x55) {
             // Retain only the initialization metadata pair used by deko3d and the
             // native stream. Profiling and hardware method forwarding are unsupported.
             const bool header = method == 0x54;
-            if (native_instrumentation_pending == header ||
+            if (HasPendingNativeInlineUpload() || native_instrumentation_pending == header ||
                 method_argument != (header ? 0x49000000U : 0x49000001U)) {
                 native_action_failed = true;
                 return;

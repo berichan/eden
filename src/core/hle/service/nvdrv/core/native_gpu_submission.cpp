@@ -31,6 +31,7 @@ struct NativeGpuChannel::Backend {
 
     bool PendingEngineWork(const Tegra::Control::NativeGpuGraphicsContext& context) const {
         return context.HasPendingQmd() || context.HasQmdFailure() ||
+               channel->payload->maxwell_3d.HasPendingNativeInlineUpload() ||
                channel->payload->maxwell_3d.HasPendingNativeInstrumentation() ||
                channel->payload->maxwell_3d.HasPendingNativeMacro() ||
                channel->payload->maxwell_3d.HasNativeMacroFailure() ||
@@ -52,7 +53,12 @@ struct NativeGpuChannel::Backend {
         }
         // This restricted scope supports state/ordering commands, not launches or
         // macros whose output could publish a release before the scope is closed.
-        if ((atomic_sequence.IsActive() || payload.maxwell_3d.HasPendingNativeInstrumentation()) &&
+        const bool restricted_scope =
+            atomic_sequence.IsActive() || payload.maxwell_3d.HasPendingNativeInstrumentation();
+        if (restricted_scope && (method == 0x6c || method == 0x6d)) {
+            return false;
+        }
+        if ((restricted_scope || payload.maxwell_3d.HasPendingNativeInlineUpload()) &&
             (method >= 0xe00 || (classes[subchannel] == 0xc7c0 && method == 0xb0))) {
             return false;
         }
