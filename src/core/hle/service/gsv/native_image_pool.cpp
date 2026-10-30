@@ -16,6 +16,11 @@ NativeImage::~NativeImage() {
     }
 }
 
+Result NativeImage::ResolveBacking(DAddr* out_address) const {
+    R_UNLESS(m_owner, Kernel::ResultInvalidState);
+    R_RETURN(m_owner->ResolveImageBacking(out_address, m_memory_handle, layout.size));
+}
+
 NativeImagePool::NativeImagePool(std::shared_ptr<NativeMemoryDescriptions> descriptions)
     : m_descriptions{std::move(descriptions)} {}
 

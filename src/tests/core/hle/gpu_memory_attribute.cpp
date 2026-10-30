@@ -544,6 +544,17 @@ TEST_CASE("GPU pins retain real heap pages until partial unlock or process table
     }
     SECTION("native images validate real backing and keep it alive through external consumers") {
         using namespace Service::GSV;
+        Tegra::GPU gpu{system, false, false};
+        Null::RasterizerNull rasterizer{gpu};
+        Tegra::MaxwellDeviceMemoryManager backing{system.DeviceMemory()};
+        backing.BindInterface(&rasterizer);
+        GpuAddressSpacePool spaces;
+        auto manager =
+            std::make_unique<Tegra::MemoryManager>(system, backing, 40, 1ULL << 40, 16, 12);
+        manager->BindRasterizer(&rasterizer);
+        auto* view = manager.get();
+        u32 space{};
+        REQUIRE(spaces.Add(&space, std::move(manager), 0).IsSuccess());
         auto devices = std::make_shared<GraphicsDeviceTable>();
         u8 device{};
         REQUIRE(devices->Create(&device, 1, 0, 0).IsSuccess());
@@ -555,6 +566,10 @@ TEST_CASE("GPU pins retain real heap pages until partial unlock or process table
         u32 memory{};
         const u64 base = GetInteger(address);
         REQUIRE(pool->Register(&memory, base, base + 4 * PageSize - 1, 0, device).IsSuccess());
+        DAddr resolved{0xfeed};
+        REQUIRE(pool->ResolveReferenceBacking(&resolved, memory, base, PageSize, 0) ==
+                Result{0x280f3});
+        REQUIRE(resolved == 0xfeed);
         auto descriptions = std::make_shared<NativeMemoryDescriptions>();
         u32 description{}, small{};
         REQUIRE(descriptions->Create(&description, 3, PageSize).IsSuccess());
@@ -564,6 +579,8 @@ TEST_CASE("GPU pins retain real heap pages until partial unlock or process table
         preference.row_alignment_log2 = 3;
         preference.format = 1;
         preference.options = 1;
+        constexpr u64 gpu_address = 0x8000000;
+        DAddr expected_backing{};
         std::shared_ptr<const NativeImage> consumer;
         {
             NativeImagePool images{descriptions};
@@ -581,6 +598,31 @@ TEST_CASE("GPU pins retain real heap pages until partial unlock or process table
             REQUIRE(
                 descriptions->Bind(description, pool, base + PageSize, PageSize, memory, PageSize)
                     .IsSuccess());
+            REQUIRE(pool->ResolveReferenceBacking(&resolved, memory, base + PageSize, 512,
+                                                  PageSize) == ResultInvalidState);
+            REQUIRE(resolved == 0xfeed);
+            REQUIRE(descriptions->ResolveImageBacking(&resolved, description, 512) ==
+                    NativeMemoryDescriptions::Busy);
+            REQUIRE(resolved == 0xfeed);
+            const GpuMemoryPool::MapOptions options{0, 0, 6, 6, 0, device, 1};
+            u8 selected{};
+            REQUIRE(pool->Map(&selected, spaces, backing, space, gpu_address,
+                              gpu_address + 4 * PageSize - 1, memory, 0, options)
+                        .IsSuccess());
+            const auto mapped = view->GpuToCpuAddress(gpu_address + PageSize);
+            REQUIRE(mapped);
+            expected_backing = *mapped;
+            for (const auto& invalid :
+                 std::array<std::array<u64, 3>, 5>{{{{base, 0, 0}},
+                                                    {{base + PageSize + 1, 512, PageSize}},
+                                                    {{base + 4 * PageSize, 1, 4 * PageSize}},
+                                                    {{base, 512, 0xffffffffffffffffULL}},
+                                                    {{base, 0xffffffffffffffffULL, 0}}}}) {
+                REQUIRE(pool->ResolveReferenceBacking(&resolved, memory, invalid[0], invalid[1],
+                                                      invalid[2]) ==
+                        NativeMemoryDescriptions::InvalidArgument);
+                REQUIRE(resolved == 0xfeed);
+            }
             REQUIRE(images.Create(&handle, preference, 0, description) ==
                     NativeMemoryDescriptions::InvalidArgument);
             REQUIRE(images.Create(&handle, preference, 2, description) == ResultNotImplemented);
@@ -628,6 +670,19 @@ TEST_CASE("GPU pins retain real heap pages until partial unlock or process table
             REQUIRE(consumer->Memory().binding->address == base + PageSize);
             REQUIRE(consumer->Memory().binding->offset == PageSize);
             REQUIRE(consumer->Memory().binding->memory_handle == memory);
+            REQUIRE(consumer->ResolveBacking(&resolved).IsSuccess());
+            REQUIRE(resolved == expected_backing);
+            resolved = 0xfeed;
+            REQUIRE(descriptions->ResolveImageBacking(&resolved, 0, 512) ==
+                    NativeMemoryDescriptions::InvalidHandle);
+            REQUIRE(descriptions->ResolveImageBacking(&resolved, description, 0) ==
+                    NativeMemoryDescriptions::InvalidArgument);
+            REQUIRE(descriptions->ResolveImageBacking(&resolved, description, PageSize + 1) ==
+                    NativeMemoryDescriptions::InvalidArgument);
+            REQUIRE(resolved == 0xfeed);
+            NativeImage unattached{preference, consumer->layout};
+            REQUIRE(unattached.ResolveBacking(&resolved) == ResultInvalidState);
+            REQUIRE(resolved == 0xfeed);
             REQUIRE(images.Destroy(handle) == NativeMemoryDescriptions::Busy);
             consumer.reset();
             REQUIRE(images.Destroy(handle).IsSuccess());
@@ -642,6 +697,10 @@ TEST_CASE("GPU pins retain real heap pages until partial unlock or process table
         }
         REQUIRE(consumer->Memory().binding->address == base + PageSize);
         REQUIRE(descriptions->Destroy(description) == NativeMemoryDescriptions::Busy);
+        REQUIRE(pool->Unmap(space, gpu_address, gpu_address + 4 * PageSize - 1).IsSuccess());
+        REQUIRE_FALSE(view->GpuToCpuAddress(gpu_address + PageSize));
+        REQUIRE(consumer->ResolveBacking(&resolved).IsSuccess());
+        REQUIRE(resolved == expected_backing);
         auto* event = KEvent::Create(kernel);
         REQUIRE(event != nullptr);
         event->Initialize(kernel, nullptr);
@@ -651,12 +710,18 @@ TEST_CASE("GPU pins retain real heap pages until partial unlock or process table
             event->Close(kernel);
         };
         REQUIRE(pool->Unregister(memory, event).IsSuccess());
+        REQUIRE(pool->RetainReference(memory, base + PageSize, PageSize, PageSize) ==
+                Result{0x280f3});
+        REQUIRE(consumer->ResolveBacking(&resolved).IsSuccess());
+        REQUIRE(resolved == expected_backing);
         std::weak_ptr<GpuMemoryPool> retained_pool = pool;
         std::weak_ptr<NativeMemoryDescriptions> retained_descriptions = descriptions;
         pool.reset();
         descriptions.reset();
         REQUIRE_FALSE(retained_pool.expired());
         REQUIRE_FALSE(retained_descriptions.expired());
+        REQUIRE(consumer->ResolveBacking(&resolved).IsSuccess());
+        REQUIRE(resolved == expected_backing);
         REQUIRE_FALSE(event->GetReadableEvent().IsSignaled(kernel));
         REQUIRE(devices->Destroy(device) == GraphicsDeviceTable::InvalidDevice);
         consumer.reset();
@@ -1179,6 +1244,13 @@ TEST_CASE("GPU pins retain real heap pages until partial unlock or process table
         };
         REQUIRE(pool.RetainReference(handle, GetInteger(address) + PageSize, PageSize, PageSize)
                     .IsSuccess());
+        const auto expected_backing = view->GpuToCpuAddress(va);
+        REQUIRE(expected_backing);
+        DAddr retained_backing{};
+        REQUIRE(pool.ResolveReferenceBacking(&retained_backing, handle,
+                                             GetInteger(address) + PageSize, PageSize, PageSize)
+                    .IsSuccess());
+        REQUIRE(retained_backing == *expected_backing);
         REQUIRE(pool.Unregister(handle, event).IsSuccess());
         REQUIRE_FALSE(event->GetReadableEvent().IsSignaled(kernel));
         REQUIRE(devices->Destroy(device) == GraphicsDeviceTable::InvalidDevice);
@@ -1190,9 +1262,18 @@ TEST_CASE("GPU pins retain real heap pages until partial unlock or process table
         REQUIRE(devices->Destroy(device) == GraphicsDeviceTable::InvalidDevice);
         REQUIRE(pool.Unmap(alias_space, va, va + size - 1).IsSuccess());
         REQUIRE_FALSE(alias_view->GpuToCpuAddress(va));
+        REQUIRE(pool.ResolveReferenceBacking(&retained_backing, handle,
+                                             GetInteger(address) + PageSize, PageSize, PageSize)
+                    .IsSuccess());
+        REQUIRE(retained_backing == *expected_backing);
         REQUIRE_FALSE(event->GetReadableEvent().IsSignaled(kernel));
         REQUIRE(devices->Destroy(device) == GraphicsDeviceTable::InvalidDevice);
         REQUIRE(pool.ReleaseReference(handle).IsSuccess());
+        retained_backing = 0xfeed;
+        REQUIRE(pool.ResolveReferenceBacking(&retained_backing, handle,
+                                             GetInteger(address) + PageSize, PageSize,
+                                             PageSize) == Result{0x280f3});
+        REQUIRE(retained_backing == 0xfeed);
         REQUIRE(event->GetReadableEvent().IsSignaled(kernel));
         REQUIRE(devices->Destroy(device).IsSuccess());
         REQUIRE(pool.Unregister(handle) == Result{0x280f3});

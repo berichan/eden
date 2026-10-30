@@ -38,6 +38,10 @@ public:
     Result Unregister(u32 handle, Kernel::KEvent* completion = nullptr);
     Result RetainReference(u32 handle, u64 address, u64 size, u64 offset);
     Result ReleaseReference(u32 handle);
+    // The caller must keep its existing reference alive through all use of the
+    // returned DAddr. Resolving does not create a reference or access guest data.
+    Result ResolveReferenceBacking(DAddr* out_address, u32 handle, u64 address, u64 size,
+                                   u64 offset);
 
     struct MapOptions {
         u8 permission;

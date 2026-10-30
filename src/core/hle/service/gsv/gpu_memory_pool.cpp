@@ -193,6 +193,27 @@ Result GpuMemoryPool::ReleaseReference(u32 handle) {
     R_SUCCEED();
 }
 
+Result GpuMemoryPool::ResolveReferenceBacking(DAddr* out_address, u32 handle, u64 address, u64 size,
+                                              u64 offset) {
+    const std::scoped_lock lock{m_mutex};
+    const auto it = m_memory.find(handle);
+    R_UNLESS(it != m_memory.end() && it->second.reference_count != 0, InvalidMemory);
+    const auto& memory = it->second;
+    R_UNLESS(size != 0 && offset <= memory.pinned_size && size <= memory.pinned_size - offset &&
+                 address >= memory.address && address - memory.address == offset,
+             InvalidArgument);
+    R_UNLESS(m_backing && memory.device_address != 0, Kernel::ResultInvalidState);
+    constexpr u64 AddressLimit = 1ULL << Tegra::MaxwellDeviceMemoryManager::AS_BITS;
+    R_UNLESS(memory.device_address < AddressLimit &&
+                 offset <= AddressLimit - memory.device_address &&
+                 size <= AddressLimit - memory.device_address - offset,
+             InvalidArgument);
+    // Pending unregister cannot retire the translation while this already
+    // retained reference exists, even after its last GPU mapping is removed.
+    *out_address = memory.device_address + offset;
+    R_SUCCEED();
+}
+
 Result GpuMemoryPool::ReleaseMemory(std::map<u32, Memory>::iterator it,
                                     Kernel::KEvent* completion) {
     const u32 handle = it->first;

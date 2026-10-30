@@ -122,6 +122,20 @@ public:
         R_SUCCEED();
     }
 
+    // The attached image must stay retained until the caller finishes using the
+    // backing. Its description owns the pool reference that prevents retirement.
+    Result ResolveImageBacking(DAddr* out_address, u32 handle, u64 size) const {
+        const std::scoped_lock lock{m_mutex};
+        const auto it = m_descriptions.find(handle);
+        R_UNLESS(it != m_descriptions.end(), InvalidHandle);
+        const auto& record = it->second;
+        R_UNLESS(record.image_attached && record.description.binding && record.pool, Busy);
+        R_UNLESS(size != 0 && size <= record.description.size, InvalidArgument);
+        const auto& binding = *record.description.binding;
+        R_RETURN(record.pool->ResolveReferenceBacking(out_address, binding.memory_handle,
+                                                      binding.address, size, binding.offset));
+    }
+
     void ReleaseImage(u32 handle) {
         const std::scoped_lock lock{m_mutex};
         const auto it = m_descriptions.find(handle);

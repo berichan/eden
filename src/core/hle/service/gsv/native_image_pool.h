@@ -24,6 +24,10 @@ public:
         return m_memory;
     }
 
+    // Retain this image through cache synchronization and the checked snapshot.
+    // Memory().binding->address is CPU VA; this resolves the actual device range.
+    Result ResolveBacking(DAddr* out_address) const;
+
     const NativeImagePreference preference;
     const NativeImageLayout layout;
 

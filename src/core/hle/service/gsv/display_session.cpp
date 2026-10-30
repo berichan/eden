@@ -194,6 +194,20 @@ void DisplaySession::PresentLayer(HLERequestContext& ctx) {
                   state.recorder_flags, state.user_data, packet->render_sync.counter,
                   packet->render_sync.mode, packet->render_sync.target,
                   packet->render_sync.IsEmpty());
+        const auto image = m_images ? m_images->Acquire(packet->image) : nullptr;
+        if (image) {
+            DAddr backing{};
+            const auto resolved = image->ResolveBacking(&backing);
+            LOG_DEBUG(Service,
+                      "Native present image: image={:#x}, type={}, format={}, options={:#x}, "
+                      "extent={}x{}, bytes_per_pixel={}, pitch={:#x}, block_height={}, "
+                      "bytes={:#x}, backing_result={:#x}, backing={:#x}",
+                      packet->image, static_cast<u32>(image->preference.type),
+                      static_cast<u32>(image->preference.format),
+                      static_cast<u32>(image->preference.options), image->layout.width,
+                      image->layout.height, image->layout.bytes_per_pixel, image->layout.row_pitch,
+                      image->layout.block_height_log2, image->layout.size, resolved.raw, backing);
+        }
         // Decoding is not presentation. Until owned backing, rendering fences
         // and compositor source lifetimes are connected, do not queue work or
         // claim a reusable slot/image through a success reply.
