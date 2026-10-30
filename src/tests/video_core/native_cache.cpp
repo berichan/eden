@@ -20,11 +20,20 @@ TEST_CASE("Native cache actions decode only supported C797 invalidation fields",
     REQUIRE_FALSE(instruction->global_data);
     REQUIRE_FALSE(instruction->constants);
     REQUIRE(DecodeNativeGraphicsCacheAction(0x4a2, 0)->texture_data);
+    const auto ordered_texture = DecodeNativeGraphicsCacheAction(0x3dd, 0);
+    REQUIRE(ordered_texture);
+    REQUIRE(ordered_texture->texture_data);
+    REQUIRE_FALSE(ordered_texture->instructions);
+    REQUIRE_FALSE(ordered_texture->global_data);
+    REQUIRE_FALSE(ordered_texture->constants);
+    REQUIRE_FALSE(ordered_texture->texture_headers);
+    REQUIRE_FALSE(ordered_texture->samplers);
     REQUIRE(DecodeNativeGraphicsCacheAction(0x50a, 0)->texture_headers);
     REQUIRE(DecodeNativeGraphicsCacheAction(0x509, 0)->samplers);
-    for (u32 method : {0x4a2U, 0x50aU, 0x509U}) {
+    for (u32 method : {0x3ddU, 0x4a2U, 0x50aU, 0x509U}) {
         REQUIRE_FALSE(DecodeNativeGraphicsCacheAction(method, 1));
         REQUIRE_FALSE(DecodeNativeGraphicsCacheAction(method, 0x10));
+        REQUIRE_FALSE(DecodeNativeGraphicsCacheAction(method, 0xffffffff));
     }
     REQUIRE_FALSE(DecodeNativeGraphicsCacheAction(0x369, 2));
     REQUIRE_FALSE(DecodeNativeGraphicsCacheAction(0x369, 4));
