@@ -16,10 +16,22 @@ bool IsUpload(u32 method) {
 
 } // namespace
 
-NativeMacroProcessor::NativeMacroProcessor(std::shared_ptr<AmpereGraphicsState> state_)
-    : state{std::move(state_)} {
+struct NativeMacroProcessor::PrivateProgram {
+    explicit PrivateProgram(const AmpereGraphicsState& state)
+        : instructions{state.macro_engine.CopyProgram()}, starts{state.macro_starts},
+          bind_pointer{state.macro_bind_pointer} {}
+    TuringMacroEngine::Program instructions;
+    std::array<std::optional<u32>, AmpereGraphicsState::MacroCount> starts;
+    u32 bind_pointer;
+};
+
+NativeMacroProcessor::NativeMacroProcessor(std::shared_ptr<AmpereGraphicsState> state_,
+                                           ProgramBank bank_)
+    : state{std::move(state_)}, bank{bank_} {
     ASSERT(state);
 }
+
+NativeMacroProcessor::~NativeMacroProcessor() = default;
 
 NativeMacroProcessor::Status NativeMacroProcessor::CallMethod(u32 method, u32 value, bool last,
                                                               const Host& host,
@@ -41,37 +53,50 @@ NativeMacroProcessor::Status NativeMacroProcessor::CallMethod(u32 method, u32 va
         return Status::Unhandled;
     }
     std::scoped_lock lock{state->mutex};
+    if (bank == ProgramBank::Compute && !private_program && IsUpload(method)) {
+        // Compute can invoke the graphics-uploaded library before it installs its
+        // own program. Queue variants pack that library at different addresses;
+        // an explicit compute upload must not overwrite graphics or another queue.
+        private_program = std::make_unique<PrivateProgram>(*state);
+    }
+    auto& starts = private_program ? private_program->starts : state->macro_starts;
+    auto& bind_pointer =
+        private_program ? private_program->bind_pointer : state->macro_bind_pointer;
     if (method == 0x45) {
-        return state->macro_engine.SetInstructionPointer(value) ? Status::Accepted
-                                                                : fail(Error::InvalidUpload);
+        const bool uploaded =
+            private_program
+                ? TuringMacroEngine::SetInstructionPointer(private_program->instructions, value)
+                : state->macro_engine.SetInstructionPointer(value);
+        return uploaded ? Status::Accepted : fail(Error::InvalidUpload);
     }
     if (method == 0x46) {
-        return state->macro_engine.UploadInstruction(value) ? Status::Accepted
-                                                            : fail(Error::InvalidUpload);
+        const bool uploaded =
+            private_program
+                ? TuringMacroEngine::UploadInstruction(private_program->instructions, value)
+                : state->macro_engine.UploadInstruction(value);
+        return uploaded ? Status::Accepted : fail(Error::InvalidUpload);
     }
     if (method == 0x47) {
-        if (value >= state->macro_starts.size()) {
+        if (value >= starts.size()) {
             return fail(Error::InvalidBinding);
         }
-        state->macro_bind_pointer = value;
+        bind_pointer = value;
         return Status::Accepted;
     }
     if (method == 0x48) {
-        if (state->macro_bind_pointer >= state->macro_starts.size() ||
-            value >= TuringMacroEngine::InstructionCount) {
+        if (bind_pointer >= starts.size() || value >= TuringMacroEngine::InstructionCount) {
             return fail(Error::InvalidBinding);
         }
-        state->macro_starts[state->macro_bind_pointer++] = value;
+        starts[bind_pointer++] = value;
         return Status::Accepted;
     }
     const u32 slot = (method - MacroMethodStart) / 2;
-    if (slot >= state->macro_starts.size() || !state->macro_starts[slot] ||
-        (!invocation && (method & 1))) {
+    if (slot >= starts.size() || !starts[slot] || (!invocation && (method & 1))) {
         return fail(Error::InvalidInvocation);
     }
     if (!invocation) {
         invocation = method;
-        invocation_start = *state->macro_starts[slot];
+        invocation_start = *starts[slot];
     }
     if (parameters.size() == MaxParameters) {
         return fail(Error::ParameterLimit);
@@ -120,7 +145,10 @@ NativeMacroProcessor::Status NativeMacroProcessor::CallMethod(u32 method, u32 va
             return host.should_stop && host.should_stop(host.context);
         },
     };
-    execution_result = state->macro_engine.Execute(start, bindings, instruction_limit);
+    execution_result = private_program
+                           ? state->macro_engine.Execute(private_program->instructions, start,
+                                                         bindings, instruction_limit)
+                           : state->macro_engine.Execute(start, bindings, instruction_limit);
     if (!execution_result.Succeeded()) {
         // A binding can refer to a different upload than an earlier capture. Keep
         // fault diagnostics bounded to the failing instruction and its predecessors.
@@ -128,7 +156,11 @@ NativeMacroProcessor::Status NativeMacroProcessor::CallMethod(u32 method, u32 va
         const auto first = fault > 3 ? fault - 3 : 0;
         for (u32 pc = first; pc <= fault && pc < TuringMacroEngine::InstructionCount; ++pc) {
             TuringMacroEngine::EncodedInstruction words;
-            if (!state->macro_engine.ReadInstruction(pc, words))
+            const bool uploaded =
+                private_program
+                    ? TuringMacroEngine::ReadInstruction(private_program->instructions, pc, words)
+                    : state->macro_engine.ReadInstruction(pc, words);
+            if (!uploaded)
                 continue;
             const auto inst = TuringMacroEngine::Decode(words);
             LOG_DEBUG(

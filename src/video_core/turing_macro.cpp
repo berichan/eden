@@ -35,30 +35,47 @@ TuringMacroEngine::Instruction TuringMacroEngine::Decode(const EncodedInstructio
 }
 
 bool TuringMacroEngine::SetInstructionPointer(u32 instruction) {
+    return SetInstructionPointer(program, instruction);
+}
+
+bool TuringMacroEngine::SetInstructionPointer(Program& program, u32 instruction) {
     if (instruction >= InstructionCount) {
         return false;
     }
-    upload_word = instruction * 3;
+    program.upload_word = instruction * 3;
     return true;
 }
 
 bool TuringMacroEngine::UploadInstruction(u32 word) {
-    if (upload_word >= InstructionCount * 3) {
+    return UploadInstruction(program, word);
+}
+
+bool TuringMacroEngine::UploadInstruction(Program& program, u32 word) {
+    if (program.upload_word >= InstructionCount * 3) {
         return false;
     }
-    const u32 instruction = upload_word / 3;
-    const u32 slot = upload_word % 3;
-    code[instruction][slot] = word;
-    written[instruction] |= u8{1} << slot;
-    ++upload_word;
+    const u32 instruction = program.upload_word / 3;
+    const u32 slot = program.upload_word % 3;
+    program.code[instruction][slot] = word;
+    program.written[instruction] |= u8{1} << slot;
+    ++program.upload_word;
     return true;
 }
 
 bool TuringMacroEngine::ReadInstruction(u32 index, EncodedInstruction& words) const {
-    if (index >= InstructionCount || written[index] != 7)
+    return ReadInstruction(program, index, words);
+}
+
+bool TuringMacroEngine::ReadInstruction(const Program& program, u32 index,
+                                        EncodedInstruction& words) {
+    if (index >= InstructionCount || program.written[index] != 7)
         return false;
-    words = code[index];
+    words = program.code[index];
     return true;
+}
+
+TuringMacroEngine::Program TuringMacroEngine::CopyProgram() const {
+    return program;
 }
 
 bool TuringMacroEngine::ReadData(u32 index, u32& value) const {
@@ -79,8 +96,9 @@ bool TuringMacroEngine::WriteData(u32 index, u32 value) {
 
 class TuringMacroEngine::Invocation {
 public:
-    Invocation(TuringMacroEngine& engine_, const Host& host_, u32 start, u64 limit_)
-        : engine{engine_}, host{host_}, limit{limit_}, pc{start} {
+    Invocation(TuringMacroEngine& engine_, const Program& program_, const Host& host_, u32 start,
+               u64 limit_)
+        : engine{engine_}, program{program_}, host{host_}, limit{limit_}, pc{start} {
         result.entry_point = start;
     }
 
@@ -100,11 +118,11 @@ public:
                 Fail(Error::InvalidProgramCounter);
                 break;
             }
-            if (engine.written[pc] != 7) {
+            if (program.written[pc] != 7) {
                 Fail(Error::IncompleteInstruction);
                 break;
             }
-            inst = Decode(engine.code[pc]);
+            inst = Decode(program.code[pc]);
             ++result.instructions;
             next_pc = pc + 1;
             branch_cancels_end = false;
@@ -495,6 +513,7 @@ private:
     }
 
     TuringMacroEngine& engine;
+    const Program& program;
     const Host& host;
     u64 limit;
     Result result;
@@ -517,7 +536,12 @@ private:
 
 TuringMacroEngine::Result TuringMacroEngine::Execute(u32 start, const Host& host,
                                                      u64 instruction_limit) {
-    return Invocation{*this, host, start, instruction_limit}.Run();
+    return Execute(program, start, host, instruction_limit);
+}
+
+TuringMacroEngine::Result TuringMacroEngine::Execute(const Program& instructions, u32 start,
+                                                     const Host& host, u64 instruction_limit) {
+    return Invocation{*this, instructions, host, start, instruction_limit}.Run();
 }
 
 } // namespace Tegra

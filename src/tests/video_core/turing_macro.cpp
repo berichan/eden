@@ -942,6 +942,77 @@ TEST_CASE("Native compute switch configuration retains callbacks without invokin
     }
 }
 
+TEST_CASE("Compute program uploads preserve graphics and other queue banks while sharing data RAM",
+          "[ipc][video_core]") {
+    Core::System system;
+    Core::DeviceMemory memory;
+    Tegra::MaxwellDeviceMemoryManager backing{memory};
+    auto space = std::make_shared<Tegra::MemoryManager>(system, backing, 32, 1ULL << 32, 16, 12);
+    auto state = std::make_shared<Tegra::Control::AmpereGraphicsState>();
+    auto context = std::make_shared<Tegra::Control::NativeGpuGraphicsContext>(state, space);
+    Processor graphics{state};
+    MethodHost host;
+    Upload(graphics, SumProgram(0xd00), host);
+    using Compute = Tegra::Control::NativeCompute;
+    Compute first{context}, second{context}, inherited{context};
+    const auto upload = [](Compute& compute, std::span<const Inst> program, u32 start, u32 slot) {
+        REQUIRE(compute.CallMethod(0x45, start, true, {}));
+        for (const auto& inst : program) {
+            for (const auto word : Encode(inst))
+                REQUIRE(compute.CallMethod(0x46, word, true, {}));
+        }
+        REQUIRE(compute.CallMethod(0x47, slot, true, {}));
+        REQUIRE(compute.CallMethod(0x48, start, true, {}));
+    };
+    // Bootstrap compute calls can still use the graphics-installed library.
+    REQUIRE(inherited.CallMethod(0xe0a, 1, false, {}));
+    REQUIRE(inherited.CallMethod(0xe0b, 2, true, {}));
+    REQUIRE(inherited.ReadRegister(0xd00) == 3);
+    // The queues repack a library at overlapping instruction addresses and reuse a slot.
+    upload(first, SumProgram(0xd01), 7, 5);
+    upload(second, SumProgram(0xd02), 8, 5);
+    REQUIRE(graphics.CallMethod(0xe0a, 8, false, host.Bind()) == Processor::Status::Accepted);
+    REQUIRE(graphics.CallMethod(0xe0b, 9, true, host.Bind()) == Processor::Status::Accepted);
+    REQUIRE(host.registers[0xd00] == 17);
+    REQUIRE(first.CallMethod(0xe0a, 2, false, {}));
+    REQUIRE(first.CallMethod(0xe0b, 3, true, {}));
+    REQUIRE(first.ReadRegister(0xd01) == 5);
+    REQUIRE(second.CallMethod(0xe0a, 4, false, {}));
+    REQUIRE(second.CallMethod(0xe0b, 5, true, {}));
+    REQUIRE(second.ReadRegister(0xd02) == 9);
+    Upload(graphics, SumProgram(0xd03), host);
+    REQUIRE(inherited.CallMethod(0xe0a, 6, false, {}));
+    REQUIRE(inherited.CallMethod(0xe0b, 7, true, {}));
+    REQUIRE(inherited.ReadRegister(0xd03) == 13);
+    REQUIRE(first.CallMethod(0xe0a, 10, false, {}));
+    REQUIRE(first.CallMethod(0xe0b, 20, true, {}));
+    REQUIRE(first.ReadRegister(0xd01) == 30);
+    REQUIRE(second.CallMethod(0xe0a, 30, false, {}));
+    REQUIRE(second.CallMethod(0xe0b, 40, true, {}));
+    REQUIRE(second.ReadRegister(0xd02) == 70);
+
+    Inst write;
+    write.alu[0] = {Op::DataWrite, Z, I, L0};
+    write.immediate[0] = 0x123;
+    Inst read;
+    read.alu[0] = {Op::DataRead, 0, I, Z};
+    read.immediate[0] = 0x123;
+    read.output[0].emit = 1;
+    read.end_next = true;
+    auto method = Method();
+    method.immediate[0] = 0x1d04;
+    upload(first, std::array{method, write, read, Inst{}}, 20, 6);
+    REQUIRE(first.CallMethod(0xe0c, 0x12345678, true, {}));
+    REQUIRE(first.ReadRegister(0xd04) == 0x12345678);
+    // Only program RAM is private. Data reads still use the common MME scratch RAM.
+    Upload(graphics, std::array{method, read, Inst{}}, host, 40, 7);
+    REQUIRE(graphics.CallMethod(0xe0e, 0, true, host.Bind()) == Processor::Status::Accepted);
+    REQUIRE(host.registers[0xd04] == 0x12345678);
+    upload(second, std::array{method, read, Inst{}}, 30, 6);
+    REQUIRE(second.CallMethod(0xe0c, 0, true, {}));
+    REQUIRE(second.ReadRegister(0xd04) == 0x12345678);
+}
+
 TEST_CASE("Native compute texture cache invalidation executes its backend and propagates failures",
           "[ipc][video_core]") {
     Core::System system;

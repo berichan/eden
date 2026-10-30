@@ -52,7 +52,8 @@ bool IsStateMethod(u32 method) {
 } // namespace
 
 NativeCompute::NativeCompute(std::shared_ptr<const NativeGpuGraphicsContext> context_)
-    : context{std::move(context_)}, macros{context ? context->GetState() : nullptr} {
+    : context{std::move(context_)},
+      macros{context ? context->GetState() : nullptr, NativeMacroProcessor::ProgramBank::Compute} {
     ASSERT(context);
 }
 

@@ -26,6 +26,7 @@ public:
         bool (*should_stop)(void*){};
     };
     enum class Status { Unhandled, Accepted, Failed };
+    enum class ProgramBank { Graphics, Compute };
     enum class Error {
         None,
         Cancelled,
@@ -36,7 +37,9 @@ public:
         ExecutionFailed,
     };
 
-    explicit NativeMacroProcessor(std::shared_ptr<AmpereGraphicsState> state);
+    explicit NativeMacroProcessor(std::shared_ptr<AmpereGraphicsState> state,
+                                  ProgramBank bank = ProgramBank::Graphics);
+    ~NativeMacroProcessor();
     Status CallMethod(u32 method, u32 value, bool last, const Host& host,
                       u64 instruction_limit = 1'000'000);
     Error GetError() const;
@@ -44,7 +47,10 @@ public:
     bool HasPendingInvocation() const;
 
 private:
+    struct PrivateProgram;
     std::shared_ptr<AmpereGraphicsState> state;
+    const ProgramBank bank;
+    std::unique_ptr<PrivateProgram> private_program;
     std::optional<u32> invocation;
     u32 invocation_start{};
     std::vector<u32> parameters;

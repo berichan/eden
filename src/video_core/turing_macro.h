@@ -80,6 +80,14 @@ public:
     };
     using EncodedInstruction = std::array<u32, 3>;
 
+    // Instruction/start banks can differ between logical engines while execution
+    // still accesses the owning engine's common data RAM.
+    struct Program {
+        std::array<EncodedInstruction, InstructionCount> code{};
+        std::array<u8, InstructionCount> written{};
+        u32 upload_word{};
+    };
+
     enum class Error {
         None,
         InvalidProgramCounter,
@@ -124,16 +132,19 @@ public:
     bool SetInstructionPointer(u32 instruction);
     bool UploadInstruction(u32 word);
     bool ReadInstruction(u32 index, EncodedInstruction& words) const;
+    Program CopyProgram() const;
+    static bool SetInstructionPointer(Program& program, u32 instruction);
+    static bool UploadInstruction(Program& program, u32 word);
+    static bool ReadInstruction(const Program& program, u32 index, EncodedInstruction& words);
     bool ReadData(u32 index, u32& value) const;
     bool WriteData(u32 index, u32 value);
     Result Execute(u32 start, const Host& host, u64 instruction_limit);
+    Result Execute(const Program& instructions, u32 start, const Host& host, u64 instruction_limit);
 
 private:
     class Invocation;
-    std::array<EncodedInstruction, InstructionCount> code{};
-    std::array<u8, InstructionCount> written{};
+    Program program;
     std::array<u32, DataCount> data{};
-    u32 upload_word{};
 };
 
 } // namespace Tegra
