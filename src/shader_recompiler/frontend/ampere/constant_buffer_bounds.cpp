@@ -5,7 +5,6 @@
 #include <bit>
 #include <optional>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 #include <fmt/format.h>
 #include "shader_recompiler/exception.h"
@@ -49,125 +48,40 @@ std::optional<IR::Value> ResolveIdentity(IR::Value value) {
     return std::nullopt;
 }
 
-// A pair may use a 16-byte backend packet. An eight-byte-aligned offset and
-// a 64-byte-aligned bound cannot straddle the packet at that bound. Prove
-// alignment without rounding the guest's address or assuming loop invariants.
-class OffsetAlignment {
-public:
-    u32 Bits(const IR::Value& value) {
-        const u32 bits = Visit(value, 0);
-        return invalid ? 0 : bits;
-    }
-
-private:
-    u32 Visit(const IR::Value& value, u32 depth) {
-        if (depth >= 64 || nodes >= 512) {
-            invalid = true;
-            return 0;
+std::string DescribeOffset(const IR::Value& value) {
+    // Record shared nodes and back edges explicitly. A recursive tree hides
+    // induction inputs and can expand exponentially through nested phis.
+    constexpr size_t MaxNodes = 64, MaxArgs = 16;
+    std::vector<const IR::Inst*> nodes;
+    std::unordered_map<const IR::Inst*, size_t> indices;
+    const auto reference = [&](const IR::Value& argument) -> std::string {
+        if (argument.IsEmpty())
+            return "empty";
+        if (!argument.IsIdentity() && argument.IsImmediate()) {
+            if (argument.Type() == IR::Type::U32)
+                return fmt::format("{:#x}", argument.U32());
+            if (argument.Type() == IR::Type::F32)
+                return fmt::format("f32bits({:#x})", std::bit_cast<u32>(argument.F32()));
+            return "literal";
         }
-        ++nodes;
-        if (value.IsEmpty()) {
-            return 0;
-        }
-        // IsImmediate() follows identities itself, so handle them only after
-        // recording the bounded visit and checking for a cycle.
-        if (!value.IsIdentity() && value.IsImmediate()) {
-            return value.Type() == IR::Type::U32 ? static_cast<u32>(std::countr_zero(value.U32()))
-                                                 : 0;
-        }
-        const auto* instruction = value.Inst();
-        if (const auto found = known.find(instruction); found != known.end()) {
-            return found->second;
-        }
-        if (!visiting.insert(instruction).second) {
-            invalid = true;
-            return 0;
-        }
-        const auto arg = [&](size_t index) { return Visit(instruction->Arg(index), depth + 1); };
-        const auto constant_bits = [&](size_t index) -> u32 {
-            const auto constant = ResolveIdentity(instruction->Arg(index));
-            return constant && !constant->IsEmpty() && constant->IsImmediate() &&
-                           constant->Type() == IR::Type::U32
-                       ? static_cast<u32>(std::countr_zero(constant->U32()))
-                       : 0;
-        };
-        u32 bits{};
-        switch (instruction->GetOpcode()) {
-        case IR::Opcode::Identity:
-            bits = arg(0);
-            break;
-        case IR::Opcode::BitwiseAnd32:
-            // This operand alone proves sufficient alignment, regardless of
-            // any loop-dependent value on the other side of the operation.
-            bits = (std::max)(constant_bits(0), constant_bits(1));
-            if (bits >= 3) {
-                break;
-            }
-            bits = (std::max)(arg(0), arg(1));
-            break;
-        case IR::Opcode::IAdd32:
-        case IR::Opcode::ISub32:
-        case IR::Opcode::BitwiseOr32:
-        case IR::Opcode::BitwiseXor32:
-            bits = (std::min)(arg(0), arg(1));
-            break;
-        case IR::Opcode::IMul32:
-            bits = (std::max)(constant_bits(0), constant_bits(1));
-            if (bits >= 3) {
-                break;
-            }
-            bits = (std::min)(32U, arg(0) + arg(1));
-            break;
-        case IR::Opcode::ShiftLeftLogical32: {
-            const auto shift = ResolveIdentity(instruction->Arg(1));
-            if (shift && !shift->IsEmpty() && shift->IsImmediate() &&
-                shift->Type() == IR::Type::U32 && shift->U32() < 32) {
-                bits = shift->U32();
-                if (bits < 3) {
-                    bits = (std::min)(32U, arg(0) + bits);
-                }
-            }
-            break;
-        }
-        case IR::Opcode::SelectU32:
-            bits = (std::min)(arg(1), arg(2));
-            break;
-        case IR::Opcode::Phi:
-            if (instruction->NumArgs()) {
-                bits = 32;
-                for (size_t index = 0; index < instruction->NumArgs(); ++index) {
-                    bits = (std::min)(bits, arg(index));
-                }
-            }
-            break;
-        default:
-            break;
-        }
-        visiting.erase(instruction);
-        known.emplace(instruction, bits);
-        return bits;
-    }
-
-    std::unordered_map<const IR::Inst*, u32> known;
-    std::unordered_set<const IR::Inst*> visiting;
-    u32 nodes{};
-    bool invalid{};
-};
-
-std::string DescribeOffset(const IR::Value& value, u32 depth) {
-    const auto resolved = ResolveIdentity(value);
-    if (!resolved)
-        return "identity-limit";
-    if (resolved->IsEmpty())
-        return "empty";
-    if (resolved->IsImmediate())
-        return resolved->Type() == IR::Type::U32 ? fmt::format("{:#x}", resolved->U32())
-                                                 : "literal";
-    const auto* instruction = resolved->Inst();
-    std::string result{IR::NameOf(instruction->GetOpcode())};
-    if (depth) {
-        for (u32 index = 0; index < (std::min)(instruction->NumArgs(), size_t{2}); ++index)
-            result += fmt::format(" [{}]", DescribeOffset(instruction->Arg(index), depth - 1));
+        const auto* instruction = argument.Inst();
+        if (const auto found = indices.find(instruction); found != indices.end())
+            return fmt::format("%{}", found->second);
+        if (nodes.size() == MaxNodes)
+            return "node-limit";
+        const size_t index = nodes.size();
+        indices.emplace(instruction, index);
+        nodes.push_back(instruction);
+        return fmt::format("%{}", index);
+    };
+    std::string result = reference(value);
+    for (size_t index = 0; index < nodes.size(); ++index) {
+        const auto* instruction = nodes[index];
+        result += fmt::format("; %{}={}", index, IR::NameOf(instruction->GetOpcode()));
+        for (size_t arg = 0; arg < (std::min)(instruction->NumArgs(), MaxArgs); ++arg)
+            result += fmt::format(" [{}]", reference(instruction->Arg(arg)));
+        if (instruction->NumArgs() > MaxArgs)
+            result += " [argument-limit]";
     }
     return result;
 }
@@ -205,12 +119,11 @@ void GuardConstantBufferLoads(IR::Program& program, std::span<const u32> bound_s
                     (resolved->U32() & ~15U) <= size - 16) {
                     continue;
                 }
-                if (opcode != IR::Opcode::GetCbufU32x2 || size % 64 ||
-                    OffsetAlignment{}.Bits(offset) < 3) {
+                if (opcode != IR::Opcode::GetCbufU32x2 || size % 64) {
                     throw RuntimeError("Unsupported native narrow/vector constant-buffer bound: "
                                        "opcode={}, bank={}, bound={:#x}, offset={}",
                                        IR::NameOf(opcode), bank.U32(), size,
-                                       DescribeOffset(offset, 2));
+                                       DescribeOffset(offset));
                 }
                 guarded.push_back({block, &instruction, size});
                 continue;
@@ -232,7 +145,14 @@ void GuardConstantBufferLoads(IR::Program& program, std::span<const u32> bound_s
         const IR::U32 bank{instruction.Arg(0)};
         const IR::U32 offset{instruction.Arg(1)};
         if (instruction.GetOpcode() == IR::Opcode::GetCbufU32x2) {
-            const auto valid = ir.ILessThanEqual(offset, ir.Imm32(load.size - 8), false);
+            // Register reuse across loops can obscure an otherwise naturally
+            // aligned LDC.64 address in SSA. Check the actual address instead.
+            // Eight-byte alignment also keeps either backend's 16-byte packet
+            // inside the aligned binding. Misaligned native pair accesses are
+            // outside this contract and yield zero; never round their address.
+            const auto aligned = ir.IEqual(ir.BitwiseAnd(offset, ir.Imm32(7U)), ir.Imm32(0U));
+            const auto in_bounds = ir.ILessThanEqual(offset, ir.Imm32(load.size - 8), false);
+            const auto valid = ir.LogicalAnd(aligned, in_bounds);
             const IR::U32 safe_offset{ir.Select(valid, offset, ir.Imm32(0U))};
             const auto pair = ir.GetCbuf(bank, safe_offset, 64, false);
             const auto low = ir.Select(valid, ir.CompositeExtract(pair, 0), ir.Imm32(0U));

@@ -85,6 +85,9 @@ std::array<u32, 2> EvaluatePair(IR::Block& block, u32 input, u32 bound) {
         if (!value.IsImmediate()) {
             return values.at(value.Inst());
         }
+        if (value.Type() == IR::Type::F32) {
+            return std::bit_cast<u32>(value.F32());
+        }
         return value.Type() == IR::Type::U1 ? static_cast<u32>(value.U1()) : value.U32();
     };
     std::array<u32, 2> result{};
@@ -93,8 +96,8 @@ std::array<u32, 2> EvaluatePair(IR::Block& block, u32 input, u32 bound) {
         u32 value{};
         switch (instruction.GetOpcode()) {
         case IR::Opcode::Phi:
-            // A loop-carried value is arbitrary here. The alignment proof
-            // must depend only on the dominating arithmetic, not recurrence.
+            // A loop-carried value is arbitrary here. The runtime guard must
+            // protect the load without assuming an invariant for the recurrence.
             value = input;
             break;
         case IR::Opcode::GetRegister:
@@ -125,6 +128,12 @@ std::array<u32, 2> EvaluatePair(IR::Block& block, u32 input, u32 bound) {
         case IR::Opcode::ULessThanEqual:
             value = arg(0) <= arg(1);
             break;
+        case IR::Opcode::IEqual:
+            value = arg(0) == arg(1);
+            break;
+        case IR::Opcode::LogicalAnd:
+            value = arg(0) && arg(1);
+            break;
         case IR::Opcode::SelectU32:
             value = arg(0) ? arg(1) : arg(2);
             break;
@@ -149,6 +158,10 @@ std::array<u32, 2> EvaluatePair(IR::Block& block, u32 input, u32 bound) {
                 pairs.emplace(&instruction, pairs.at(instruction.Arg(0).Inst()));
                 continue;
             }
+            value = arg(0);
+            break;
+        case IR::Opcode::BitCastU32F32:
+        case IR::Opcode::BitCastF32U32:
             value = arg(0);
             break;
         case IR::Opcode::Reference:
@@ -329,9 +342,9 @@ TEST_CASE("Native narrow and vector loads require a proven complete static packe
                     dynamic ? unsupported.ir.GetReg(IR::Reg::R0) : unsupported.ir.Imm32(64U);
                 unsupported.ir.Reference(
                     unsupported.ir.GetCbuf(unsupported.ir.Imm32(0U), offset, bits, signed_load));
-                if (bits == 64 && !dynamic) {
+                if (bits == 64) {
                     GuardConstantBufferLoads(unsupported.program, bounds);
-                    REQUIRE(EvaluatePair(unsupported.block, 0, bounds[0]) ==
+                    REQUIRE(EvaluatePair(unsupported.block, 64, bounds[0]) ==
                             std::array<u32, 2>{0, 0});
                 } else {
                     REQUIRE_THROWS_AS(GuardConstantBufferLoads(unsupported.program, bounds),
@@ -348,8 +361,13 @@ TEST_CASE("Native narrow and vector loads require a proven complete static packe
         Fixture unaligned;
         unaligned.ir.Reference(
             unaligned.ir.GetCbuf(unaligned.ir.Imm32(0U), unaligned.ir.Imm32(1U), bits, false));
-        REQUIRE_THROWS_AS(GuardConstantBufferLoads(unaligned.program, bounds),
-                          Shader::RuntimeError);
+        if (bits == 64) {
+            GuardConstantBufferLoads(unaligned.program, bounds);
+            REQUIRE(EvaluatePair(unaligned.block, 0, bounds[0]) == std::array<u32, 2>{0, 0});
+        } else {
+            REQUIRE_THROWS_AS(GuardConstantBufferLoads(unaligned.program, bounds),
+                              Shader::RuntimeError);
+        }
     }
 }
 
@@ -361,7 +379,7 @@ TEST_CASE("Native constant-buffer guard validation precedes mutation across bloc
     IR::Block second{fixture.pool};
     fixture.program.blocks.push_back(&second);
     IR::IREmitter emitter{second};
-    emitter.Reference(emitter.GetCbuf(emitter.Imm32(0U), emitter.GetReg(IR::Reg::R0), 64, false));
+    emitter.Reference(emitter.GetCbuf(emitter.Imm32(0U), emitter.GetReg(IR::Reg::R0), 16, false));
     const auto count = fixture.block.size();
     constexpr std::array<u32, 1> bounds{1024};
     REQUIRE_THROWS_AS(GuardConstantBufferLoads(fixture.program, bounds), Shader::RuntimeError);
@@ -407,110 +425,59 @@ TEST_CASE("Native aligned pair guards sanitize both words and every fallback pac
     }
 }
 
-TEST_CASE("Native pair guards reject unproved alignment without changing addresses",
+TEST_CASE("Native pair guards check arbitrary addresses before every host packet",
           "[native-shader]") {
-    constexpr std::array<u32, 1> bounds{1024};
-    for (u32 form = 0; form < 12; ++form) {
-        CAPTURE(form);
-        Fixture fixture;
-        auto& ir = fixture.ir;
-        const auto input = ir.GetReg(IR::Reg::R0);
-        const auto aligned = ir.BitwiseAnd(input, ir.Imm32(~7U));
-        IR::U32 offset = input;
-        switch (form) {
-        case 1:
-            offset = ir.BitwiseAnd(input, ir.Imm32(~3U));
-            break;
-        case 2:
-            offset = IR::U32{ir.IAdd(aligned, ir.Imm32(4U))};
-            break;
-        case 3:
-            offset = IR::U32{ir.ISub(aligned, ir.Imm32(4U))};
-            break;
-        case 4:
-            offset = ir.BitwiseOr(aligned, ir.Imm32(4U));
-            break;
-        case 5:
-            offset = ir.BitwiseXor(aligned, ir.Imm32(4U));
-            break;
-        case 6:
-            offset = ir.IMul(ir.BitwiseAnd(input, ir.Imm32(~1U)), ir.Imm32(2U));
-            break;
-        case 7:
-            offset = IR::U32{ir.Select(ir.Imm1(true), aligned, ir.Imm32(4U))};
-            break;
-        case 8:
-            offset = IR::U32{ir.ShiftLeftLogical(input, input)};
-            break;
-        case 9:
-            offset = IR::U32{ir.ShiftLeftLogical(input, ir.Imm32(32U))};
-            break;
-        case 10:
-            offset = IR::U32{ir.ShiftLeftLogical(input, ir.Imm32(0xffffffffU))};
-            break;
-        case 11:
-            offset = ir.Imm32(0xffffffffU);
-            break;
-        default:
-            break;
+    for (u32 bound : {64U, 768U, 1024U, 65536U}) {
+        const std::array bounds{bound};
+        for (u32 form = 0; form < 4; ++form) {
+            Fixture fixture;
+            auto& ir = fixture.ir;
+            IR::U32 offset = ir.GetReg(IR::Reg::R0);
+            if (form == 1) {
+                for (u32 index = 0; index < 80; ++index)
+                    offset = Identity(fixture, offset);
+            } else if (form == 2) {
+                auto& phi = Phi(fixture);
+                const IR::U32 carried{IR::Value{&phi}};
+                const auto next = ir.IAdd(carried, ir.Imm32(8U));
+                phi.AddPhiOperand(&fixture.block, ir.Imm32(0U));
+                phi.AddPhiOperand(&fixture.block, next);
+                offset = carried;
+            } else if (form == 3) {
+                offset = ir.BitCast<IR::U32>(ir.BitCast<IR::F32>(offset));
+            }
+            const auto load = ir.GetCbuf(ir.Imm32(0U), offset, 64, false);
+            ir.Reference(load);
+            GuardConstantBufferLoads(fixture.program, bounds);
+            REQUIRE(load.Inst()->GetOpcode() == IR::Opcode::Identity);
+            // Exhaust the low bits and binding edges, including lane 3 of a
+            // vec4 packet, plus overflow and negative-looking addresses.
+            for (u32 window : {0U, bound - 16, bound, 0xfffffff0U}) {
+                for (u32 byte = 0; byte < 16; ++byte) {
+                    const u32 address = window + byte;
+                    const std::array expected =
+                        !(address & 7) && address <= bound - 8
+                            ? std::array{0x3f000000U + address, 0x40000000U + address + 4}
+                            : std::array{0U, 0U};
+                    REQUIRE(EvaluatePair(fixture.block, address, bound) == expected);
+                }
+            }
         }
-        const auto load = ir.GetCbuf(ir.Imm32(0U), offset, 64, false);
-        ir.Reference(load);
-        const auto count = fixture.block.size();
-        REQUIRE_THROWS_AS(GuardConstantBufferLoads(fixture.program, bounds), Shader::RuntimeError);
-        REQUIRE(fixture.block.size() == count);
-        REQUIRE(load.Inst()->GetOpcode() == IR::Opcode::GetCbufU32x2);
-        REQUIRE(load.Inst()->Arg(1) == offset);
     }
     for (u32 bound : {8U, 16U, 63U, 65U, 1023U, 65537U}) {
         Fixture fixture;
-        const auto offset = PairOffset(fixture, 0);
-        fixture.ir.Reference(fixture.ir.GetCbuf(fixture.ir.Imm32(0U), offset, 64, false));
-        const std::array unaligned_bounds{bound};
-        REQUIRE_THROWS_AS(GuardConstantBufferLoads(fixture.program, unaligned_bounds),
-                          Shader::RuntimeError);
-    }
-}
-
-TEST_CASE("Native pair alignment merges only proven Phi inputs and rejects recurrence",
-          "[native-shader]") {
-    constexpr std::array<u32, 1> bounds{1024};
-    for (bool aligned : {false, true}) {
-        Fixture fixture;
-        auto& phi = Phi(fixture);
-        phi.AddPhiOperand(&fixture.block, fixture.ir.Imm32(8U));
-        phi.AddPhiOperand(&fixture.block, fixture.ir.Imm32(aligned ? 16U : 4U));
-        const auto load =
-            fixture.ir.GetCbuf(fixture.ir.Imm32(0U), IR::U32{IR::Value{&phi}}, 64, false);
+        const auto offset = fixture.ir.GetReg(IR::Reg::R0);
+        const auto load = fixture.ir.GetCbuf(fixture.ir.Imm32(0U), offset, 64, false);
         fixture.ir.Reference(load);
-        if (aligned) {
-            GuardConstantBufferLoads(fixture.program, bounds);
-            REQUIRE(load.Inst()->GetOpcode() == IR::Opcode::Identity);
-        } else {
-            REQUIRE_THROWS_AS(GuardConstantBufferLoads(fixture.program, bounds),
-                              Shader::RuntimeError);
-        }
-    }
-    for (u32 form = 0; form < 3; ++form) {
-        Fixture fixture;
-        auto& phi = Phi(fixture);
-        if (form) {
-            const IR::U32 next{fixture.ir.IAdd(IR::U32{IR::Value{&phi}}, fixture.ir.Imm32(8U))};
-            phi.AddPhiOperand(&fixture.block, fixture.ir.Imm32(0U));
-            phi.AddPhiOperand(&fixture.block, next);
-        }
-        const IR::U32 offset =
-            form == 2 ? IR::U32{fixture.ir.IAdd(IR::U32{IR::Value{&phi}}, fixture.ir.Imm32(0xc0U))}
-                      : IR::U32{IR::Value{&phi}};
-        fixture.ir.Reference(fixture.ir.GetCbuf(fixture.ir.Imm32(0U), offset, 64, false));
         const auto count = fixture.block.size();
+        const std::array bounds{bound};
         REQUIRE_THROWS_AS(GuardConstantBufferLoads(fixture.program, bounds), Shader::RuntimeError);
         REQUIRE(fixture.block.size() == count);
+        REQUIRE(load.Inst()->Arg(1) == offset);
     }
 }
 
-TEST_CASE("Native pair alignment uses dominating arithmetic without assuming a Phi invariant",
-          "[native-shader]") {
+TEST_CASE("Native pair guards preserve arithmetic on loop-carried addresses", "[native-shader]") {
     for (u32 bound : {64U, 1024U, 65536U}) {
         const std::array bounds{bound};
         for (u32 form = 0; form < 5; ++form) {
@@ -567,7 +534,8 @@ TEST_CASE("Native pair alignment uses dominating arithmetic without assuming a P
     }
 }
 
-TEST_CASE("Native pair alignment proof has bounded depth and work", "[native-shader]") {
+TEST_CASE("Native pair guards accept deep and shared offset graphs without expanding them",
+          "[native-shader]") {
     constexpr std::array<u32, 1> bounds{1024};
     for (bool deep : {false, true}) {
         Fixture fixture;
@@ -590,9 +558,11 @@ TEST_CASE("Native pair alignment proof has bounded depth and work", "[native-sha
         const auto load = fixture.ir.GetCbuf(fixture.ir.Imm32(0U), offset, 64, false);
         fixture.ir.Reference(load);
         const auto count = fixture.block.size();
-        REQUIRE_THROWS_AS(GuardConstantBufferLoads(fixture.program, bounds), Shader::RuntimeError);
-        REQUIRE(fixture.block.size() == count);
-        REQUIRE(load.Inst()->GetOpcode() == IR::Opcode::GetCbufU32x2);
+        GuardConstantBufferLoads(fixture.program, bounds);
+        REQUIRE(fixture.block.size() <= count + 16);
+        REQUIRE(load.Inst()->GetOpcode() == IR::Opcode::Identity);
+        REQUIRE(EvaluatePair(fixture.block, 8, bounds[0]) ==
+                std::array<u32, 2>{0x3f000008, 0x4000000c});
     }
 }
 
