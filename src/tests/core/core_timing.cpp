@@ -33,6 +33,9 @@ std::optional<std::chrono::nanoseconds> HostCallbackTemplate(s64 time,
 
 struct ScopeInit final {
     ScopeInit() {
+        callbacks_ran_flags.reset();
+        delays.fill(0);
+        expected_callback = 0;
         core_timing.SetMulticore(true);
         core_timing.Initialize([]() {});
     }
@@ -51,6 +54,20 @@ u64 TestTimerSpeed(Core::Timing::CoreTiming& core_timing) {
 }
 
 } // Anonymous namespace
+
+TEST_CASE("CoreTiming[ResetRepeatedly]", "[core]") {
+    Core::Timing::CoreTiming timing;
+    timing.SetMulticore(true);
+    for (bool running : {false, true}) {
+        for (u32 iteration = 0; iteration < 32; ++iteration) {
+            timing.Initialize([] {});
+            timing.SyncPause(!running);
+            timing.Reset();
+            REQUIRE_FALSE(timing.IsRunning());
+            timing.Reset();
+        }
+    }
+}
 
 TEST_CASE("CoreTiming[BasicOrder]", "[core]") {
     ScopeInit guard;
