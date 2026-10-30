@@ -531,12 +531,6 @@ GraphicsEnvironment::GraphicsEnvironment(Tegra::Engines::Maxwell3D& maxwell3d_,
         if (driver.size == 0 || driver.size > 0x1ffff || driver.address >= AddressLimit ||
             driver.size > AddressLimit - driver.address)
             throw Shader::RuntimeError("Invalid native graphics driver constant range");
-        native_driver_constants.resize(driver.size);
-        if (!mapping.ReadBlockChecked(driver.address, native_driver_constants))
-            throw Shader::RuntimeError("Unmapped native graphics driver constants");
-        native_specialization_hash = Common::CityHash64WithSeed(
-            reinterpret_cast<const char*>(native_driver_constants.data()),
-            native_driver_constants.size(), native_specialization_hash);
     }
     InitializeNativeCode(Header::SizeBytes, native.stop, &mapping);
     start_address = sizeof(sph);
@@ -570,21 +564,17 @@ u32 GraphicsEnvironment::ReadCbufValue(u32 cbuf_index, u32 cbuf_offset) {
         if (native_resources_finalized)
             throw Shader::RuntimeError("Native constant dependency changed after preparation");
         u32 value{};
-        if (cbuf_index == 1) {
-            if (cbuf_offset > native_driver_constants.size() ||
-                sizeof(value) > native_driver_constants.size() - cbuf_offset)
-                throw Shader::RuntimeError("Invalid native graphics driver constant read");
-            std::memcpy(&value, native_driver_constants.data() + cbuf_offset, sizeof(value));
-        } else {
-            const std::span output{reinterpret_cast<u8*>(&value), sizeof(value)};
-            if (native_mapping_generation != gpu_memory->MappingGeneration() ||
-                !(native_capture_mapping
-                      ? native_capture_mapping->ReadBlockChecked(buffer.address + cbuf_offset,
-                                                                 output)
-                      : gpu_memory->ReadBlockChecked(buffer.address + cbuf_offset, output)) ||
-                native_mapping_generation != gpu_memory->MappingGeneration())
-                throw Shader::RuntimeError("Unmapped or changed native graphics constant buffer");
-        }
+        // Driver constants use the same owned, dependency-tracked reads as
+        // other banks. Declaring a larger window does not access its unused tail.
+        const std::span output{reinterpret_cast<u8*>(&value), sizeof(value)};
+        if (native_mapping_generation != gpu_memory->MappingGeneration() ||
+            !(native_capture_mapping
+                  ? native_capture_mapping->ReadBlockChecked(buffer.address + cbuf_offset, output)
+                  : gpu_memory->ReadBlockChecked(buffer.address + cbuf_offset, output)) ||
+            native_mapping_generation != gpu_memory->MappingGeneration())
+            throw Shader::RuntimeError(
+                "Unmapped or changed native graphics constant buffer: bank={}, offset={:#x}",
+                cbuf_index, cbuf_offset);
         cbuf_values.emplace(key, value);
         return value;
     }

@@ -78,6 +78,10 @@ TuringMacroEngine::Program TuringMacroEngine::CopyProgram() const {
     return program;
 }
 
+TuringMacroEngine::Data TuringMacroEngine::CopyData() const {
+    return data;
+}
+
 bool TuringMacroEngine::ReadData(u32 index, u32& value) const {
     if (index >= data.size()) {
         return false;
@@ -96,9 +100,8 @@ bool TuringMacroEngine::WriteData(u32 index, u32 value) {
 
 class TuringMacroEngine::Invocation {
 public:
-    Invocation(TuringMacroEngine& engine_, const Program& program_, const Host& host_, u32 start,
-               u64 limit_)
-        : engine{engine_}, program{program_}, host{host_}, limit{limit_}, pc{start} {
+    Invocation(const Program& program_, Data& data_, const Host& host_, u32 start, u64 limit_)
+        : program{program_}, data{data_}, host{host_}, limit{limit_}, pc{start} {
         result.entry_point = start;
     }
 
@@ -444,20 +447,22 @@ private:
                 Fail(Error::InvalidInstruction);
                 return;
             }
-            if (!engine.ReadData(x, value)) {
+            if (x >= data.size()) {
                 Fail(Error::InvalidDataAddress);
                 return;
             }
+            value = data[x];
             break;
         case Operation::DataWrite:
             if (alu.destination != Zero) {
                 Fail(Error::InvalidInstruction);
                 return;
             }
-            if (!engine.WriteData(x, y)) {
+            if (x >= data.size()) {
                 Fail(Error::InvalidDataAddress);
                 return;
             }
+            data[x] = y;
             break;
         }
         alu_results[slot] = value;
@@ -519,8 +524,8 @@ private:
         }
     }
 
-    TuringMacroEngine& engine;
     const Program& program;
+    Data& data;
     const Host& host;
     u64 limit;
     Result result;
@@ -548,7 +553,13 @@ TuringMacroEngine::Result TuringMacroEngine::Execute(u32 start, const Host& host
 
 TuringMacroEngine::Result TuringMacroEngine::Execute(const Program& instructions, u32 start,
                                                      const Host& host, u64 instruction_limit) {
-    return Invocation{*this, instructions, host, start, instruction_limit}.Run();
+    return Execute(instructions, data, start, host, instruction_limit);
+}
+
+TuringMacroEngine::Result TuringMacroEngine::Execute(const Program& instructions,
+                                                     Data& execution_data, u32 start,
+                                                     const Host& host, u64 instruction_limit) {
+    return Invocation{instructions, execution_data, host, start, instruction_limit}.Run();
 }
 
 } // namespace Tegra

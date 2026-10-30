@@ -124,15 +124,20 @@ TEST_CASE("Native graphics capture separates source headers, code and constant s
         buffers[1] = {base + 0x200, 16, true};
         write(base + 0x200, u32{0x12345678});
         auto frozen = capture();
+        REQUIRE(frozen.ReadCbufValue(1, 0) == 0x12345678);
+        frozen.FinalizeNativeResources();
         write(base + 0x200, u32{0xabcdef01});
         REQUIRE(frozen.ReadCbufValue(1, 0) == 0x12345678);
         auto updated = capture();
         REQUIRE(updated.ReadCbufValue(1, 0) == 0xabcdef01);
+        updated.FinalizeNativeResources();
         REQUIRE(updated.CalculateHash() != frozen.CalculateHash());
         auto rescheduled = exit;
         rescheduled[3] ^= 0x200; // Scheduling delay is not represented in the lowered instruction.
         write(header_address + Header::SizeBytes, rescheduled);
         auto new_source = capture();
+        REQUIRE(new_source.ReadCbufValue(1, 0) == 0xabcdef01);
+        new_source.FinalizeNativeResources();
         REQUIRE(new_source.ReadInstruction(80) == updated.ReadInstruction(80));
         REQUIRE(new_source.CalculateHash() != updated.CalculateHash());
         write(header_address + Header::SizeBytes, exit);
@@ -149,6 +154,19 @@ TEST_CASE("Native graphics capture separates source headers, code and constant s
         REQUIRE(checked.ReadCbufValue(0, 0) == 0xabcdef01);
         REQUIRE_THROWS_AS(checked.ReadCbufValue(0, 1), Shader::RuntimeError);
         REQUIRE_THROWS_AS(checked.ReadCbufValue(0, 0xffffffff), Shader::RuntimeError);
+        buffers[0].size = 0x10000;
+        auto declared_tail = capture();
+        REQUIRE(declared_tail.ReadNativeCbufSize(0) == 0x10000);
+        REQUIRE(declared_tail.ReadCbufValue(0, 0) == 0xabcdef01);
+        REQUIRE_THROWS_AS(declared_tail.ReadCbufValue(0, 2 * Kernel::PageSize),
+                          Shader::RuntimeError);
+        buffers[1] = {base + 0x200, 0x10000, true};
+        auto driver_tail = capture();
+        REQUIRE(driver_tail.ReadCbufValue(1, 0) == 0xabcdef01);
+        REQUIRE_THROWS_AS(driver_tail.ReadCbufValue(1, 2 * Kernel::PageSize), Shader::RuntimeError);
+        driver_tail.FinalizeNativeResources();
+        REQUIRE(driver_tail.ReadCbufValue(1, 0) == 0xabcdef01);
+        REQUIRE_THROWS_AS(driver_tail.ReadCbufValue(1, 4), Shader::RuntimeError);
         buffers[0].address = base + 2 * Kernel::PageSize;
         auto unmapped = capture();
         REQUIRE_THROWS_AS(unmapped.ReadCbufValue(0, 0), Shader::RuntimeError);

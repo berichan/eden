@@ -176,7 +176,6 @@ private:
         native_cbuf_size_dependencies{};
     u64 native_mapping_generation{};
     const Tegra::MemoryManager::MappingLease* native_capture_mapping{};
-    std::vector<u8> native_driver_constants;
     std::vector<NativeTextureBinding> native_textures;
     bool native_resources_finalized{};
 };

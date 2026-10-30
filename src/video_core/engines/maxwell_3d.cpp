@@ -1147,14 +1147,18 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
                 binding.address = (GPUVAddr{upper} << 32) | GetRegisterValue(0x8e2);
                 binding.size = GetRegisterValue(0x8e0);
                 if (upper > 0xff || binding.size == 0 || binding.size > 0x1ffff ||
-                    binding.size > (u64{1} << 40) - binding.address ||
-                    !memory_manager.IsReadableRange(binding.address, binding.size)) {
+                    binding.size > (u64{1} << 40) - binding.address) {
+                    LOG_ERROR(HW_GPU,
+                              "Native constant-buffer bind rejected: method={:#x}, argument={:#x}, "
+                              "slot={}, upper={:#x}, address={:#x}, size={:#x}",
+                              method, method_argument, slot, upper, binding.address, binding.size);
                     native_action_failed = true;
                     return;
                 }
             }
-            // Preserve canonical GPUVA state. The legacy cache binder assumes one
-            // contiguous physical mapping; native draws remain guarded until resolved.
+            // Binding records metadata without reading the declared window.
+            // Shader capture and draws validate the bytes they actually access;
+            // unused tails need not be mapped or physically contiguous.
             state.shader_stages[(method - 0x904) / 8].const_buffers[slot] = binding;
             ProcessDirtyRegisters(method, method_argument);
             return;

@@ -28,6 +28,7 @@ public:
         bool (*read_memory)(void*, GPUVAddr, std::span<u32>){};
     };
     enum class Status { Unhandled, Accepted, Failed };
+    // Explicit compute uploads fork program and data together; bootstrap calls share graphics.
     enum class ProgramBank { Graphics, Compute };
     enum class Error {
         None,

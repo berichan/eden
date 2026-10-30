@@ -79,9 +79,9 @@ public:
         std::array<Output, 2> output{};
     };
     using EncodedInstruction = std::array<u32, 3>;
+    using Data = std::array<u32, DataCount>;
 
-    // Instruction/start banks can differ between logical engines while execution
-    // still accesses the owning engine's common data RAM.
+    // Logical engines can retain separate instruction and data snapshots.
     struct Program {
         std::array<EncodedInstruction, InstructionCount> code{};
         std::array<u8, InstructionCount> written{};
@@ -133,6 +133,7 @@ public:
     bool UploadInstruction(u32 word);
     bool ReadInstruction(u32 index, EncodedInstruction& words) const;
     Program CopyProgram() const;
+    Data CopyData() const;
     static bool SetInstructionPointer(Program& program, u32 instruction);
     static bool UploadInstruction(Program& program, u32 word);
     static bool ReadInstruction(const Program& program, u32 index, EncodedInstruction& words);
@@ -140,11 +141,13 @@ public:
     bool WriteData(u32 index, u32 value);
     Result Execute(u32 start, const Host& host, u64 instruction_limit);
     Result Execute(const Program& instructions, u32 start, const Host& host, u64 instruction_limit);
+    Result Execute(const Program& instructions, Data& execution_data, u32 start, const Host& host,
+                   u64 instruction_limit);
 
 private:
     class Invocation;
     Program program;
-    std::array<u32, DataCount> data{};
+    Data data{};
 };
 
 } // namespace Tegra

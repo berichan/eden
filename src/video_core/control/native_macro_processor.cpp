@@ -18,9 +18,10 @@ bool IsUpload(u32 method) {
 
 struct NativeMacroProcessor::PrivateProgram {
     explicit PrivateProgram(const AmpereGraphicsState& state)
-        : instructions{state.macro_engine.CopyProgram()}, starts{state.macro_starts},
-          bind_pointer{state.macro_bind_pointer} {}
+        : instructions{state.macro_engine.CopyProgram()}, data{state.macro_engine.CopyData()},
+          starts{state.macro_starts}, bind_pointer{state.macro_bind_pointer} {}
     TuringMacroEngine::Program instructions;
+    TuringMacroEngine::Data data;
     std::array<std::optional<u32>, AmpereGraphicsState::MacroCount> starts;
     u32 bind_pointer;
 };
@@ -62,7 +63,8 @@ NativeMacroProcessor::Status NativeMacroProcessor::CallMethod(u32 method, u32 va
     if (bank == ProgramBank::Compute && !private_program && IsUpload(method)) {
         // Compute can invoke the graphics-uploaded library before it installs its
         // own program. Queue variants pack that library at different addresses;
-        // an explicit compute upload must not overwrite graphics or another queue.
+        // Their data also holds queue-local QMD ring pointers. Snapshot it once;
+        // neither later uploads nor another queue may replace that retained state.
         private_program = std::make_unique<PrivateProgram>(*state);
     }
     auto& starts = private_program ? private_program->starts : state->macro_starts;
@@ -195,10 +197,11 @@ NativeMacroProcessor::Status NativeMacroProcessor::CallMethod(u32 method, u32 va
             return host.should_stop && host.should_stop(host.context);
         },
     };
-    execution_result = private_program
-                           ? state->macro_engine.Execute(private_program->instructions, start,
-                                                         bindings, instruction_limit)
-                           : state->macro_engine.Execute(start, bindings, instruction_limit);
+    execution_result =
+        private_program
+            ? state->macro_engine.Execute(private_program->instructions, private_program->data,
+                                          start, bindings, instruction_limit)
+            : state->macro_engine.Execute(start, bindings, instruction_limit);
     if (!execution_result.Succeeded()) {
         // A binding can refer to a different upload than an earlier capture. Keep
         // fault diagnostics bounded to the failing instruction and its predecessors.

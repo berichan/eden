@@ -1075,6 +1075,15 @@ TEST_CASE("Native constant-buffer bindings retain canonical addresses without ph
         REQUIRE(binding.address == base + 0x100);
         REQUIRE(binding.size == 32);
     }
+    REQUIRE(engine.CallNativeMethod(system, 0x8e0, 0x10000, true, {}));
+    REQUIRE(engine.CallNativeMethod(system, 0x8e2, base + 0xfc0, true, {}));
+    REQUIRE(space.IsReadableRange(base + 0xfc0, 64));
+    REQUIRE_FALSE(space.IsReadableRange(base + 0xfc0, 0x10000));
+    REQUIRE(engine.CallNativeMethod(system, 0x904, 0x11, true, {}));
+    const auto& declared = engine.state.shader_stages[0].const_buffers[1];
+    REQUIRE(declared.enabled);
+    REQUIRE(declared.address == base + 0xfc0);
+    REQUIRE(declared.size == 0x10000);
     REQUIRE(engine.CallNativeMethod(system, 0x8e0, 0xffffffff, true, {}));
     REQUIRE(engine.CallNativeMethod(system, 0x8e1, 0xffffffff, true, {}));
     REQUIRE(engine.CallNativeMethod(system, 0x904, 0x110, true, {}));
@@ -1083,7 +1092,7 @@ TEST_CASE("Native constant-buffer bindings retain canonical addresses without ph
     REQUIRE(engine.HasNativeMacroFailure());
 }
 
-TEST_CASE("Native constant-buffer bindings reject bad fields and incomplete readable ranges",
+TEST_CASE("Native constant-buffer bindings reject unsupported metadata fields",
           "[ipc][video_core]") {
     Core::System system;
     Core::DeviceMemory memory;
@@ -1094,12 +1103,15 @@ TEST_CASE("Native constant-buffer bindings reject bad fields and incomplete read
     space.BindRasterizer(&rasterizer);
     constexpr GPUVAddr base = 0x8000000;
     REQUIRE(space.MapSparse(base, 0x1000, false) == base);
-    for (u32 invalid : {0U, 1U, 2U, 3U}) {
+    for (u32 invalid : {0U, 2U, 3U, 4U, 5U, 6U}) {
         Tegra::Engines::Maxwell3D engine{space};
         engine.SetNativeMacroState(std::make_shared<Tegra::Control::AmpereGraphicsState>());
-        REQUIRE(engine.CallNativeMethod(system, 0x8e0, 32, true, {}));
-        REQUIRE(engine.CallNativeMethod(system, 0x8e1, invalid == 0 ? 0x100 : 0, true, {}));
-        REQUIRE(engine.CallNativeMethod(system, 0x8e2, base + 0xff0, true, {}));
+        REQUIRE(engine.CallNativeMethod(
+            system, 0x8e0, invalid == 5 ? 0x20000U : (invalid == 6 ? 0U : 32U), true, {}));
+        REQUIRE(engine.CallNativeMethod(
+            system, 0x8e1, invalid == 0 ? 0x100U : (invalid == 4 ? 0xffU : 0U), true, {}));
+        REQUIRE(engine.CallNativeMethod(system, 0x8e2, invalid == 4 ? 0xfffffff0U : base + 0xff0,
+                                        true, {}));
         const u32 raw = invalid == 2 ? 0x121 : (invalid == 3 ? 3 : 1);
         REQUIRE_FALSE(engine.CallNativeMethod(system, 0x904, raw, true, {}));
         REQUIRE_FALSE(engine.state.shader_stages[0].const_buffers[0].enabled);
@@ -1304,7 +1316,7 @@ TEST_CASE("Native compute switch configuration retains callbacks without invokin
     }
 }
 
-TEST_CASE("Compute program uploads preserve graphics and other queue banks while sharing data RAM",
+TEST_CASE("Compute program uploads retain private program and data snapshots",
           "[ipc][video_core]") {
     Core::System system;
     Core::DeviceMemory memory;
@@ -1317,6 +1329,7 @@ TEST_CASE("Compute program uploads preserve graphics and other queue banks while
     Upload(graphics, SumProgram(0xd00), host);
     using Compute = Tegra::Control::NativeCompute;
     Compute first{context}, second{context}, inherited{context};
+    REQUIRE(state->macro_engine.WriteData(0x123, 0xabcdef01));
     const auto upload = [](Compute& compute, std::span<const Inst> program, u32 start, u32 slot) {
         REQUIRE(compute.CallMethod(0x45, start, true, {}));
         for (const auto& inst : program) {
@@ -1333,6 +1346,7 @@ TEST_CASE("Compute program uploads preserve graphics and other queue banks while
     // The queues repack a library at overlapping instruction addresses and reuse a slot.
     upload(first, SumProgram(0xd01), 7, 5);
     upload(second, SumProgram(0xd02), 8, 5);
+    REQUIRE(state->macro_engine.WriteData(0x123, 0x87654321));
     REQUIRE(graphics.CallMethod(0xe0a, 8, false, host.Bind()) == Processor::Status::Accepted);
     REQUIRE(graphics.CallMethod(0xe0b, 9, true, host.Bind()) == Processor::Status::Accepted);
     REQUIRE(host.registers[0xd00] == 17);
@@ -1366,13 +1380,139 @@ TEST_CASE("Compute program uploads preserve graphics and other queue banks while
     upload(first, std::array{method, write, read, Inst{}}, 20, 6);
     REQUIRE(first.CallMethod(0xe0c, 0x12345678, true, {}));
     REQUIRE(first.ReadRegister(0xd04) == 0x12345678);
-    // Only program RAM is private. Data reads still use the common MME scratch RAM.
+    // Later uploads preserve private writes; graphics and bootstrap compute retain common data.
     Upload(graphics, std::array{method, read, Inst{}}, host, 40, 7);
     REQUIRE(graphics.CallMethod(0xe0e, 0, true, host.Bind()) == Processor::Status::Accepted);
-    REQUIRE(host.registers[0xd04] == 0x12345678);
+    REQUIRE(host.registers[0xd04] == 0x87654321);
+    REQUIRE(inherited.CallMethod(0xe0e, 0, true, {}));
+    REQUIRE(inherited.ReadRegister(0xd04) == 0x87654321);
     upload(second, std::array{method, read, Inst{}}, 30, 6);
     REQUIRE(second.CallMethod(0xe0c, 0, true, {}));
-    REQUIRE(second.ReadRegister(0xd04) == 0x12345678);
+    REQUIRE(second.ReadRegister(0xd04) == 0xabcdef01);
+    upload(first, std::array{method, read, Inst{}}, 30, 6);
+    REQUIRE(first.CallMethod(0xe0c, 0, true, {}));
+    REQUIRE(first.ReadRegister(0xd04) == 0x12345678);
+}
+
+TEST_CASE("Native compute queues retain independent MME ring pointers across interleaved calls",
+          "[ipc][video_core]") {
+    Core::System system;
+    Core::DeviceMemory memory;
+    Tegra::MaxwellDeviceMemoryManager backing{memory};
+    auto space = std::make_shared<Tegra::MemoryManager>(system, backing, 32, 1ULL << 32, 16, 12);
+    auto state = std::make_shared<Tegra::Control::AmpereGraphicsState>();
+    auto context = std::make_shared<Tegra::Control::NativeGpuGraphicsContext>(state, space);
+    Processor graphics{state};
+    MethodHost host;
+    Inst write;
+    write.alu[0] = {Op::DataWrite, Z, L0, L1};
+    write.end_next = true;
+    Upload(graphics, std::array{write, Inst{}}, host, 100, 0x34);
+    auto method = Method();
+    method.immediate[0] = 0x1d00;
+    Inst read_base, read_cursor;
+    read_base.alu[0] = {Op::DataRead, Z, I, Z};
+    read_base.immediate[0] = 0x27;
+    read_base.output[0].emit = 1;
+    read_cursor = read_base;
+    read_cursor.immediate[0] = 0x38c;
+    read_cursor.end_next = true;
+    Upload(graphics, std::array{method, read_base, read_cursor, Inst{}}, host, 110, 0x43);
+    using Compute = Tegra::Control::NativeCompute;
+    Compute first{context}, second{context}, bootstrap{context};
+    const auto store = [](Compute& compute, u32 index, u32 value) {
+        REQUIRE(compute.CallMethod(0xe68, index, false, {}));
+        REQUIRE(compute.CallMethod(0xe69, value, true, {}));
+    };
+    const auto check = [](Compute& compute, u32 base, u32 cursor) {
+        REQUIRE(compute.CallMethod(0xe86, 0, true, {}));
+        REQUIRE(compute.ReadRegister(0xd00) == base);
+        REQUIRE(compute.ReadRegister(0xd01) == cursor);
+    };
+    store(bootstrap, 0x27, 0x11111111);
+    store(bootstrap, 0x38c, 0x11111112);
+    REQUIRE(first.CallMethod(0x45, 0, true, {}));
+    // Snapshot happens once, at the first explicit upload, not at construction or execution.
+    store(bootstrap, 0x27, 0x22222222);
+    store(bootstrap, 0x38c, 0x22222223);
+    REQUIRE(second.CallMethod(0x47, 0, true, {}));
+    check(first, 0x11111111, 0x11111112);
+    check(second, 0x22222222, 0x22222223);
+    constexpr u32 FirstRing = 0x21001000;
+    constexpr u32 SecondRing = 0x22002000;
+    store(first, 0x27, FirstRing);
+    store(second, 0x27, SecondRing);
+    store(first, 0x38c, FirstRing + 2);
+    store(second, 0x38c, SecondRing + 3);
+    check(first, FirstRing, FirstRing + 2);
+    check(second, SecondRing, SecondRing + 3);
+    store(bootstrap, 0x27, 0x33333333);
+    store(bootstrap, 0x38c, 0x33333334);
+    REQUIRE(first.CallMethod(0x45, 9, true, {}));
+    store(second, 0x38c, SecondRing + 4);
+    check(first, FirstRing, FirstRing + 2);
+    check(second, SecondRing, SecondRing + 4);
+    check(bootstrap, 0x33333333, 0x33333334);
+    REQUIRE(graphics.CallMethod(0xe86, 0, true, host.Bind()) == Processor::Status::Accepted);
+    REQUIRE(host.registers[0xd00] == 0x33333333);
+    REQUIRE(host.registers[0xd01] == 0x33333334);
+}
+
+TEST_CASE("Turing MME external data snapshots retain bounds cancellation and instruction budgets",
+          "[ipc][video_core]") {
+    Engine engine;
+    constexpr u32 Last = Engine::DataCount - 1;
+    REQUIRE(engine.WriteData(Last, 11));
+    auto data = engine.CopyData();
+    REQUIRE(engine.WriteData(Last, 22));
+    auto other = engine.CopyData();
+    Inst write;
+    write.alu[0] = {Op::DataWrite, Z, L0, L1};
+    write.end_next = true;
+    Upload(engine, std::array{write, Inst{}});
+    Inst read;
+    read.alu[0] = {Op::DataRead, Z, L0, Z};
+    read.output[0].emit = 1;
+    read.end_next = true;
+    Upload(engine, std::array{Method(), read, Inst{}}, 8);
+    const auto program = engine.CopyProgram();
+    Host host;
+    host.parameters = {Last, 33};
+    REQUIRE(engine.Execute(program, data, 0, host.Bind(), 20).Succeeded());
+    REQUIRE(data[Last] == 33);
+    REQUIRE(other[Last] == 22);
+    REQUIRE(engine.CopyData()[Last] == 22);
+    Host reader;
+    reader.parameters = {Last};
+    REQUIRE(engine.Execute(program, data, 8, reader.Bind(), 20).Succeeded());
+    REQUIRE(reader.methods.back().second == 33);
+    Host other_reader;
+    other_reader.parameters = {Last};
+    REQUIRE(engine.Execute(program, other, 8, other_reader.Bind(), 20).Succeeded());
+    REQUIRE(other_reader.methods.back().second == 22);
+    const auto before = data;
+    Host bad_write;
+    bad_write.parameters = {Engine::DataCount, 44};
+    REQUIRE(engine.Execute(program, data, 0, bad_write.Bind(), 20).error ==
+            Engine::Error::InvalidDataAddress);
+    REQUIRE(data == before);
+    Host bad_read;
+    bad_read.parameters = {Engine::DataCount};
+    REQUIRE(engine.Execute(program, data, 8, bad_read.Bind(), 20).error ==
+            Engine::Error::InvalidDataAddress);
+    REQUIRE(bad_read.methods.empty());
+    Host cancelled;
+    cancelled.parameters = {Last, 55};
+    cancelled.cancelled = true;
+    REQUIRE(engine.Execute(program, data, 0, cancelled.Bind(), 20).error ==
+            Engine::Error::Cancelled);
+    REQUIRE(data == before);
+    Host budget;
+    budget.parameters = {Last, 66};
+    REQUIRE(engine.Execute(program, data, 0, budget.Bind(), 0).error ==
+            Engine::Error::InstructionLimit);
+    REQUIRE(data == before);
+    REQUIRE(engine.CopyData()[Last] == 22);
 }
 
 TEST_CASE("Native compute texture cache invalidation executes its backend and propagates failures",
