@@ -151,6 +151,7 @@ public:
     std::optional<Shader::ReplaceConstant> GetReplaceConstBuffer(u32 bank, u32 offset) override;
 
 private:
+    [[noreturn]] void RejectNativeTexture(u32 handle);
     Tegra::Engines::Maxwell3D* maxwell3d{};
     size_t stage_index{};
     std::array<Tegra::Engines::ConstBufferInfo, Tegra::Engines::Maxwell3D::Regs::MaxConstBuffers>

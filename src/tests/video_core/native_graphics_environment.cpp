@@ -173,6 +173,7 @@ TEST_CASE("Native graphics capture separates source headers, code and constant s
         Environment external{engine, memory, Program::Pixel,
                              Environment::NativeProgram{header_address, {}, &lease}};
         REQUIRE(external.ReadCbufValue(0, 0) == 0xabcdef01);
+        REQUIRE_THROWS_AS(external.ReadTextureType(0), Shader::RuntimeError);
         Tegra::MemoryManager other{system, backing, 32, 1ULL << 32, 16, 12};
         REQUIRE_FALSE(lease.Protects(other));
         REQUIRE_THROWS_AS((Environment{engine, other, Program::Pixel,

@@ -10,6 +10,7 @@
 #include <fstream>
 #include <memory>
 #include <optional>
+#include <string_view>
 #include <utility>
 
 #include <ranges>
@@ -590,6 +591,8 @@ std::optional<Shader::ReplaceConstant> GraphicsEnvironment::GetReplaceConstBuffe
 }
 
 Shader::TextureType GraphicsEnvironment::ReadTextureType(u32 handle) {
+    if (native_source_size)
+        RejectNativeTexture(handle);
     const auto& regs{maxwell3d->regs};
     const bool via_header_index{regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding};
     auto entry =
@@ -600,6 +603,8 @@ Shader::TextureType GraphicsEnvironment::ReadTextureType(u32 handle) {
 }
 
 Shader::TexturePixelFormat GraphicsEnvironment::ReadTexturePixelFormat(u32 handle) {
+    if (native_source_size)
+        RejectNativeTexture(handle);
     const auto& regs{maxwell3d->regs};
     const bool via_header_index{regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding};
     auto entry =
@@ -612,6 +617,46 @@ Shader::TexturePixelFormat GraphicsEnvironment::ReadTexturePixelFormat(u32 handl
 bool GraphicsEnvironment::IsTexturePixelFormatInteger(u32 handle) {
     return VideoCore::Surface::IsPixelFormatInteger(
         static_cast<VideoCore::Surface::PixelFormat>(ReadTexturePixelFormat(handle)));
+}
+
+void GraphicsEnvironment::RejectNativeTexture(u32 handle) {
+    const auto read = [&](u32 method) { return maxwell3d->GetRegisterValue(method); };
+    const u32 binding = read(0x48d);
+    LOG_DEBUG(HW_GPU, "Native texture lookup rejected: stage={}, handle={:#x}, binding={:#x}",
+              stage_index, handle, binding);
+    // Capture only the two requested descriptors, without interpreting either as
+    // a legacy TIC/TSC. Linked-header indexing still needs its own native contract.
+    if (binding == 0) {
+        std::optional<Tegra::MemoryManager::MappingLease> owned_mapping;
+        if (!native_capture_mapping)
+            owned_mapping.emplace(gpu_memory->AcquireMappingLease());
+        const auto& mapping = native_capture_mapping ? *native_capture_mapping : *owned_mapping;
+        const auto capture = [&](std::string_view name, u32 base, u32 limit_mask, u32 index) {
+            const u32 upper = read(base), lower = read(base + 1), limit = read(base + 2);
+            constexpr u64 AddressLimit = u64{1} << 40;
+            const GPUVAddr pool = (GPUVAddr{upper} << 32) | lower;
+            const u64 offset = u64{index} * 32;
+            std::array<u32, 8> words{};
+            if (!mapping.Protects(*gpu_memory) ||
+                native_mapping_generation != gpu_memory->MappingGeneration() || upper > 0xff ||
+                (lower & 31) || (limit & ~limit_mask) || index > limit ||
+                offset > AddressLimit - pool || sizeof(words) > AddressLimit - pool - offset ||
+                !mapping.ReadBlockChecked(pool + offset,
+                                          {reinterpret_cast<u8*>(words.data()), sizeof(words)})) {
+                LOG_DEBUG(HW_GPU, "Native {} descriptor unavailable: index={:#x}, limit={:#x}",
+                          name, index, limit);
+                return;
+            }
+            LOG_DEBUG(HW_GPU,
+                      "Native {} descriptor candidate: index={:#x}, words={:#x}/{:#x}/{:#x}/{:#x}/"
+                      "{:#x}/{:#x}/{:#x}/{:#x}",
+                      name, index, words[0], words[1], words[2], words[3], words[4], words[5],
+                      words[6], words[7]);
+        };
+        capture("texture", 0x55d, 0x3fffff, handle & 0xfffff);
+        capture("sampler", 0x557, 0xfffff, handle >> 20);
+    }
+    throw Shader::RuntimeError("Native texture descriptors require native decoding");
 }
 
 u32 GraphicsEnvironment::ReadViewportTransformState() {
