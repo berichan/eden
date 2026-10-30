@@ -114,10 +114,16 @@ public:
     // and discard writes; unmapped pages and unsupported register I/O fail without a prefix.
     bool ReadBlockChecked(GPUVAddr address, std::span<u8> output) const;
     bool WriteBlockChecked(GPUVAddr address, std::span<const u8> input);
+    bool WriteBackedBlockChecked(GPUVAddr address, std::span<const u8> input,
+                                 std::stop_token stop_token = {});
     bool WriteTimestampedReleaseChecked(GPUVAddr address, u32 payload, u64 timestamp,
                                         std::stop_token stop_token = {});
+    bool WriteTimestampReportChecked(GPUVAddr address, u64 timestamp,
+                                     std::stop_token stop_token = {});
     bool IsReadableRange(GPUVAddr address, size_t size) const;
     bool IsWritableRange(GPUVAddr address, size_t size) const;
+    // Completion records require storage; sparse discard mappings do not qualify.
+    bool IsBackedWritableRange(GPUVAddr address, size_t size) const;
     bool ModifyPageKindChecked(GPUVAddr address, size_t size, PTEKind kind);
 
     // Keep mappings and their backing allocations stable through a native GPU dispatch.
@@ -205,7 +211,8 @@ private:
     bool MapChecked(GPUVAddr gpu_addr, DAddr dev_addr, size_t size, PTEKind kind, bool sparse);
     bool OverlapsSyncpointShim(GPUVAddr address, size_t size) const;
     bool ReadSyncpointShim(GPUVAddr address, std::span<u8> output) const;
-    bool IsValidAccessRange(GPUVAddr address, size_t size, bool write) const;
+    bool IsValidAccessRange(GPUVAddr address, size_t size, bool write,
+                            bool require_backing = false) const;
 
     template <typename FuncMapped, typename FuncReserved, typename FuncUnmapped>
     inline void MemoryOperation(GPUVAddr gpu_src_addr, std::size_t size, bool is_big_page, FuncMapped&& func_mapped, FuncReserved&& func_reserved, FuncUnmapped&& func_unmapped) const;

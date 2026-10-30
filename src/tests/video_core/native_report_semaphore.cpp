@@ -56,7 +56,8 @@ TEST_CASE("Native report semaphore releases retain full addresses and order writ
     REQUIRE(host.checks == 1);
     REQUIRE(host.waits == 1);
     REQUIRE(host.writes == 1);
-    for (const auto operation : {0U, 0xf010U, 0x1000f011U, 0x1000f018U, 0x1010f010U, 0xffffffffU}) {
+    for (const auto operation :
+         {0U, 0xf006U, 0xf010U, 0x1000f011U, 0x1000f018U, 0x1010f010U, 0xffffffffU}) {
         Host rejected;
         REQUIRE(Semaphore::Release(0x21, 0x1000, 1, operation, rejected.Bind()) ==
                 Semaphore::Error::UnsupportedOperation);
@@ -71,6 +72,131 @@ TEST_CASE("Native report semaphore releases retain full addresses and order writ
             Semaphore::Error::InvalidAddress);
     REQUIRE(upper.checks == 0);
     REQUIRE(unaligned.checks == 0);
+}
+
+namespace {
+struct TimestampHost {
+    GPUVAddr address{};
+    u64 timestamp{};
+    u32 checks{}, waits{}, clocks{}, writes{};
+    bool writable{true}, wait_ok{true}, write_ok{true}, stopped{};
+    bool cancel_in_wait{}, cancel_in_clock{}, cancel_in_write{}, unmap_in_wait{};
+    Semaphore::TimestampHost Bind() {
+        return {{this,
+                 [](void* opaque, GPUVAddr address, size_t size) {
+                     auto& self = *static_cast<TimestampHost*>(opaque);
+                     REQUIRE(size == 16);
+                     ++self.checks;
+                     self.address = address;
+                     return self.writable;
+                 },
+                 [](void* opaque) {
+                     auto& self = *static_cast<TimestampHost*>(opaque);
+                     ++self.waits;
+                     if (self.cancel_in_wait)
+                         self.stopped = true;
+                     if (self.unmap_in_wait)
+                         self.writable = false;
+                     return self.wait_ok;
+                 },
+                 nullptr,
+                 [](void* opaque) { return static_cast<TimestampHost*>(opaque)->stopped; }},
+                [](void* opaque) -> u64 {
+                    auto& self = *static_cast<TimestampHost*>(opaque);
+                    REQUIRE(self.waits == 1);
+                    ++self.clocks;
+                    if (self.cancel_in_clock)
+                        self.stopped = true;
+                    return 0x0102030405060708ULL;
+                },
+                [](void* opaque, GPUVAddr address, u64 timestamp) {
+                    auto& self = *static_cast<TimestampHost*>(opaque);
+                    REQUIRE(address == self.address);
+                    REQUIRE(self.clocks == 1);
+                    if (self.cancel_in_write)
+                        self.stopped = true;
+                    if (!self.write_ok || !self.writable || self.stopped)
+                        return false;
+                    ++self.writes;
+                    self.timestamp = timestamp;
+                    return true;
+                }};
+    }
+};
+} // namespace
+
+TEST_CASE("Native graphics timestamp reports sample nanoseconds after a real drain",
+          "[ipc][video_core]") {
+    TimestampHost host;
+    REQUIRE(Semaphore::ReportTimestamp(0xff, 0xfffffff0, 0, 0xf006, host.Bind()) ==
+            Semaphore::Error::None);
+    REQUIRE(host.address == 0xfffffffff0ULL);
+    REQUIRE(host.timestamp == 0x0102030405060708ULL);
+    REQUIRE(host.checks == 1);
+    REQUIRE(host.waits == 1);
+    REQUIRE(host.clocks == 1);
+    REQUIRE(host.writes == 1);
+    for (const auto operation : {0U, 0xf002U, 0xf007U, 0x1000f006U, 0xa00f006U, 0xffffffffU}) {
+        TimestampHost rejected;
+        REQUIRE(Semaphore::ReportTimestamp(0, 0, 0, operation, rejected.Bind()) ==
+                Semaphore::Error::UnsupportedOperation);
+        REQUIRE(rejected.checks == 0);
+        REQUIRE(rejected.waits == 0);
+        REQUIRE(rejected.writes == 0);
+    }
+    TimestampHost nonzero, upper, unaligned;
+    REQUIRE(Semaphore::ReportTimestamp(0, 0, 1, 0xf006, nonzero.Bind()) ==
+            Semaphore::Error::UnsupportedOperation);
+    REQUIRE(Semaphore::ReportTimestamp(0x100, 0, 0, 0xf006, upper.Bind()) ==
+            Semaphore::Error::InvalidAddress);
+    REQUIRE(Semaphore::ReportTimestamp(0, 8, 0, 0xf006, unaligned.Bind()) ==
+            Semaphore::Error::InvalidAddress);
+    REQUIRE(nonzero.checks == 0);
+    REQUIRE(upper.checks == 0);
+    REQUIRE(unaligned.checks == 0);
+}
+
+TEST_CASE("Native timestamp report failures never publish a partial query", "[ipc][video_core]") {
+    TimestampHost unmapped;
+    unmapped.writable = false;
+    REQUIRE(Semaphore::ReportTimestamp(0, 0x1000, 0, 0xf006, unmapped.Bind()) ==
+            Semaphore::Error::MemoryFault);
+    REQUIRE(unmapped.waits == 0);
+    TimestampHost wait;
+    wait.wait_ok = false;
+    REQUIRE(Semaphore::ReportTimestamp(0, 0x1000, 0, 0xf006, wait.Bind()) ==
+            Semaphore::Error::WaitFailed);
+    REQUIRE(wait.clocks == 0);
+    for (bool unmap : {false, true}) {
+        TimestampHost write;
+        write.write_ok = unmap;
+        write.unmap_in_wait = unmap;
+        REQUIRE(Semaphore::ReportTimestamp(0, 0x1000, 0, 0xf006, write.Bind()) ==
+                Semaphore::Error::MemoryFault);
+        REQUIRE(write.writes == 0);
+        REQUIRE(write.timestamp == 0);
+    }
+    for (u32 phase = 0; phase < 4; ++phase) {
+        TimestampHost cancelled;
+        cancelled.stopped = phase == 0;
+        cancelled.cancel_in_wait = phase == 1;
+        cancelled.cancel_in_clock = phase == 2;
+        cancelled.cancel_in_write = phase == 3;
+        REQUIRE(Semaphore::ReportTimestamp(0, 0x1000, 0, 0xf006, cancelled.Bind()) ==
+                Semaphore::Error::Cancelled);
+        REQUIRE(cancelled.writes == 0);
+        REQUIRE(cancelled.timestamp == 0);
+    }
+    TimestampHost missing;
+    auto host = missing.Bind();
+    host.timestamp_ns = nullptr;
+    REQUIRE(Semaphore::ReportTimestamp(0, 0x1000, 0, 0xf006, host) ==
+            Semaphore::Error::MemoryFault);
+    host = missing.Bind();
+    host.write_checked = nullptr;
+    REQUIRE(Semaphore::ReportTimestamp(0, 0x1000, 0, 0xf006, host) ==
+            Semaphore::Error::MemoryFault);
+    REQUIRE(missing.writes == 0);
 }
 
 TEST_CASE("Native report encodings remain specific to graphics and compute classes",

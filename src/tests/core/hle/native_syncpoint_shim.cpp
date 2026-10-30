@@ -189,6 +189,7 @@ TEST_CASE("GPU syncpoint mappings reserve a read-only aperture backed by live co
         manager.WriteBlockUnsafe(address, &attempted, sizeof(attempted));
         REQUIRE(manager.Read<u32>(address) == 1);
         REQUIRE_FALSE(manager.WriteTimestampedReleaseChecked(address, 0xffffffff, 0x12345678));
+        REQUIRE_FALSE(manager.WriteTimestampReportChecked(address, 0x12345678));
         REQUIRE(manager.Read<u32>(address) == 1);
     }
 }
@@ -216,6 +217,30 @@ TEST_CASE("GPU syncpoint reads observe host completion updates across threads", 
     }
     producer.join();
     REQUIRE(manager.Read<u32>(base + u64{id} * 0x10000) == 1000);
+}
+
+TEST_CASE("Timestamp records reject reserved pages that discard ordinary sparse writes",
+          "[core][ipc]") {
+    Core::System system;
+    Core::DeviceMemory memory;
+    Tegra::MaxwellDeviceMemoryManager backing{memory};
+    Tegra::GPU gpu{system, false, false};
+    Null::RasterizerNull rasterizer{gpu};
+    backing.BindInterface(&rasterizer);
+    Tegra::MemoryManager manager{system, backing, 32, 1ULL << 32, 16, 12};
+    manager.BindRasterizer(&rasterizer);
+    constexpr GPUVAddr base = 0x8000000;
+    REQUIRE(manager.ReserveSparseIfFree(base, 0x1000));
+    REQUIRE(manager.IsWritableRange(base, 16));
+    REQUIRE_FALSE(manager.IsBackedWritableRange(base, 16));
+    REQUIRE_FALSE(manager.WriteTimestampReportChecked(base, 0x12345678));
+    REQUIRE_FALSE(manager.WriteTimestampedReleaseChecked(base, 1, 0x12345678));
+    const std::array<u8, 4> payload{1, 2, 3, 4};
+    REQUIRE_FALSE(manager.WriteBackedBlockChecked(base, payload));
+    std::array<u8, 16> record;
+    record.fill(0xcc);
+    REQUIRE(manager.ReadBlockChecked(base, record));
+    REQUIRE(record == std::array<u8, 16>{});
 }
 
 TEST_CASE("Syncpoint apertures do not replace RAM or sparse reservations", "[core][ipc]") {

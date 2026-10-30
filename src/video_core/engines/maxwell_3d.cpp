@@ -662,23 +662,45 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
             }
             using Semaphore = Control::NativeReportSemaphore;
             const Semaphore::Host release_host{
-                this,
+                &context,
                 [](void* opaque, GPUVAddr address, size_t size) {
-                    return static_cast<Maxwell3D*>(opaque)->memory_manager.IsWritableRange(address,
-                                                                                           size);
-                },
-                [](void* opaque) { return static_cast<Maxwell3D*>(opaque)->NativeWaitForIdle(); },
-                [](void* opaque, GPUVAddr address, u32 payload) {
-                    return static_cast<Maxwell3D*>(opaque)->memory_manager.WriteBlockChecked(
-                        address, {reinterpret_cast<const u8*>(&payload), sizeof(payload)});
+                    return static_cast<HostContext*>(opaque)
+                        ->engine.memory_manager.IsBackedWritableRange(address, size);
                 },
                 [](void* opaque) {
-                    return static_cast<Maxwell3D*>(opaque)->native_stop_token.stop_requested();
+                    return static_cast<HostContext*>(opaque)->engine.NativeWaitForIdle();
+                },
+                [](void* opaque, GPUVAddr address, u32 payload) {
+                    auto& engine = static_cast<HostContext*>(opaque)->engine;
+                    return engine.memory_manager.WriteBackedBlockChecked(
+                        address, {reinterpret_cast<const u8*>(&payload), sizeof(payload)},
+                        engine.native_stop_token);
+                },
+                [](void* opaque) {
+                    return static_cast<HostContext*>(opaque)
+                        ->engine.native_stop_token.stop_requested();
                 },
             };
+            const Semaphore::TimestampHost timestamp_host{
+                release_host,
+                [](void* opaque) -> u64 {
+                    return static_cast<HostContext*>(opaque)
+                        ->system.CoreTiming()
+                        .GetGlobalTimeNs()
+                        .count();
+                },
+                [](void* opaque, GPUVAddr address, u64 timestamp) {
+                    auto& self = static_cast<HostContext*>(opaque)->engine;
+                    return self.memory_manager.WriteTimestampReportChecked(address, timestamp,
+                                                                           self.native_stop_token);
+                }};
             const auto result =
-                Semaphore::Release(GetRegisterValue(0x6c0), GetRegisterValue(0x6c1),
-                                   GetRegisterValue(0x6c2), method_argument, release_host);
+                method_argument == 0xf006
+                    ? Semaphore::ReportTimestamp(GetRegisterValue(0x6c0), GetRegisterValue(0x6c1),
+                                                 GetRegisterValue(0x6c2), method_argument,
+                                                 timestamp_host)
+                    : Semaphore::Release(GetRegisterValue(0x6c0), GetRegisterValue(0x6c1),
+                                         GetRegisterValue(0x6c2), method_argument, release_host);
             native_action_failed = result != Semaphore::Error::None;
             if (native_action_failed) {
                 LOG_ERROR(HW_GPU,

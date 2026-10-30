@@ -38,4 +38,35 @@ NativeReportSemaphore::Error NativeReportSemaphore::Release(u32 upper, u32 lower
     return Error::None;
 }
 
+NativeReportSemaphore::Error NativeReportSemaphore::ReportTimestamp(u32 upper, u32 lower,
+                                                                    u32 payload, u32 operation,
+                                                                    const TimestampHost& host) {
+    // C797 REPORT_ONLY/NONE, ALL pipeline, FOUR_WORDS, FLUSH_DISABLE. The verified
+    // SDK timestamp query sets C=0 and consumes the second u64 of the report.
+    // Other report values and counter selections require their own semantics.
+    if (operation != 0xf006 || payload != 0)
+        return Error::UnsupportedOperation;
+    if (upper > 0xff || (lower & 15))
+        return Error::InvalidAddress;
+    const auto& common = host.common;
+    const auto stopped = [&] { return common.should_stop && common.should_stop(common.context); };
+    if (stopped())
+        return Error::Cancelled;
+    const GPUVAddr address = (GPUVAddr{upper} << 32) | lower;
+    if (!common.is_writable || !common.is_writable(common.context, address, 16))
+        return Error::MemoryFault;
+    if (!common.wait_for_idle || !common.wait_for_idle(common.context))
+        return Error::WaitFailed;
+    if (stopped())
+        return Error::Cancelled;
+    if (!host.timestamp_ns || !host.write_checked)
+        return Error::MemoryFault;
+    const auto timestamp = host.timestamp_ns(common.context);
+    if (stopped())
+        return Error::Cancelled;
+    if (!host.write_checked(common.context, address, timestamp))
+        return stopped() ? Error::Cancelled : Error::MemoryFault;
+    return Error::None;
+}
+
 } // namespace Tegra::Control

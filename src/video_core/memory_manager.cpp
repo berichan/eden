@@ -574,7 +574,8 @@ void MemoryManager::ReadBlockUnsafe(GPUVAddr gpu_src_addr, void* dest_buffer, co
     ReadBlockImpl(gpu_src_addr, dest_buffer, size, VideoCommon::CacheType::None, true);
 }
 
-bool MemoryManager::IsValidAccessRange(GPUVAddr address, size_t size, bool write) const {
+bool MemoryManager::IsValidAccessRange(GPUVAddr address, size_t size, bool write,
+                                       bool require_backing) const {
     if (address > address_space_size || size > address_space_size - address) {
         return false;
     }
@@ -598,7 +599,7 @@ bool MemoryManager::IsValidAccessRange(GPUVAddr address, size_t size, bool write
         if (entry == EntryType::Free) {
             entry = GetEntry(address, false);
         }
-        if (entry == EntryType::Free) {
+        if (entry == EntryType::Free || (require_backing && entry != EntryType::Mapped)) {
             return false;
         }
         if (entry == EntryType::Mapped) {
@@ -643,10 +644,20 @@ bool MemoryManager::WriteBlockChecked(GPUVAddr address, std::span<const u8> inpu
     return true;
 }
 
+bool MemoryManager::WriteBackedBlockChecked(GPUVAddr address, std::span<const u8> input,
+                                            std::stop_token stop_token) {
+    std::scoped_lock lock{mapping_guard};
+    if (!IsValidAccessRange(address, input.size(), true, true) || stop_token.stop_requested())
+        return false;
+    WriteBlock(address, input.data(), input.size());
+    return true;
+}
+
 bool MemoryManager::WriteTimestampedReleaseChecked(GPUVAddr address, u32 payload, u64 timestamp,
                                                    std::stop_token stop_token) {
     std::scoped_lock lock{mapping_guard};
-    if ((address & 15) || !IsValidAccessRange(address, 16, true) || stop_token.stop_requested()) {
+    if ((address & 15) || !IsValidAccessRange(address, 16, true, true) ||
+        stop_token.stop_requested()) {
         return false;
     }
     // Keep backing stable while publishing the PBDMA's {payload, zero, timestamp} record.
@@ -661,6 +672,28 @@ bool MemoryManager::WriteTimestampedReleaseChecked(GPUVAddr address, u32 payload
     const u32_le wire_payload{payload};
     WriteBlock(address, &wire_payload, sizeof(wire_payload));
     return true;
+}
+
+bool MemoryManager::WriteTimestampReportChecked(GPUVAddr address, u64 timestamp,
+                                                std::stop_token stop_token) {
+    std::scoped_lock lock{mapping_guard};
+    if ((address & 15) || !IsValidAccessRange(address, 16, true, true) ||
+        stop_token.stop_requested())
+        return false;
+    // Commit a complete {value64=0, timestamp64} record with stable backing. Publish
+    // the consumed timestamp last as an emulation ordering choice; this is not the
+    // PBDMA payload-last release protocol. Cancellation precedes the entire write.
+    const u64_le zero{};
+    WriteBlock(address, &zero, sizeof(zero));
+    std::atomic_thread_fence(std::memory_order_release);
+    const u64_le wire_timestamp{timestamp};
+    WriteBlock(address + 8, &wire_timestamp, sizeof(wire_timestamp));
+    return true;
+}
+
+bool MemoryManager::IsBackedWritableRange(GPUVAddr address, size_t size) const {
+    std::scoped_lock lock{mapping_guard};
+    return IsValidAccessRange(address, size, true, true);
 }
 
 MemoryManager::MappingLease::MappingLease(MemoryManager& manager_)

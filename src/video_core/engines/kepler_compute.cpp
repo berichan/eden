@@ -62,9 +62,11 @@ bool KeplerCompute::CallNativeMethod(u32 method, u32 value, bool last, std::stop
     } context{*this, stop_token};
     const Control::NativeCompute::Host host{
         {&context,
-         [](void*, const Qmd::Release& release) {
+         [](void* opaque, const Qmd::Release& release) {
              // Timestamped, wide-payload and reduction releases need their own adapter.
-             return release.SizeBytes() == 4 && !(release.flags & ((1U << 26) | (1U << 29)));
+             return release.SizeBytes() == 4 && !(release.flags & ((1U << 26) | (1U << 29))) &&
+                    static_cast<HostContext*>(opaque)->owner.memory_manager.IsBackedWritableRange(
+                        release.address, release.SizeBytes());
          },
          [](void* context, const Qmd::Descriptor& descriptor) {
              return static_cast<HostContext*>(context)->owner.DispatchNativeCompute(descriptor);
@@ -77,8 +79,8 @@ bool KeplerCompute::CallNativeMethod(u32 method, u32 value, bool last, std::stop
                  return false;
              }
              const u32 payload = static_cast<u32>(release.payload);
-             return self.memory_manager.WriteBlockChecked(
-                 release.address, {reinterpret_cast<const u8*>(&payload), sizeof(payload)});
+             return self.memory_manager.WriteBackedBlockChecked(
+                 release.address, {reinterpret_cast<const u8*>(&payload), sizeof(payload)}, token);
          },
          [](void* context) {
              return static_cast<HostContext*>(context)->stop_token.stop_requested();
@@ -93,16 +95,18 @@ bool KeplerCompute::CallNativeMethod(u32 method, u32 value, bool last, std::stop
         },
         {&context,
          [](void* opaque, GPUVAddr address, size_t size) {
-             return static_cast<HostContext*>(opaque)->owner.memory_manager.IsWritableRange(address,
-                                                                                            size);
+             return static_cast<HostContext*>(opaque)->owner.memory_manager.IsBackedWritableRange(
+                 address, size);
          },
          [](void* opaque) {
              const auto& self = static_cast<HostContext*>(opaque)->owner;
              return self.rasterizer && self.rasterizer->SynchronizeNativeWork();
          },
          [](void* opaque, GPUVAddr address, u32 payload) {
-             return static_cast<HostContext*>(opaque)->owner.memory_manager.WriteBlockChecked(
-                 address, {reinterpret_cast<const u8*>(&payload), sizeof(payload)});
+             auto& self = *static_cast<HostContext*>(opaque);
+             return self.owner.memory_manager.WriteBackedBlockChecked(
+                 address, {reinterpret_cast<const u8*>(&payload), sizeof(payload)},
+                 self.stop_token);
          },
          [](void* opaque) {
              return static_cast<HostContext*>(opaque)->stop_token.stop_requested();

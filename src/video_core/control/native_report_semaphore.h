@@ -18,6 +18,11 @@ public:
         bool (*write_checked)(void*, GPUVAddr, u32){};
         bool (*should_stop)(void*){};
     };
+    struct TimestampHost {
+        Host common;
+        u64 (*timestamp_ns)(void*){};
+        bool (*write_checked)(void*, GPUVAddr, u64 timestamp){};
+    };
     enum class Error {
         None,
         UnsupportedOperation,
@@ -29,6 +34,8 @@ public:
 
     static Error Release(u32 upper, u32 lower, u32 payload, u32 operation, const Host& host,
                          Engine engine = Engine::Graphics);
+    static Error ReportTimestamp(u32 upper, u32 lower, u32 payload, u32 operation,
+                                 const TimestampHost& host);
 };
 
 } // namespace Tegra::Control

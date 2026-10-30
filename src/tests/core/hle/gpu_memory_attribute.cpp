@@ -736,6 +736,42 @@ TEST_CASE("GPU pins retain real heap pages until partial unlock or process table
                 view->WriteTimestampedReleaseChecked(release_address, 0, 0, stop.get_token()));
             REQUIRE(view->ReadBlockChecked(record_start, record));
             REQUIRE(record == before);
+            REQUIRE(view->WriteTimestampReportChecked(release_address, 0x8877665544332211ULL));
+            REQUIRE(alias_view->ReadBlockChecked(record_start, record));
+            const std::array<u8, 16> report{0,    0,    0,    0,    0,    0,    0,    0,
+                                            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88};
+            REQUIRE(std::equal(report.begin(), report.end(), record.begin() + 16));
+            REQUIRE(std::all_of(record.begin(), record.begin() + 16,
+                                [](u8 value) { return value == 0xcc; }));
+            REQUIRE(std::all_of(record.begin() + 32, record.end(),
+                                [](u8 value) { return value == 0xcc; }));
+            const auto before_report_failure = record;
+            REQUIRE_FALSE(view->WriteTimestampReportChecked(release_address + 8, 0));
+            REQUIRE_FALSE(view->WriteTimestampReportChecked(va + size, 0));
+            REQUIRE_FALSE(view->WriteTimestampReportChecked(release_address, 0, stop.get_token()));
+            REQUIRE(view->ReadBlockChecked(record_start, record));
+            REQUIRE(record == before_report_failure);
+            REQUIRE(view->ReserveSparseIfFree(va + size, PageSize));
+            REQUIRE(view->IsWritableRange(va + size - 8, 16));
+            REQUIRE_FALSE(view->IsBackedWritableRange(va + size - 8, 16));
+            REQUIRE_FALSE(view->IsBackedWritableRange(va + size, 16));
+            REQUIRE_FALSE(view->WriteTimestampReportChecked(va + size, 0));
+            REQUIRE_FALSE(view->WriteTimestampedReleaseChecked(va + size, 1, 0));
+            REQUIRE_FALSE(view->WriteTimestampReportChecked(va + size - 8, 0));
+            const std::array<u8, 16> strict_data{1, 2, 3, 4};
+            const auto mixed_address = va + size - 8;
+            const auto before_mixed = alias_view->Read<u64>(mixed_address);
+            REQUIRE_FALSE(view->WriteBackedBlockChecked(mixed_address, strict_data));
+            REQUIRE(alias_view->Read<u64>(mixed_address) == before_mixed);
+            REQUIRE_FALSE(view->WriteBackedBlockChecked(va + size, strict_data));
+            REQUIRE(alias_view->ReadBlockChecked(record_start, record));
+            REQUIRE(record == before_report_failure);
+            REQUIRE(
+                view->WriteBackedBlockChecked(release_address, std::span{strict_data}.first(4)));
+            REQUIRE(alias_view->Read<u32>(release_address) == 0x04030201);
+            REQUIRE_FALSE(view->WriteBackedBlockChecked(release_address, report, stop.get_token()));
+            REQUIRE(alias_view->Read<u32>(release_address) == 0x04030201);
+            view->Unmap(va + size, PageSize);
         }
 
         {

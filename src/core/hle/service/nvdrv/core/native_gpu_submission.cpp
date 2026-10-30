@@ -122,7 +122,7 @@ struct NativeGpuChannel::Backend {
                         [](void* opaque, GPUVAddr address, size_t size) {
                             return static_cast<ReleaseContext*>(opaque)
                                 ->graphics.GetAddressSpace()
-                                ->IsWritableRange(address, size);
+                                ->IsBackedWritableRange(address, size);
                         },
                         [](void* opaque) {
                             return static_cast<ReleaseContext*>(opaque)
@@ -203,13 +203,13 @@ struct NativeGpuChannel::Backend {
                     return false;
                 }
                 const GPUVAddr address = (GPUVAddr{puller[4]} << 32) | puller[5];
-                if (!context.GetAddressSpace()->IsWritableRange(address, sizeof(u32)) ||
+                if (!context.GetAddressSpace()->IsBackedWritableRange(address, sizeof(u32)) ||
                     !rasterizer.SynchronizeNativeWork() || stop_token.stop_requested()) {
                     return false;
                 }
                 const u32 data = puller[6];
-                if (!context.GetAddressSpace()->WriteBlockChecked(
-                        address, {reinterpret_cast<const u8*>(&data), sizeof(data)})) {
+                if (!context.GetAddressSpace()->WriteBackedBlockChecked(
+                        address, {reinterpret_cast<const u8*>(&data), sizeof(data)}, stop_token)) {
                     return false;
                 }
                 break;
