@@ -134,12 +134,11 @@ struct OperationEvent : public Common::IntrusiveListBaseNode<OperationEvent> {
     Kernel::KEvent* m_event{};
 };
 
-constexpr inline std::chrono::nanoseconds ConvertToTimeSpan(s64 ticks) {
+constexpr inline std::chrono::nanoseconds ConvertToTimeSpan(s64 ticks, s64 counter_frequency) {
     constexpr auto one_second_ns{
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::seconds(1)).count()};
 
-    constexpr s64 max{Common::WallClock::CNTFRQ *
-                      ((std::numeric_limits<s64>::max)() / one_second_ns)};
+    const s64 max{counter_frequency * ((std::numeric_limits<s64>::max)() / one_second_ns)};
 
     if (ticks > max) {
         return std::chrono::nanoseconds((std::numeric_limits<s64>::max)());
@@ -147,8 +146,8 @@ constexpr inline std::chrono::nanoseconds ConvertToTimeSpan(s64 ticks) {
         return std::chrono::nanoseconds((std::numeric_limits<s64>::min)());
     }
 
-    auto a{ticks / Common::WallClock::CNTFRQ * one_second_ns};
-    auto b{((ticks % Common::WallClock::CNTFRQ) * one_second_ns) / Common::WallClock::CNTFRQ};
+    auto a{ticks / counter_frequency * one_second_ns};
+    auto b{((ticks % counter_frequency) * one_second_ns) / counter_frequency};
 
     return std::chrono::nanoseconds(a + b);
 }

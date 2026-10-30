@@ -14,8 +14,9 @@ namespace Service::PSC::Time {
 
 Result TickBasedSteadyClockCore::GetCurrentTimePointImpl(SteadyClockTimePoint& out_time_point) {
     auto ticks{m_system.CoreTiming().GetClockTicks()};
-    auto current_time_s =
-        std::chrono::duration_cast<std::chrono::seconds>(ConvertToTimeSpan(ticks)).count();
+    auto current_time_s = std::chrono::duration_cast<std::chrono::seconds>(
+                              ConvertToTimeSpan(ticks, m_system.CoreTiming().GetCounterFrequency()))
+                              .count();
     out_time_point.time_point = current_time_s;
     out_time_point.clock_source_id = m_clock_source_id;
     R_SUCCEED();

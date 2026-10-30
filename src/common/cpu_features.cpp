@@ -330,6 +330,7 @@ namespace {
 
 WallClock::WallClock(bool invariant_, u64 rdtsc_frequency_) noexcept {
     const u64 host_cntfrq = std::max<u64>(GetHostCNTFRQ(), 1);
+    host_counter_frequency = host_cntfrq;
     ns_cntfrq_factor = GetFixedPointFactor(NsRatio::den, host_cntfrq);
     us_cntfrq_factor = GetFixedPointFactor(UsRatio::den, host_cntfrq);
     ms_cntfrq_factor = GetFixedPointFactor(MsRatio::den, host_cntfrq);

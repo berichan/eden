@@ -627,7 +627,7 @@ void Patcher::WriteMsrHandler(ModuleDestLabel module_dest, oaknut::XReg src_reg,
 }
 
 void Patcher::WriteCntfrqHandler(ModuleDestLabel module_dest, oaknut::XReg dest_reg, oaknut::VectorCodeGenerator& cg) {
-    cg.MOV(dest_reg, Common::WallClock::CNTFRQ);
+    cg.MOV(dest_reg, counter_frequency);
 
     // Jump back to the instruction after the emulated MRS.
     if (&cg == &c_pre)
@@ -642,7 +642,7 @@ void Patcher::WriteCntpctHandler(ModuleDestLabel module_dest, oaknut::XReg dest_
 #else
     static Common::WallClock clock(true, 1);
 #endif
-    const auto factor = clock.GetGuestCNTFRQFactor();
+    const auto factor = clock.GetGuestCNTFRQFactor(counter_frequency);
     const auto raw_factor = std::bit_cast<std::array<u64, 2>>(factor);
 
     const auto use_x2_x3 = dest_reg.index() == 0 || dest_reg.index() == 1;

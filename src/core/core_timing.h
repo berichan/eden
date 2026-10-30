@@ -18,8 +18,9 @@
 #include <boost/heap/fibonacci_heap.hpp>
 
 #include "common/common_types.h"
-#include "common/thread.h"
 #include "common/cpu_features.h"
+#include "common/thread.h"
+#include "core/hardware_properties.h"
 
 namespace Core::Timing {
 
@@ -125,6 +126,14 @@ public:
     /// Returns the current CNTPCT tick value.
     u64 GetClockTicks() const;
 
+    // Select before launching guest threads or generating system-register handlers.
+    void SetCpuProfile(Hardware::CpuProfile profile) {
+        counter_frequency.store(Hardware::GetCounterFrequency(profile), std::memory_order_relaxed);
+    }
+    u32 GetCounterFrequency() const {
+        return counter_frequency.load(std::memory_order_relaxed);
+    }
+
     /// Returns the current GPU tick value.
     u64 GetGPUTicks() const;
 
@@ -164,6 +173,7 @@ public:
     std::atomic<bool> wait_set{};
     std::atomic<bool> has_started{};
     bool is_multicore{};
+    std::atomic<u32> counter_frequency{static_cast<u32>(Hardware::CNTFREQ)};
 };
 
 /// Creates a core timing event with the given name and callback.

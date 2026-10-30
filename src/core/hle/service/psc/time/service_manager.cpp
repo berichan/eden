@@ -94,7 +94,8 @@ Result ServiceManager::SetupStandardSteadyClockCore(bool is_rtc_reset_detected,
                               is_rtc_reset_detected);
     auto time = m_steady_clock.GetRawTime();
     auto ticks = system.CoreTiming().GetClockTicks();
-    auto boot_time = time - ConvertToTimeSpan(ticks).count();
+    auto boot_time =
+        time - ConvertToTimeSpan(ticks, system.CoreTiming().GetCounterFrequency()).count();
     m_shared_memory.SetSteadyClockTimePoint(clock_source_id, boot_time);
     m_steady_clock.SetContinuousAdjustment(clock_source_id, boot_time);
 
@@ -222,7 +223,7 @@ Result ServiceManager::SetStandardSteadyClockBaseTime(s64 base_time) {
     m_steady_clock.SetRtcOffset(base_time);
     auto time = m_steady_clock.GetRawTime();
     auto ticks = system.CoreTiming().GetClockTicks();
-    auto diff = time - ConvertToTimeSpan(ticks).count();
+    auto diff = time - ConvertToTimeSpan(ticks, system.CoreTiming().GetCounterFrequency()).count();
     m_shared_memory.UpdateBaseTime(diff);
     m_steady_clock.UpdateContinuousAdjustmentTime(diff);
 

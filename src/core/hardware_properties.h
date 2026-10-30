@@ -23,6 +23,10 @@ enum class CpuProfile {
     Ounce,
 };
 
+constexpr u32 GetCounterFrequency(CpuProfile profile) {
+    return profile == CpuProfile::Ounce ? 31'250'000U : static_cast<u32>(CNTFREQ);
+}
+
 constexpr u32 GetCpuCoreCount(CpuProfile profile) {
     return profile == CpuProfile::Ounce ? 6 : 4;
 }

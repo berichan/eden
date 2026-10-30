@@ -32,7 +32,8 @@ void StandardSteadyClockCore::SetRtcOffset(s64 offset) {
 void StandardSteadyClockCore::SetContinuousAdjustment(ClockSourceId clock_source_id, s64 time) {
     auto ticks{m_system.CoreTiming().GetClockTicks()};
 
-    m_continuous_adjustment_time_point.rtc_offset = ConvertToTimeSpan(ticks).count();
+    m_continuous_adjustment_time_point.rtc_offset =
+        ConvertToTimeSpan(ticks, m_system.CoreTiming().GetCounterFrequency()).count();
     m_continuous_adjustment_time_point.diff_scale = 0;
     m_continuous_adjustment_time_point.shift_amount = 0;
     m_continuous_adjustment_time_point.lower = time;
@@ -47,7 +48,7 @@ void StandardSteadyClockCore::GetContinuousAdjustment(
 
 void StandardSteadyClockCore::UpdateContinuousAdjustmentTime(s64 in_time) {
     auto ticks{m_system.CoreTiming().GetClockTicks()};
-    auto uptime_ns{ConvertToTimeSpan(ticks).count()};
+    auto uptime_ns{ConvertToTimeSpan(ticks, m_system.CoreTiming().GetCounterFrequency()).count()};
     auto adjusted_time{((uptime_ns - m_continuous_adjustment_time_point.rtc_offset) *
                         m_continuous_adjustment_time_point.diff_scale) >>
                        m_continuous_adjustment_time_point.shift_amount};
@@ -79,7 +80,9 @@ Result StandardSteadyClockCore::GetCurrentTimePointImpl(SteadyClockTimePoint& ou
 s64 StandardSteadyClockCore::GetCurrentRawTimePointImpl() {
     std::scoped_lock l{m_mutex};
     auto ticks{static_cast<s64>(m_system.CoreTiming().GetClockTicks())};
-    auto current_time_ns = m_rtc_offset + ConvertToTimeSpan(ticks).count();
+    auto current_time_ns =
+        m_rtc_offset +
+        ConvertToTimeSpan(ticks, m_system.CoreTiming().GetCounterFrequency()).count();
     auto time_point = std::max<s64>(current_time_ns, m_cached_time_point);
     m_cached_time_point = time_point;
     return time_point;

@@ -103,9 +103,10 @@ public:
     bool invariant;
 #elif defined(HAS_NCE)
     using FactorType = unsigned __int128;
-    [[nodiscard]] inline FactorType GetGuestCNTFRQFactor() const {
-        return guest_cntfrq_factor;
+    [[nodiscard]] inline FactorType GetGuestCNTFRQFactor(u64 guest_frequency) const {
+        return (FactorType(guest_frequency) << 64) / host_counter_frequency;
     }
+    u64 host_counter_frequency;
     FactorType ns_cntfrq_factor;
     FactorType us_cntfrq_factor;
     FactorType ms_cntfrq_factor;

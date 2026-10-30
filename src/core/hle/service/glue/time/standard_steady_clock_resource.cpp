@@ -58,7 +58,9 @@ void StandardSteadyClockResource::Initialize(Common::UUID* out_source_id,
     } else {
         m_set_time_result = res;
         auto ticks{m_system.CoreTiming().GetClockTicks()};
-        m_time = -Service::PSC::Time::ConvertToTimeSpan(ticks).count();
+        m_time = -Service::PSC::Time::ConvertToTimeSpan(ticks,
+                                                        m_system.CoreTiming().GetCounterFrequency())
+                      .count();
         m_clock_source_id = Common::UUID::MakeRandom();
     }
 
@@ -87,14 +89,17 @@ Result StandardSteadyClockResource::SetCurrentTime() {
     R_TRY(GetTimeInSeconds(m_system, rtc_time_s));
 
     auto end_tick{m_system.CoreTiming().GetClockTicks()};
-    auto diff{Service::PSC::Time::ConvertToTimeSpan(end_tick - start_tick)};
+    auto diff{Service::PSC::Time::ConvertToTimeSpan(end_tick - start_tick,
+                                                    m_system.CoreTiming().GetCounterFrequency())};
     // Why is this here?
     R_UNLESS(diff < std::chrono::milliseconds(101), Service::PSC::Time::ResultRtcTimeout);
 
     auto one_second_ns{
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::seconds(1)).count()};
-    s64 boot_time{rtc_time_s * one_second_ns -
-                  Service::PSC::Time::ConvertToTimeSpan(end_tick).count()};
+    s64 boot_time{
+        rtc_time_s * one_second_ns -
+        Service::PSC::Time::ConvertToTimeSpan(end_tick, m_system.CoreTiming().GetCounterFrequency())
+            .count()};
 
     std::scoped_lock l{m_mutex};
     m_time = boot_time;

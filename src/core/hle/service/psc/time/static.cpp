@@ -223,7 +223,8 @@ Result StaticService::CalculateMonotonicSystemClockBaseTimePoint(
     auto one_second_ns{
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::seconds(1)).count()};
     auto ticks{system.CoreTiming().GetClockTicks()};
-    auto current_time_ns{ConvertToTimeSpan(ticks).count()};
+    auto current_time_ns{
+        ConvertToTimeSpan(ticks, system.CoreTiming().GetCounterFrequency()).count()};
     *out_time = ((context.offset + time_point.time_point) - (current_time_ns / one_second_ns));
 
     R_SUCCEED();

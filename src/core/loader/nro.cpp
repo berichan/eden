@@ -33,6 +33,7 @@
 
 #ifdef HAS_NCE
 #include "core/arm/nce/patcher.h"
+#include "core/core_timing.h"
 #endif
 
 namespace Loader {
@@ -246,6 +247,7 @@ static bool LoadNroImpl(Core::System& system, Kernel::KProcess& process,
 
     // Create NCE patcher
     Core::NCE::Patcher patch{};
+    patch.SetCounterFrequency(system.CoreTiming().GetCounterFrequency());
 
     if (Settings::IsNceEnabled()) {
         // Patch SVCs and MRS calls in the guest code

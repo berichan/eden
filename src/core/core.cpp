@@ -265,6 +265,7 @@ struct System::Impl {
 
         // Setting changes may require a full system reinitialization (e.g., disabling multicore).
         ReinitializeIfNecessary(system);
+        core_timing.SetCpuProfile(profile);
         kernel.SetCpuProfile(profile);
         kernel.Initialize();
     }

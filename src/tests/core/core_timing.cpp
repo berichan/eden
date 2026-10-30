@@ -7,12 +7,16 @@
 #include <bitset>
 #include <chrono>
 #include <cstdlib>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
 
+#include "common/scope_exit.h"
+#include "common/settings.h"
 #include "core/core.h"
 #include "core/core_timing.h"
+#include "core/hle/service/psc/time/common.h"
 
 namespace {
 // Numbers are chosen randomly to make sure the correct one is given.
@@ -54,6 +58,78 @@ u64 TestTimerSpeed(Core::Timing::CoreTiming& core_timing) {
 }
 
 } // Anonymous namespace
+
+TEST_CASE("CoreTiming[CounterProfile]", "[core][topology]") {
+    const auto clock = Settings::values.cpu_clock.GetValue();
+    const auto sync_speed = Settings::values.sync_core_speed.GetValue();
+    const auto custom_ticks = Settings::values.use_custom_cpu_ticks.GetValue();
+    SCOPE_EXIT {
+        Settings::values.cpu_clock.SetValue(clock);
+        Settings::values.sync_core_speed.SetValue(sync_speed);
+        Settings::values.use_custom_cpu_ticks.SetValue(custom_ticks);
+    };
+    Settings::values.cpu_clock.SetValue(Settings::CpuClock::Normal);
+    Settings::values.sync_core_speed.SetValue(false);
+    Settings::values.use_custom_cpu_ticks.SetValue(false);
+
+    using Core::Hardware::CpuProfile;
+    Core::Timing::CoreTiming timing;
+    timing.SetMulticore(false);
+    for (auto profile : {CpuProfile::Nx, CpuProfile::Ounce, CpuProfile::Nx}) {
+        timing.Initialize([] {});
+        timing.SetCpuProfile(profile);
+        const u64 expected = profile == CpuProfile::Ounce ? 31'250'000 : 19'200'000;
+        REQUIRE(timing.GetCounterFrequency() == expected);
+        REQUIRE(timing.GetClockTicks() == 0);
+        timing.AddTicks(1'020'000'000);
+        REQUIRE(timing.GetClockTicks() == expected);
+        REQUIRE(timing.GetGlobalTimeNs() == std::chrono::seconds{1});
+        // Round-trip through the actual service conversion must stay in real time.
+        REQUIRE(Service::PSC::Time::ConvertToTimeSpan(timing.GetClockTicks(),
+                                                      timing.GetCounterFrequency()) ==
+                std::chrono::seconds{1});
+    }
+    timing.SetCpuProfile(CpuProfile::Ounce);
+    timing.Initialize([] {});
+    timing.AddTicks(32);
+    REQUIRE(timing.GetClockTicks() == 0);
+    timing.AddTicks(1);
+    REQUIRE(timing.GetClockTicks() == 1);
+    timing.Initialize([] {});
+    timing.ResetTicks();
+    timing.AddTicks(9'223'372'036'854'775'807ULL);
+    REQUIRE(timing.GetClockTicks() == 282'578'800'148'737'003ULL);
+    timing.SetMulticore(true);
+    const auto before = Common::g_wall_clock.GetTimeNS().count() / 32;
+    const auto counter = timing.GetClockTicks();
+    const auto after = Common::g_wall_clock.GetTimeNS().count() / 32;
+    REQUIRE(counter >= static_cast<u64>(before));
+    REQUIRE(counter <= static_cast<u64>(after));
+}
+
+TEST_CASE("CoreTiming[CounterSpans]", "[core][topology]") {
+    using Service::PSC::Time::ConvertToTimeSpan;
+    for (s64 frequency : {19'200'000LL, 31'250'000LL}) {
+        REQUIRE(ConvertToTimeSpan(frequency, frequency) == std::chrono::seconds{1});
+        REQUIRE(ConvertToTimeSpan(-frequency, frequency) == -std::chrono::seconds{1});
+        REQUIRE(ConvertToTimeSpan(0, frequency).count() == 0);
+        REQUIRE(ConvertToTimeSpan(frequency + frequency / 2, frequency) ==
+                std::chrono::milliseconds{1500});
+        REQUIRE(ConvertToTimeSpan(-frequency - frequency / 2, frequency) ==
+                -std::chrono::milliseconds{1500});
+        const s64 limit = frequency * ((std::numeric_limits<s64>::max)() / 1'000'000'000);
+        REQUIRE(ConvertToTimeSpan(limit, frequency).count() == 9'223'372'036'000'000'000LL);
+        REQUIRE(ConvertToTimeSpan(-limit, frequency).count() == -9'223'372'036'000'000'000LL);
+        REQUIRE(ConvertToTimeSpan(limit + 1, frequency) == std::chrono::nanoseconds::max());
+        REQUIRE(ConvertToTimeSpan(-limit - 1, frequency) == std::chrono::nanoseconds::min());
+        REQUIRE(ConvertToTimeSpan((std::numeric_limits<s64>::max)(), frequency) ==
+                std::chrono::nanoseconds::max());
+        REQUIRE(ConvertToTimeSpan((std::numeric_limits<s64>::min)(), frequency) ==
+                std::chrono::nanoseconds::min());
+    }
+    REQUIRE(ConvertToTimeSpan(1, 31'250'000) == std::chrono::nanoseconds{32});
+    REQUIRE(ConvertToTimeSpan(-1, 31'250'000) == std::chrono::nanoseconds{-32});
+}
 
 TEST_CASE("CoreTiming[ResetRepeatedly]", "[core]") {
     Core::Timing::CoreTiming timing;

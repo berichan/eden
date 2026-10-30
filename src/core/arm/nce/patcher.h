@@ -9,12 +9,13 @@
 #include <oaknut/code_block.hpp>
 #include <oaknut/oaknut.hpp>
 
-#include "common/logging.h"
+#include <utility>
 #include "common/common_types.h"
+#include "common/logging.h"
 #include "common/settings.h"
+#include "core/hardware_properties.h"
 #include "core/hle/kernel/code_set.h"
 #include "core/hle/kernel/k_typed_address.h"
-#include <utility>
 using ModuleID = std::array<u8, 32>;  // NSO build ID
 struct PatchCacheKey {
     ModuleID module_id;
@@ -58,6 +59,9 @@ public:
     void SetModuleID(const ModuleID& id) {
         module_id = id;
     }
+    void SetCounterFrequency(u64 frequency) {
+        counter_frequency = frequency;
+    }
     explicit Patcher();
     explicit Patcher(std::span<const u8> text);
     ~Patcher();
@@ -74,6 +78,7 @@ public:
 private:
     using ModuleDestLabel = uintptr_t;
     ModuleID module_id{};
+    u64 counter_frequency{Hardware::CNTFREQ};
     struct Trampoline {
         ptrdiff_t patch_offset;
         uintptr_t module_offset;

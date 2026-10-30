@@ -16,6 +16,7 @@
 #endif
 
 #include "common/settings.h"
+#include "common/uint128.h"
 #include "core/core_timing.h"
 #include "core/hardware_properties.h"
 
@@ -224,7 +225,19 @@ void CoreTiming::ResetTicks() {
 }
 
 u64 CoreTiming::GetClockTicks() const {
-    u64 fres = is_multicore ? Common::g_wall_clock.GetCNTPCT() : Common::WallClock::CPUTickToCNTPCT(cpu_ticks);
+    const auto frequency = GetCounterFrequency();
+    u64 fres;
+    if (frequency == Hardware::CNTFREQ) {
+        fres = is_multicore ? Common::g_wall_clock.GetCNTPCT()
+                            : Common::WallClock::CPUTickToCNTPCT(cpu_ticks);
+    } else {
+        // Keep the shared host clock immutable. Only guest CPU-counter units vary;
+        // event scheduling and GPU timestamps remain in their existing clock domains.
+        fres = is_multicore
+                   ? Common::MultiplyAndDivide64(Common::g_wall_clock.GetTimeNS().count(),
+                                                 frequency, std::nano::den)
+                   : Common::MultiplyAndDivide64(cpu_ticks, frequency, Hardware::BASE_CLOCK_RATE);
+    }
     if (const u32 target = CpuClockTargetMhz(Settings::values.cpu_clock.GetValue());
         target != CPU_CLOCK_BASE_MHZ) {
         fres = fres * target / CPU_CLOCK_BASE_MHZ;
