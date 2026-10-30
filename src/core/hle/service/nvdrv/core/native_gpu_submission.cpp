@@ -59,6 +59,10 @@ struct NativeGpuChannel::Backend {
         // macros whose output could publish a release before the scope is closed.
         const bool restricted_scope =
             atomic_sequence.IsActive() || payload.maxwell_3d.HasPendingNativeInstrumentation();
+        if (classes[subchannel] == 0xc797 && method == 0x6c3 && PendingFrontend(context)) {
+            LOG_ERROR(HW_GPU, "Native report release blocked by unfinished frontend work");
+            return false;
+        }
         if (restricted_scope && (method == 0x6c || method == 0x6d)) {
             return false;
         }

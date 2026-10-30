@@ -889,6 +889,80 @@ TEST_CASE("Native compute macros share uploaded programs and retain their own me
     REQUIRE_FALSE(first.CallMethod(0xe0b, 1, true, {}));
 }
 
+TEST_CASE("Native compute switch configuration retains callbacks without invoking them",
+          "[ipc][video_core]") {
+    Core::System system;
+    Core::DeviceMemory memory;
+    Tegra::MaxwellDeviceMemoryManager backing{memory};
+    auto space = std::make_shared<Tegra::MemoryManager>(system, backing, 32, 1ULL << 32, 16, 12);
+    auto context = std::make_shared<Tegra::Control::NativeGpuGraphicsContext>(
+        std::make_shared<Tegra::Control::AmpereGraphicsState>(), space);
+    using Compute = Tegra::Control::NativeCompute;
+    Compute first{context}, second{context};
+    REQUIRE(first.CallMethod(0xd00, 0x12345678, true, {}));
+    REQUIRE(first.CallMethod(0x7b, 0x3e3d1, true, {}));
+    REQUIRE(first.ReadRegister(0x7b) == 0x3e3d1);
+    REQUIRE(first.ReadRegister(0xd00) == 0x12345678);
+    REQUIRE(second.ReadRegister(0x7b) == 0);
+    REQUIRE(second.CallMethod(0x7b, 0, true, {}));
+    REQUIRE(first.ReadRegister(0x7b) == 0x3e3d1);
+    for (u32 invalid : {0x3e3d3U, 0x13e3d1U, 0x803d1U, 0x3e801U}) {
+        Compute rejected{context};
+        REQUIRE(rejected.CallMethod(0x7b, 0x3e3d1, true, {}));
+        REQUIRE_FALSE(rejected.CallMethod(0x7b, invalid, true, {}));
+        REQUIRE(rejected.ReadRegister(0x7b) == 0x3e3d1);
+    }
+}
+
+TEST_CASE("Native compute texture cache invalidation executes its backend and propagates failures",
+          "[ipc][video_core]") {
+    Core::System system;
+    Core::DeviceMemory memory;
+    Tegra::MaxwellDeviceMemoryManager backing{memory};
+    auto space = std::make_shared<Tegra::MemoryManager>(system, backing, 32, 1ULL << 32, 16, 12);
+    auto context = std::make_shared<Tegra::Control::NativeGpuGraphicsContext>(
+        std::make_shared<Tegra::Control::AmpereGraphicsState>(), space);
+    using Compute = Tegra::Control::NativeCompute;
+    struct Backend {
+        u32 calls{};
+        bool success{true}, stopped{}, cancel_in_callback{};
+    } backend;
+    Compute::Host host{};
+    host.qmd.context = &backend;
+    host.qmd.should_stop = [](void* opaque) { return static_cast<Backend*>(opaque)->stopped; };
+    host.invalidate_caches = [](void* opaque,
+                                const Tegra::Control::NativeCacheInvalidation& action) {
+        auto& state = *static_cast<Backend*>(opaque);
+        ++state.calls;
+        REQUIRE(action.texture_data);
+        REQUIRE_FALSE((action.instructions || action.global_data || action.constants ||
+                       action.samplers || action.texture_headers));
+        state.stopped = state.cancel_in_callback;
+        return state.success;
+    };
+    Compute valid{context};
+    REQUIRE(valid.CallMethod(0x4a2, 0, true, host));
+    REQUIRE(backend.calls == 1);
+    for (u32 value : {1U, 0x10U, 0xffffffffU}) {
+        Compute rejected{context};
+        REQUIRE_FALSE(rejected.CallMethod(0x4a2, value, true, host));
+        REQUIRE(backend.calls == 1);
+    }
+    Compute missing{context};
+    REQUIRE_FALSE(missing.CallMethod(0x4a2, 0, true, {}));
+    REQUIRE(missing.GetError() == Compute::Error::CacheFailed);
+    backend.success = false;
+    Compute failed{context};
+    REQUIRE_FALSE(failed.CallMethod(0x4a2, 0, true, host));
+    REQUIRE(failed.GetError() == Compute::Error::CacheFailed);
+    backend.success = true;
+    backend.cancel_in_callback = true;
+    Compute cancelled{context};
+    REQUIRE_FALSE(cancelled.CallMethod(0x4a2, 0, true, host));
+    REQUIRE(cancelled.GetError() == Compute::Error::Cancelled);
+    REQUIRE(backend.calls == 3);
+}
+
 TEST_CASE("Native compute methods fail unsupported actions without invoking legacy compute",
           "[ipc][video_core]") {
     Core::System system;

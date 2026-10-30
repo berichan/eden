@@ -17,6 +17,7 @@
 #include "video_core/control/native_gpu_context.h"
 #include "video_core/control/native_inline_upload.h"
 #include "video_core/control/native_macro_processor.h"
+#include "video_core/control/native_report_semaphore.h"
 #include "video_core/dirty_flags.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/gpu.h"
@@ -651,6 +652,40 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
             // Bit 0 describes shader global stores. A real drain supplies stronger
             // ordering for either value without releasing parked QMD dependencies.
             native_action_failed = method_argument > 1 || !NativeWaitForIdle();
+            return;
+        }
+        if (method == 0x6c3) { // C797 SET_REPORT_SEMAPHORE_D
+            if (HasPendingNativeInlineUpload() || native_instrumentation_pending) {
+                native_action_failed = true;
+                return;
+            }
+            using Semaphore = Control::NativeReportSemaphore;
+            const Semaphore::Host release_host{
+                this,
+                [](void* opaque, GPUVAddr address, size_t size) {
+                    return static_cast<Maxwell3D*>(opaque)->memory_manager.IsWritableRange(address,
+                                                                                           size);
+                },
+                [](void* opaque) { return static_cast<Maxwell3D*>(opaque)->NativeWaitForIdle(); },
+                [](void* opaque, GPUVAddr address, u32 payload) {
+                    return static_cast<Maxwell3D*>(opaque)->memory_manager.WriteBlockChecked(
+                        address, {reinterpret_cast<const u8*>(&payload), sizeof(payload)});
+                },
+                [](void* opaque) {
+                    return static_cast<Maxwell3D*>(opaque)->native_stop_token.stop_requested();
+                },
+            };
+            const auto result =
+                Semaphore::Release(GetRegisterValue(0x6c0), GetRegisterValue(0x6c1),
+                                   GetRegisterValue(0x6c2), method_argument, release_host);
+            native_action_failed = result != Semaphore::Error::None;
+            if (native_action_failed) {
+                LOG_ERROR(HW_GPU,
+                          "Native report release failed: upper={:#x}, lower={:#x}, payload={:#x}, "
+                          "operation={:#x}, error={}",
+                          GetRegisterValue(0x6c0), GetRegisterValue(0x6c1), GetRegisterValue(0x6c2),
+                          method_argument, static_cast<u32>(result));
+            }
             return;
         }
         if (const auto action = Control::DecodeNativeGraphicsCacheAction(method, method_argument)) {

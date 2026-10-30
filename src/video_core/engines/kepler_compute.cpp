@@ -87,6 +87,10 @@ bool KeplerCompute::CallNativeMethod(u32 method, u32 value, bool last, std::stop
             const auto& self = static_cast<HostContext*>(context)->owner;
             return self.rasterizer && self.rasterizer->SynchronizeNativeWork();
         },
+        [](void* context, const Control::NativeCacheInvalidation& action) {
+            const auto& self = static_cast<HostContext*>(context)->owner;
+            return self.rasterizer && self.rasterizer->InvalidateNativeCaches(action);
+        },
     };
     return native_compute->CallMethod(method, value, last, host);
 }

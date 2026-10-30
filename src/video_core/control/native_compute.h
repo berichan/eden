@@ -5,6 +5,7 @@
 
 #include <array>
 #include <memory>
+#include "video_core/control/native_cache.h"
 #include "video_core/control/native_gpu_context.h"
 #include "video_core/control/native_inline_upload.h"
 #include "video_core/control/native_macro_processor.h"
@@ -18,6 +19,7 @@ public:
     struct Host {
         NativeGpuGraphicsContext::QmdBackend qmd;
         bool (*barrier)(void*){};
+        bool (*invalidate_caches)(void*, const NativeCacheInvalidation&){};
     };
     enum class Error {
         None,
@@ -26,7 +28,8 @@ public:
         MacroFailed,
         QmdFailed,
         Cancelled,
-        UploadFailed
+        UploadFailed,
+        CacheFailed
     };
 
     explicit NativeCompute(std::shared_ptr<const NativeGpuGraphicsContext> context);

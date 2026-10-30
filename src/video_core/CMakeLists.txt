@@ -38,6 +38,8 @@ add_library(video_core STATIC
     control/native_cache.h
     control/native_constant_buffer.cpp
     control/native_constant_buffer.h
+    control/native_report_semaphore.cpp
+    control/native_report_semaphore.h
     control/native_inline_upload.cpp
     control/native_inline_upload.h
     control/native_gpu_context.cpp

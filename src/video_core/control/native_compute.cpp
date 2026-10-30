@@ -14,6 +14,7 @@ bool IsStateMethod(u32 method) {
     // operations are handled separately instead of becoming silent register writes.
     switch (method) {
     case 0x7a: // SET_SM_SCG_CONTROL
+    case 0x7b: // SET_MME_SWITCH_STATE
     case 0x9c: // SET_SCG_CONTROL
     case 0xa8: // SET_SHADER_SHARED_MEMORY_WINDOW_A
     case 0xa9:
@@ -124,6 +125,31 @@ bool NativeCompute::WriteMethod(u32 method, u32 value, const Host& host) {
             return Fail(Error::UnsupportedMethod);
         }
         break;
+    case 0x7b: { // SET_MME_SWITCH_STATE
+        const u32 save = (value >> 4) & 0xff;
+        const u32 restore = (value >> 12) & 0xff;
+        if ((value & ~0xffff1U) || ((value & 1) && (save >= AmpereGraphicsState::MacroCount ||
+                                                    restore >= AmpereGraphicsState::MacroCount))) {
+            return Fail(Error::UnsupportedMethod);
+        }
+        // MME runs without mid-invocation preemption and its state remains host-owned.
+        // This configures future switch callbacks; it does not invoke either macro.
+        break;
+    }
+    case 0x4a2: { // INVALIDATE_TEXTURE_DATA_CACHE_NO_WFI, ALL lines
+        if (value != 0 || inline_upload.IsPending()) {
+            return Fail(Error::UnsupportedMethod);
+        }
+        NativeCacheInvalidation action;
+        action.texture_data = true;
+        if (!host.invalidate_caches || !host.invalidate_caches(host.qmd.context, action)) {
+            return Fail(Error::CacheFailed);
+        }
+        if (host.qmd.should_stop && host.qmd.should_stop(host.qmd.context)) {
+            return Fail(Error::Cancelled);
+        }
+        break;
+    }
     case 0x6c:   // LAUNCH_DMA
     case 0x6d: { // LOAD_INLINE_DATA
         struct UploadContext {
