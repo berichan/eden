@@ -2,11 +2,23 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <atomic>
+#include <fmt/format.h>
 #include "common/logging.h"
 #include "video_core/control/native_qmd.h"
 
 namespace Tegra::Control {
 namespace {
+
+bool AllowQmdDiagnostic() {
+    static std::atomic<u32> emitted{};
+    u32 count = emitted.load(std::memory_order_relaxed);
+    while (count < 16384) {
+        if (emitted.compare_exchange_weak(count, count + 1, std::memory_order_relaxed))
+            return true;
+    }
+    return false;
+}
 
 bool ValidDescriptor(const NativeQmdScheduler::Descriptor& descriptor) {
     return (descriptor[18] & 0xff) == 0x30 && !(descriptor[4] & 0x40000100) &&
@@ -30,6 +42,9 @@ NativeQmdScheduler::Result NativeQmdScheduler::Signal(GPUVAddr address, u32 argu
     }
     Result result;
     const auto fail = [&](Error error, GPUVAddr failed_address) {
+        if (AllowQmdDiagnostic())
+            LOG_DEBUG(HW_GPU, "Native QMD failure: scheduler={}, node={:#x}, error={}",
+                      fmt::ptr(this), failed_address, static_cast<u32>(error));
         result.error = error;
         result.address = failed_address;
         failure = result;
@@ -65,6 +80,12 @@ NativeQmdScheduler::Result NativeQmdScheduler::Signal(GPUVAddr address, u32 argu
             return fail(Error::DescriptorLimit, request.address);
         }
         auto& state = states[request.address];
+        if (AllowQmdDiagnostic())
+            LOG_DEBUG(HW_GPU,
+                      "Native QMD request: scheduler={}, node={:#x}, action={}, count={}, "
+                      "loaded={}, scheduled={}, issued={}, dependencies={}, deferred={}",
+                      fmt::ptr(this), request.address, request.action, request.count, state.loaded,
+                      state.scheduled, state.issued, state.dependencies, state.deferred);
         if (request.action == 1) {
             if (state.scheduled && !state.issued) {
                 return fail(Error::UnsupportedAction, request.address);
@@ -72,6 +93,11 @@ NativeQmdScheduler::Result NativeQmdScheduler::Signal(GPUVAddr address, u32 argu
             state.loaded = false;
             state.scheduled = false;
             state.issued = false;
+            if (AllowQmdDiagnostic())
+                LOG_DEBUG(HW_GPU,
+                          "Native QMD invalidated: scheduler={}, node={:#x}, dependencies={}, "
+                          "deferred={}",
+                          fmt::ptr(this), request.address, state.dependencies, state.deferred);
             continue;
         }
         if (request.action == 2 || request.action == 3) {
@@ -98,6 +124,18 @@ NativeQmdScheduler::Result NativeQmdScheduler::Signal(GPUVAddr address, u32 argu
                 state.deferred = 0;
                 state.loaded = true;
                 state.issued = false;
+                if (AllowQmdDiagnostic())
+                    LOG_DEBUG(
+                        HW_GPU,
+                        "Native QMD loaded: scheduler={}, node={:#x}, word4={:#x}, initial={}, "
+                        "dependencies={}, grid={}x{}x{}, program={:#x}, dependent={:#x}, "
+                        "dependent_enable={}, dependent_action={}",
+                        fmt::ptr(this), request.address, descriptor[4],
+                        (descriptor[4] >> 14) & 0xffff, state.dependencies, descriptor[12],
+                        descriptor[13] & 0xffff, descriptor[14] & 0xffff,
+                        (GPUVAddr{descriptor[49] & 0x1ffff} << 32) | descriptor[48],
+                        GPUVAddr{descriptor[15]} << 8, descriptor[16] & 1,
+                        (descriptor[16] >> 1) & 7);
             }
             state.scheduled = true;
         } else {
@@ -109,6 +147,12 @@ NativeQmdScheduler::Result NativeQmdScheduler::Signal(GPUVAddr address, u32 argu
             counter += delta;
         }
         if (!state.loaded || !state.scheduled || state.issued || state.dependencies > 0) {
+            if (AllowQmdDiagnostic())
+                LOG_DEBUG(HW_GPU,
+                          "Native QMD parked: scheduler={}, node={:#x}, loaded={}, scheduled={}, "
+                          "issued={}, dependencies={}, deferred={}",
+                          fmt::ptr(this), request.address, state.loaded, state.scheduled,
+                          state.issued, state.dependencies, state.deferred);
             continue;
         }
         if (state.dependencies < 0) {
@@ -134,6 +178,7 @@ NativeQmdScheduler::Result NativeQmdScheduler::Signal(GPUVAddr address, u32 argu
             }
         }
         std::array<Release, 3> releases;
+        std::array<u32, 3> release_words;
         size_t release_count{};
         for (u32 word : {24U, 28U, 52U}) {
             const u32 flags = current[word + 1];
@@ -148,6 +193,7 @@ NativeQmdScheduler::Result NativeQmdScheduler::Signal(GPUVAddr address, u32 argu
             if (!host.validate_release || !host.validate_release(host.context, release)) {
                 return fail(Error::InvalidRelease, request.address);
             }
+            release_words[release_count] = word;
             releases[release_count++] = release;
         }
         const auto& descriptor = state.descriptor;
@@ -170,6 +216,14 @@ NativeQmdScheduler::Result NativeQmdScheduler::Signal(GPUVAddr address, u32 argu
                 return fail(Error::ChainLimit, request.address);
             }
         }
+        if (AllowQmdDiagnostic())
+            LOG_DEBUG(HW_GPU,
+                      "Native QMD ready: scheduler={}, node={:#x}, grid={}x{}x{}, program={:#x}, "
+                      "dependent={:#x}, action={}, releases={}",
+                      fmt::ptr(this), request.address, descriptor[12], descriptor[13] & 0xffff,
+                      descriptor[14] & 0xffff,
+                      (GPUVAddr{descriptor[49] & 0x1ffff} << 32) | descriptor[48],
+                      GPUVAddr{descriptor[15]} << 8, dependent_action, release_count);
         if (descriptor[12] && (descriptor[13] & 0xffff) && (descriptor[14] & 0xffff)) {
             if (host.should_stop && host.should_stop(host.context)) {
                 return fail(Error::Cancelled, request.address);
@@ -186,9 +240,37 @@ NativeQmdScheduler::Result NativeQmdScheduler::Signal(GPUVAddr address, u32 argu
             if (!host.release || !host.release(host.context, release)) {
                 return fail(Error::ReleaseFailed, request.address);
             }
+            if (AllowQmdDiagnostic()) {
+                const u32 word = release_words[static_cast<size_t>(&release - releases.data())];
+                const auto& cached = state.descriptor;
+                const bool patched =
+                    cached[word] != current[word] || cached[word + 1] != current[word + 1] ||
+                    cached[word + 2] != current[word + 2] || cached[word + 3] != current[word + 3];
+                if (patched)
+                    LOG_DEBUG(HW_GPU,
+                              "Native QMD release issued: scheduler={}, node={:#x}, slot_word={}, "
+                              "address={:#x}, payload={:#x}, flags={:#x}, cached_address={:#x}, "
+                              "cached_payload={:#x}, cached_flags={:#x}",
+                              fmt::ptr(this), request.address, word, release.address,
+                              release.payload, release.flags,
+                              (GPUVAddr{cached[word + 1] & 0xff} << 32) | cached[word],
+                              (u64{cached[word + 3]} << 32) | cached[word + 2], cached[word + 1]);
+                else
+                    LOG_DEBUG(HW_GPU,
+                              "Native QMD release issued: scheduler={}, node={:#x}, slot_word={}, "
+                              "address={:#x}, payload={:#x}, flags={:#x}",
+                              fmt::ptr(this), request.address, word, release.address,
+                              release.payload, release.flags);
+            }
             ++result.releases;
         }
         state.issued = true;
+        if (AllowQmdDiagnostic())
+            LOG_DEBUG(HW_GPU,
+                      "Native QMD issued: scheduler={}, node={:#x}, dependencies={}, deferred={}, "
+                      "signal_dispatches={}, signal_releases={}",
+                      fmt::ptr(this), request.address, state.dependencies, state.deferred,
+                      result.dispatches, result.releases);
         if (dependent_action) {
             requests[request_count++] = {GPUVAddr{descriptor[15]} << 8, dependent_action, 1};
         }
