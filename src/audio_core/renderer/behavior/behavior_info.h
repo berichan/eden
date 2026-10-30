@@ -10,6 +10,7 @@
 #include <span>
 
 #include "audio_core/common/common.h"
+#include "common/common_funcs.h"
 #include "common/common_types.h"
 #include "core/hle/service/audio/errors.h"
 
@@ -400,6 +401,8 @@ public:
     u32 process_revision;
     /// User version
     u32 user_revision{};
+    /// Preserve the negotiated wire family as well as the numeric feature version.
+    u32 user_wire_revision{Common::MakeMagic('R', 'E', 'V', '0')};
     /// Behaviour flags
     Flags flags{};
     /// Errors generated and reported during Update

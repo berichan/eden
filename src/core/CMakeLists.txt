@@ -533,6 +533,8 @@ add_library(core STATIC
     hle/service/audio/audio_renderer.cpp
     hle/service/audio/audio_renderer.h
     hle/service/audio/audio.cpp
+    hle/service/audio/audio_user_session.cpp
+    hle/service/audio/audio_user_session.h
     hle/service/audio/audio.h
     hle/service/audio/errors.h
     hle/service/audio/final_output_recorder_manager_for_applet.cpp

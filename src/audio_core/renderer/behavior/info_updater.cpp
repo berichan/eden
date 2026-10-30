@@ -20,16 +20,26 @@
 
 namespace AudioCore::Renderer {
 
+bool InfoUpdater::HasMinimumBufferSizes(std::span<const u8> input, std::span<u8> output) {
+    return input.size() >= sizeof(UpdateDataHeader) + sizeof(BehaviorInfo::InParameter) &&
+           output.size() >= sizeof(UpdateDataHeader) + sizeof(BehaviorInfo::OutStatus);
+}
+
 InfoUpdater::InfoUpdater(std::span<const u8> input_, std::span<u8> output_,
                          Kernel::KProcess* process_handle_, BehaviorInfo& behaviour_)
-    : input{input_.data() + sizeof(UpdateDataHeader)},
-      input_origin{input_}, output{output_.data() + sizeof(UpdateDataHeader)},
-      output_origin{output_}, in_header{reinterpret_cast<const UpdateDataHeader*>(
-                                  input_origin.data())},
+    : input{input_.size() >= sizeof(UpdateDataHeader) ? input_.data() + sizeof(UpdateDataHeader)
+                                                      : nullptr},
+      input_origin{input_},
+      output{output_.size() >= sizeof(UpdateDataHeader) ? output_.data() + sizeof(UpdateDataHeader)
+                                                        : nullptr},
+      output_origin{output_},
+      in_header{reinterpret_cast<const UpdateDataHeader*>(input_origin.data())},
       out_header{reinterpret_cast<UpdateDataHeader*>(output_origin.data())},
       expected_input_size{input_.size()}, expected_output_size{output_.size()},
       process_handle{process_handle_}, behaviour{behaviour_} {
-    std::construct_at<UpdateDataHeader>(out_header, behaviour.GetProcessRevision());
+    if (HasMinimumBufferSizes(input_, output_)) {
+        std::construct_at<UpdateDataHeader>(out_header, behaviour.GetProcessRevision());
+    }
 }
 
 Result InfoUpdater::UpdateVoiceChannelResources(VoiceContext& voice_context) {
@@ -582,22 +592,24 @@ Result InfoUpdater::UpdatePerformanceBuffer(std::span<u8> performance_output,
 }
 
 Result InfoUpdater::UpdateBehaviorInfo(BehaviorInfo& behaviour_) {
+    if (!HasMinimumBufferSizes(input_origin, output_origin) ||
+        in_header->behaviour_size != sizeof(BehaviorInfo::InParameter)) {
+        return Service::Audio::ResultInvalidUpdateInfo;
+    }
     const auto in_params{reinterpret_cast<const BehaviorInfo::InParameter*>(input)};
 
-    if (!CheckValidRevision(in_params->revision)) {
+    if (!CheckValidWireRevision(in_params->revision)) {
         return Service::Audio::ResultInvalidUpdateInfo;
     }
 
     if (in_params->revision != behaviour_.GetUserRevision()) {
+        LOG_ERROR(Service_Audio, "Audio behavior revision mismatch: input={:#x}, expected={:#x}",
+                  in_params->revision, behaviour_.GetUserRevision());
         return Service::Audio::ResultInvalidUpdateInfo;
     }
 
     behaviour_.ClearError();
     behaviour_.UpdateFlags(in_params->flags);
-
-    if (in_header->behaviour_size != sizeof(BehaviorInfo::InParameter)) {
-        return Service::Audio::ResultInvalidUpdateInfo;
-    }
 
     input += sizeof(BehaviorInfo::InParameter);
     return ResultSuccess;

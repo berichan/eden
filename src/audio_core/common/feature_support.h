@@ -115,4 +115,12 @@ constexpr bool CheckValidRevision(u32 user_revision) {
     return GetRevisionNum(user_revision) <= CurrentRevision;
 };
 
+constexpr bool CheckValidWireRevision(u32 revision) {
+    constexpr u32 TagMask = 0x00ffffff;
+    const u32 tag = revision & TagMask;
+    return (tag == (Common::MakeMagic('R', 'E', 'V', '0') & TagMask) ||
+            tag == (Common::MakeMagic('R', 'E', 'v', '0') & TagMask)) &&
+           (revision >> 24) > '0' && (revision >> 24) <= '0' + CurrentRevision;
+}
+
 } // namespace AudioCore

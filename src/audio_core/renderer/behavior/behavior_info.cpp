@@ -16,8 +16,7 @@ u32 BehaviorInfo::GetProcessRevisionNum() const {
 }
 
 u32 BehaviorInfo::GetProcessRevision() const {
-    return Common::MakeMagic('R', 'E', 'V',
-                             static_cast<char>(static_cast<u8>('0') + process_revision));
+    return (user_wire_revision & 0xffffff) | ((u32{'0'} + process_revision) << 24);
 }
 
 u32 BehaviorInfo::GetUserRevisionNum() const {
@@ -25,12 +24,15 @@ u32 BehaviorInfo::GetUserRevisionNum() const {
 }
 
 u32 BehaviorInfo::GetUserRevision() const {
-    return Common::MakeMagic('R', 'E', 'V',
-                             static_cast<char>(static_cast<u8>('0') + user_revision));
+    return user_wire_revision;
 }
 
 void BehaviorInfo::SetUserLibRevision(const u32 user_revision_) {
     user_revision = GetRevisionNum(user_revision_);
+    user_wire_revision =
+        CheckValidWireRevision(user_revision_)
+            ? user_revision_
+            : Common::MakeMagic('R', 'E', 'V', static_cast<char>('0' + user_revision));
 }
 
 void BehaviorInfo::ClearError() {

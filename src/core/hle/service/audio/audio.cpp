@@ -10,6 +10,7 @@
 #include "core/hle/service/audio/audio_in_manager.h"
 #include "core/hle/service/audio/audio_out_manager.h"
 #include "core/hle/service/audio/audio_renderer_manager.h"
+#include "core/hle/service/audio/audio_user_session.h"
 #include "core/hle/service/audio/final_output_recorder_manager.h"
 #include "core/hle/service/audio/final_output_recorder_manager_for_applet.h"
 #include "core/hle/service/audio/hardware_opus_decoder_manager.h"
@@ -193,18 +194,23 @@ void LoopProcess(Core::System& system) {
     server_manager->RegisterNamedService("audrec:d", std::make_shared<IFinalOutputRecorderManagerForDebugger>(system), 30);
     server_manager->RegisterNamedService("audren:d", std::make_shared<IAudioRendererManagerForDebugger>(system), 30);
 
-    server_manager->RegisterNamedService("audin:u", std::make_shared<IAudioInManager>(system), 30);
+    const auto input = std::make_shared<IAudioInManager>(system);
+    server_manager->RegisterNamedService("audin:u", input, 30);
     server_manager->RegisterNamedService("audin:a", std::make_shared<IAudioInManagerForApplet>(system), 30);
-    server_manager->RegisterNamedService("audout:u", std::make_shared<IAudioOutManager>(system), 30);
+    const auto output = std::make_shared<IAudioOutManager>(system);
+    server_manager->RegisterNamedService("audout:u", output, 30);
     server_manager->RegisterNamedService("audout:a", std::make_shared<IAudioOutManagerForApplet>(system), 30);
     server_manager->RegisterNamedService("auddev", std::make_shared<IAudioSnoopManager>(system), 30);
     // Depends on audout:u and audin:u on ctor!
     server_manager->RegisterNamedService("audctl", std::make_shared<IAudioController>(system), 30);
     server_manager->RegisterNamedService("audrec:a", std::make_shared<IFinalOutputRecorderManagerForApplet>(system), 30);
     server_manager->RegisterNamedService("audrec:u", std::make_shared<IFinalOutputRecorderManager>(system), 30);
-    server_manager->RegisterNamedService("audren:u", std::make_shared<IAudioRendererManager>(system), 30);
+    const auto renderer = std::make_shared<IAudioRendererManager>(system);
+    server_manager->RegisterNamedService("audren:u", renderer, 30);
     server_manager->RegisterNamedService("audren:a", std::make_shared<IAudioRendererManagerForApplet>(system), 30);
     server_manager->RegisterNamedService("hwopus", std::make_shared<IHardwareOpusDecoderManager>(system), 25);
+    server_manager->RegisterNamedService(
+        "aud:u", std::make_shared<IAudioUserSession>(system, input, output, renderer), 30);
     ServerManager::RunServer(std::move(server_manager));
 }
 

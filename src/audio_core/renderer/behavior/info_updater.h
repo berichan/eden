@@ -46,6 +46,7 @@ class InfoUpdater {
     static_assert(sizeof(UpdateDataHeader) == 0x40, "UpdateDataHeader has the wrong size!");
 
 public:
+    static bool HasMinimumBufferSizes(std::span<const u8> input, std::span<u8> output);
     explicit InfoUpdater(std::span<const u8> input, std::span<u8> output,
                          Kernel::KProcess* process_handle, BehaviorInfo& behaviour);
 

@@ -44,6 +44,12 @@ Result IAudioRendererManager::OpenAudioRenderer(
     InCopyHandle<Kernel::KProcess> process_handle, ClientAppletResourceUserId aruid) {
     LOG_DEBUG(Service_Audio, "called");
 
+    if (!AudioCore::CheckValidWireRevision(parameter.revision)) {
+        R_THROW(Audio::ResultInvalidRevision);
+    }
+    if (!tmem_handle || !process_handle) {
+        R_THROW(Audio::ResultInvalidHandle);
+    }
     if (impl->GetSessionCount() + 1 > AudioCore::MaxRendererSessions) {
         LOG_ERROR(Service_Audio, "Too many AudioRenderer sessions open!");
         R_THROW(Audio::ResultOutOfSessions);
@@ -53,11 +59,6 @@ Result IAudioRendererManager::OpenAudioRenderer(
     if (session_id == -1) {
         LOG_ERROR(Service_Audio, "Tried to open a session that's already in use!");
         R_THROW(Audio::ResultOutOfSessions);
-    }
-
-    if (!process_handle) {
-        LOG_ERROR(Service_Audio, "Invalid handles");
-        R_THROW(Audio::ResultInvalidHandle);
     }
 
     LOG_DEBUG(Service_Audio, "Opened new AudioRenderer session {} sessions open {}", session_id,

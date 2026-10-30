@@ -107,7 +107,7 @@ Result System::Initialize(const AudioRendererParameterInternal& params,
                           Kernel::KTransferMemory* transfer_memory, u64 transfer_memory_size,
                           Kernel::KProcess* process_handle_, u64 applet_resource_user_id_,
                           s32 session_id_) {
-    if (!CheckValidRevision(params.revision)) {
+    if (!CheckValidWireRevision(params.revision)) {
         return Service::Audio::ResultInvalidRevision;
     }
 
@@ -449,6 +449,9 @@ void System::Stop() {
 }
 
 Result System::Update(std::span<const u8> input, std::span<u8> performance, std::span<u8> output) {
+    if (!InfoUpdater::HasMinimumBufferSizes(input, output)) {
+        return Service::Audio::ResultInvalidUpdateInfo;
+    }
     std::scoped_lock l{lock};
 
     const auto start_time{core.CoreTiming().GetGlobalTimeNs().count()};
