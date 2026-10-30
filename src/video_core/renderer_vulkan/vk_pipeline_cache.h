@@ -116,6 +116,10 @@ public:
 
     [[nodiscard]] ComputePipeline* CurrentComputePipeline();
 
+    GraphicsPipeline* NativeGraphicsPipeline(
+        const GraphicsPipelineCacheKey& key,
+        std::span<VideoCommon::GraphicsEnvironment* const> environments);
+
     void LoadDiskResources(u64 title_id, std::stop_token stop_loading,
                            const VideoCore::DiskResourceLoadCallback& callback);
 
@@ -129,7 +133,7 @@ private:
     std::unique_ptr<GraphicsPipeline> CreateGraphicsPipeline(
         ShaderPools& pools, const GraphicsPipelineCacheKey& key,
         std::span<Shader::Environment* const> envs, PipelineStatistics* statistics,
-        bool build_in_parallel);
+        bool build_in_parallel, bool native = false);
 
     std::unique_ptr<ComputePipeline> CreateComputePipeline(const ComputePipelineCacheKey& key,
                                                            const ShaderInfo* shader);
@@ -165,6 +169,8 @@ private:
 
     ::Common::unordered_map<ComputePipelineCacheKey, std::unique_ptr<ComputePipeline>> compute_cache;
     ::Common::unordered_map<GraphicsPipelineCacheKey, std::unique_ptr<GraphicsPipeline>> graphics_cache;
+    ::Common::unordered_map<GraphicsPipelineCacheKey, std::unique_ptr<GraphicsPipeline>>
+        native_graphics_cache;
 
     ShaderPools main_pools;
 

@@ -11,6 +11,7 @@
 #include "video_core/gpu.h"
 #include "video_core/memory_manager.h"
 #include "video_core/renderer_null/null_rasterizer.h"
+#include "video_core/renderer_vulkan/fixed_pipeline_state.h"
 
 namespace {
 using Draw = Tegra::Control::NativeIndexedDraw;
@@ -37,6 +38,67 @@ struct Host {
     }
 };
 } // namespace
+
+TEST_CASE("Native clipping keeps input depth range independent of pixel clamps",
+          "[ipc][video_core]") {
+    using Clip = Tegra::Control::NativeDepthClip;
+    REQUIRE(Clip::Decode(0x181d, 0, 0, 0x3f800000)->negative_one_to_one);
+    REQUIRE_FALSE(Clip::Decode(0x181d, 1, 0, 0x3f800000)->negative_one_to_one);
+    REQUIRE(Clip::Decode(0x1c9d, 0, 0x80000000, 0x3f800000));
+    for (u32 control : {0x181cU, 0x1815U, 0x180dU, 0x181fU, 0x1181dU, 0x8181dU, 0x101dU})
+        REQUIRE_FALSE(Clip::Decode(control, 0, 0, 0x3f800000));
+    REQUIRE_FALSE(Clip::Decode(0x181d, 2, 0, 0x3f800000));
+    REQUIRE_FALSE(Clip::Decode(0x181d, 0, 1, 0x3f800000));
+    REQUIRE_FALSE(Clip::Decode(0x181d, 0, 0, 0x3f7fffff));
+}
+
+TEST_CASE("Native blend keys validate factors, separate alpha and color masks",
+          "[ipc][video_core]") {
+    using State = Vulkan::FixedPipelineState;
+    State::NativeBlendState input{1, 1, 0x8006, 0x4302, 0x4303, 0x8006, 0x4001, 0x4303, 0x1111};
+    const auto blend = State::DecodeNativeBlend(input);
+    REQUIRE(blend);
+    REQUIRE(blend->enable.Value() == 1);
+    REQUIRE(blend->Mask() == std::array<bool, 4>{true, true, true, true});
+    auto equivalent = input;
+    equivalent.color_op = equivalent.alpha_op = 1;
+    equivalent.color_source = 5;
+    equivalent.color_dest = equivalent.alpha_dest = 6;
+    equivalent.alpha_source = 2;
+    REQUIRE(State::DecodeNativeBlend(equivalent)->raw == blend->raw);
+    input.separate_alpha = 0;
+    input.alpha_op = input.alpha_source = input.alpha_dest = 0xffffffff;
+    const auto shared = State::DecodeNativeBlend(input);
+    REQUIRE(shared);
+    REQUIRE(shared->equation_a.Value() == shared->equation_rgb.Value());
+    REQUIRE(shared->factor_source_a.Value() == shared->factor_source_rgb.Value());
+    for (u32 invalid : {0U, 12U, 13U, 16U, 0xc900U, 0xffffffffU}) {
+        auto bad = input;
+        bad.color_source = invalid;
+        REQUIRE_FALSE(State::DecodeNativeBlend(bad));
+    }
+    for (u32 invalid : {0U, 6U, 0x8009U, 0xffffffffU}) {
+        auto bad = input;
+        bad.color_op = invalid;
+        REQUIRE_FALSE(State::DecodeNativeBlend(bad));
+    }
+    for (u32 mask = 0; mask < 16; ++mask) {
+        auto masked = input;
+        masked.enabled = 0;
+        masked.write_mask =
+            ((mask & 1) << 0) | ((mask & 2) << 3) | ((mask & 4) << 6) | ((mask & 8) << 9);
+        const auto result = State::DecodeNativeBlend(masked);
+        REQUIRE(result);
+        REQUIRE(result->enable.Value() == 0);
+        for (u32 channel = 0; channel < 4; ++channel)
+            REQUIRE(result->Mask()[channel] == bool(mask & (1U << channel)));
+    }
+    input.enabled = 2;
+    REQUIRE_FALSE(State::DecodeNativeBlend(input));
+    input.enabled = 0;
+    input.write_mask = 2;
+    REQUIRE_FALSE(State::DecodeNativeBlend(input));
+}
 
 TEST_CASE("Native indexed spans use byte ceilings and the requested 40-bit range",
           "[ipc][video_core]") {
@@ -187,6 +249,25 @@ TEST_CASE("Native engine never treats a null indexed backend as completed work",
     REQUIRE(engine.HasPendingNativeDraw());
 }
 
+TEST_CASE("Native pixel barriers require a real drain and reject system-memory variants",
+          "[ipc][video_core]") {
+    Core::System system;
+    Core::DeviceMemory memory;
+    Tegra::MaxwellDeviceMemoryManager backing{memory};
+    Tegra::GPU gpu{system, false, false};
+    Null::RasterizerNull rasterizer{gpu};
+    Tegra::MemoryManager space{system, backing, 32, 1ULL << 32, 16, 12};
+    space.BindRasterizer(&rasterizer);
+    for (u32 value : {0U, 1U, 2U, 3U, 4U, 0xffffffffU}) {
+        Tegra::Engines::Maxwell3D engine{space};
+        engine.BindRasterizer(&rasterizer);
+        engine.SetNativeMacroState(std::make_shared<Tegra::Control::AmpereGraphicsState>());
+        REQUIRE_FALSE(engine.CallNativeMethod(system, 0x378, value, true, {}));
+        REQUIRE(engine.HasNativeMacroFailure());
+        REQUIRE(engine.GetRegisterValue(0x378) == 0);
+    }
+}
+
 TEST_CASE("Native suppressed draws close normally but block intervening state and reports",
           "[ipc][video_core]") {
     Core::System system;
@@ -214,4 +295,77 @@ TEST_CASE("Native suppressed draws close normally but block intervening state an
     REQUIRE(unfinished.CallNativeMethod(system, 0x586, 4, true, {}));
     REQUIRE_FALSE(unfinished.CallNativeMethod(system, 0x6c3, 0xf006, true, {}));
     REQUIRE(unfinished.HasPendingNativeDraw());
+}
+
+TEST_CASE("Native index bounds preserve unsigned little-endian values", "[ipc][video_core]") {
+    using Bounds = Tegra::Control::NativeIndexBounds;
+    const std::array<u8, 3> bytes{255, 2, 7};
+    const auto eight = Bounds::Decode(Request::Format::U8, bytes);
+    REQUIRE(eight);
+    REQUIRE(eight->minimum == 2);
+    REQUIRE(eight->maximum == 255);
+    const std::array<u8, 6> shorts{0xff, 0xff, 0, 0x80, 3, 0};
+    const auto sixteen = Bounds::Decode(Request::Format::U16, shorts);
+    REQUIRE(sixteen);
+    REQUIRE(sixteen->minimum == 3);
+    REQUIRE(sixteen->maximum == 65535);
+    const std::array<u8, 8> words{0xff, 0xff, 0xff, 0xff, 4, 0, 0, 0x80};
+    const auto thirty_two = Bounds::Decode(Request::Format::U32, words);
+    REQUIRE(thirty_two);
+    REQUIRE(thirty_two->minimum == 0x80000004);
+    REQUIRE(thirty_two->maximum == 0xffffffff);
+    REQUIRE_FALSE(Bounds::Decode(Request::Format::U16, bytes));
+    REQUIRE_FALSE(Bounds::Decode(Request::Format::U32, shorts));
+    REQUIRE_FALSE(Bounds::Decode(Request::Format::U8, {}));
+    REQUIRE_FALSE(Bounds::Decode(static_cast<Request::Format>(3), words));
+    std::stop_source cancelled;
+    cancelled.request_stop();
+    REQUIRE_FALSE(Bounds::Decode(Request::Format::U8, bytes, cancelled.get_token()));
+}
+
+TEST_CASE("Native vertex fetches use byte counts and actual maximum indices", "[ipc][video_core]") {
+    using Fetch = Tegra::Control::NativeVertexFetch;
+    Fetch::Registers regs{0x38600000, 0x1010, 0x21, 0x1000, 0, 48, 0};
+    const auto fetch = Fetch::Decode(regs, 2);
+    REQUIRE(fetch);
+    REQUIRE(fetch->size_bytes == 40);
+    REQUIRE(fetch->address == 0x2100001000ULL);
+    REQUIRE(fetch->stream == 0);
+    REQUIRE(fetch->offset == 0);
+    REQUIRE(fetch->stride == 16);
+    REQUIRE(fetch->component_format == 3);
+    REQUIRE_FALSE(Fetch::Decode(regs, 3));
+    REQUIRE_FALSE(Fetch::Decode(regs, 0xffffffff));
+    regs.size_lower = 40;
+    REQUIRE(Fetch::Decode(regs, 2));
+    regs.size_lower = 39;
+    REQUIRE_FALSE(Fetch::Decode(regs, 2));
+    regs.control = 0x1000;
+    regs.size_lower = 8;
+    REQUIRE(Fetch::Decode(regs, 0xffffffff)->size_bytes == 8);
+    regs.attribute |= (6U << 7) | 31;
+    regs.size_lower = 14;
+    REQUIRE(Fetch::Decode(regs, 0xffffffff)->stream == 31);
+    REQUIRE(Fetch::Decode(regs, 0xffffffff)->offset == 6);
+    for (u32 invalid : {0x20U, 0x40U, 0x40000000U, 0x80000000U}) {
+        auto bad = regs;
+        bad.attribute |= invalid;
+        REQUIRE_FALSE(Fetch::Decode(bad, 0));
+    }
+    for (u32 invalid : {0U, 0x2000U, 0x3000U}) {
+        auto bad = regs;
+        bad.control = invalid;
+        REQUIRE_FALSE(Fetch::Decode(bad, 0));
+    }
+    regs.instanced = 1;
+    REQUIRE_FALSE(Fetch::Decode(regs, 0));
+    regs.instanced = 0;
+    regs.address_upper = 0xff;
+    regs.address_lower = 0xfffffff3;
+    REQUIRE_FALSE(Fetch::Decode(regs, 0));
+    for (const auto [format, width] : std::array<std::pair<u32, u32>, 8>{
+             {{1, 16}, {2, 12}, {3, 8}, {4, 8}, {5, 6}, {15, 4}, {18, 4}, {27, 2}}}) {
+        regs = {0x38000000U | (format << 21), 0x1000, 0, 0, 0, width, 0};
+        REQUIRE(Fetch::Decode(regs, 0)->size_bytes == width);
+    }
 }

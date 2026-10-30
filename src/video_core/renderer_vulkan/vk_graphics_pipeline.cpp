@@ -561,8 +561,46 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     return ConfigureDraw(rescaling, render_area);
 }
 
+bool GraphicsPipeline::ConfigureNative(std::span<const NativeUniformBuffer> buffers,
+                                       const Framebuffer* framebuffer,
+                                       std::array<float, 2> extent) {
+    if (!IsBound() || !framebuffer || buffers.size() != num_descriptor_entries)
+        return false;
+    size_t current{};
+    RenderAreaPushConstant render_area;
+    render_area.words = {extent[0], extent[1], 0.f, 0.f};
+    for (u32 stage = 0; stage < NUM_STAGES; ++stage) {
+        const auto& info = stage_infos[stage];
+        render_area.uses_render_area |= info.uses_render_area;
+        for (const auto& descriptor : info.constant_buffer_descriptors) {
+            if (descriptor.count != 1 ||
+                descriptor.index >= info.constant_buffer_used_sizes.size() ||
+                current >= buffers.size())
+                return false;
+            const auto& buffer = buffers[current++];
+            if (buffer.stage != stage || buffer.bank != descriptor.index || buffer.bytes.empty() ||
+                buffer.bytes.size() >
+                    device.GetPhysical().GetProperties().limits.maxUniformBufferRange ||
+                buffer.bytes.size() < info.constant_buffer_used_sizes[descriptor.index])
+                return false;
+        }
+    }
+    if (current != buffers.size())
+        return false;
+    guest_descriptor_queue.Acquire(scheduler, num_descriptor_entries, uses_descriptor_buffer);
+    for (const auto& buffer : buffers) {
+        const auto destination = buffer_cache.runtime.BindMappedUniformBuffer(
+            buffer.stage, buffer.bank, static_cast<u32>(buffer.bytes.size()));
+        if (destination.size() < buffer.bytes.size())
+            return false;
+        std::memcpy(destination.data(), buffer.bytes.data(), buffer.bytes.size());
+    }
+    return ConfigureDraw(RescalingPushConstant{}, render_area, framebuffer, true);
+}
+
 bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
-                                     const RenderAreaPushConstant& render_area) {
+                                     const RenderAreaPushConstant& render_area,
+                                     const Framebuffer* framebuffer, bool native) {
     const void* const descriptor_data{guest_descriptor_queue.UpdateData()};
 
     VkDeviceSize descriptor_buffer_offset{};
@@ -595,7 +633,7 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
         }
     }
 
-    scheduler.RequestRenderpass(texture_cache.GetFramebuffer());
+    scheduler.RequestRenderpass(framebuffer ? framebuffer : texture_cache.GetFramebuffer());
     if (!is_built.load(std::memory_order::relaxed)) {
         // Wait for the pipeline to be built
         scheduler.Record([this](vk::CommandBuffer) {
@@ -603,7 +641,7 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
             build_condvar.wait(lock, [this] { return is_built.load(std::memory_order::relaxed); });
         });
     }
-    const bool is_rescaling{texture_cache.IsRescaling()};
+    const bool is_rescaling{!native && texture_cache.IsRescaling()};
     const bool update_rescaling{scheduler.UpdateRescaling(is_rescaling)};
     const bool bind_pipeline{scheduler.UpdateGraphicsPipeline(this)};
     const bool bind_descriptor_buffer{

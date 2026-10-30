@@ -812,7 +812,7 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) const
 std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     ShaderPools& pools, const GraphicsPipelineCacheKey& key,
     std::span<Shader::Environment* const> envs, PipelineStatistics* statistics,
-    bool build_in_parallel) try {
+    bool build_in_parallel, bool native) try {
     auto hash = key.Hash();
     LOG_DEBUG(Render_Vulkan, "{:#016x}", hash);
     size_t env_index{0};
@@ -838,7 +838,8 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         Shader::Environment& env{*envs[env_index]};
         ++env_index;
 
-        const u32 cfg_offset{static_cast<u32>(env.StartAddress() + sizeof(Shader::ProgramHeader))};
+        const u32 cfg_offset{
+            static_cast<u32>(env.StartAddress() + (native ? 0 : sizeof(Shader::ProgramHeader)))};
         Shader::Maxwell::Flow::CFG cfg(env, pools.flow_block, cfg_offset, index == 0);
         if (!uses_vertex_a || index != 1) {
             // Normal path
@@ -850,6 +851,31 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             programs[index] = MergeDualVertexPrograms(program_va, program_vb, env);
         }
 
+        if (native) {
+            const auto& info = programs[index].info;
+            if ((index != 1 && index != 5) || info.uses_global_memory ||
+                !info.storage_buffers_descriptors.empty() ||
+                !info.texture_buffer_descriptors.empty() ||
+                !info.image_buffer_descriptors.empty() || !info.texture_descriptors.empty() ||
+                !info.image_descriptors.empty() || info.requires_layer_emulation ||
+                info.loads_indexed_attributes || info.stores_indexed_attributes ||
+                info.stores_frag_depth || info.stores_sample_mask || info.used_clip_distances)
+                throw Shader::RuntimeError("Unsupported native graphics shader resources");
+            for (u32 attribute = 0; attribute < 32; ++attribute)
+                if (index == 1 && info.loads.Generic(attribute) &&
+                    !key.state.attributes[attribute].enabled)
+                    throw Shader::RuntimeError("Native shader reads undeclared vertex input");
+            for (u32 target = 1; target < info.stores_frag_color.size(); ++target)
+                if (info.stores_frag_color[target])
+                    throw Shader::RuntimeError("Unsupported native graphics color output");
+            for (u32 attribute = 0; attribute < info.loads.mask.size(); ++attribute) {
+                const bool generic = attribute >= 32 && attribute < 160;
+                const bool position = attribute >= 28 && attribute <= 31;
+                if ((info.loads.mask[attribute] && !generic && !(index == 5 && position)) ||
+                    (info.stores.mask[attribute] && !generic && !(index == 1 && position)))
+                    throw Shader::RuntimeError("Unsupported native graphics system attribute");
+            }
+        }
         if (device.GetDriverID() != VK_DRIVER_ID_NVIDIA_PROPRIETARY && Shader::Optimization::HasBrokenPattern(programs[index])) {
             LOG_WARNING(Render_Vulkan, "0x{:016x}: Skipping shader with known issues", key.unique_hashes[index]);
             return nullptr;
@@ -918,6 +944,10 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         render_pass_cache, key, std::move(modules), infos);
 
 } catch (const Shader::Exception& exception) {
+    if (native) {
+        LOG_ERROR(Render_Vulkan, "Native graphics pipeline rejected: {}", exception.what());
+        return nullptr;
+    }
     auto hash = key.Hash();
     size_t env_index{0};
     for (size_t index = 0; index < Maxwell::MaxShaderProgram; ++index) {
@@ -933,6 +963,27 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     }
     LOG_ERROR(Render_Vulkan, "{}", exception.what());
     return nullptr;
+}
+
+GraphicsPipeline* PipelineCache::NativeGraphicsPipeline(
+    const GraphicsPipelineCacheKey& key,
+    std::span<VideoCommon::GraphicsEnvironment* const> environments) {
+    if (environments.size() != 2 || !environments[0]->SourceSizeBytes() ||
+        !environments[1]->SourceSizeBytes() || key.unique_hashes[0] || key.unique_hashes[2] ||
+        key.unique_hashes[3] || key.unique_hashes[4] ||
+        key.unique_hashes[1] != environments[0]->CalculateHash() ||
+        key.unique_hashes[5] != environments[1]->CalculateHash())
+        return nullptr;
+    if (const auto found = native_graphics_cache.find(key); found != native_graphics_cache.end())
+        return found->second->IsBound() ? found->second.get() : nullptr;
+    main_pools.ReleaseContents();
+    const std::array<Shader::Environment*, 2> envs{environments[0], environments[1]};
+    auto pipeline = CreateGraphicsPipeline(main_pools, key, envs, nullptr, false, true);
+    if (!pipeline || !pipeline->IsBound())
+        return nullptr;
+    auto* result = pipeline.get();
+    native_graphics_cache.emplace(key, std::move(pipeline));
+    return result;
 }
 
 std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline() {

@@ -4,6 +4,8 @@
 #pragma once
 
 #include <optional>
+#include <span>
+#include <stop_token>
 #include "common/common_types.h"
 
 namespace Tegra::Control {
@@ -14,6 +16,34 @@ struct NativeIndexedDrawRequest {
     u64 size_bytes;
     Format format;
     u32 count;
+};
+
+struct NativeIndexBounds {
+    u32 minimum, maximum;
+    static std::optional<NativeIndexBounds> Decode(NativeIndexedDrawRequest::Format format,
+                                                   std::span<const u8> bytes,
+                                                   std::stop_token stop = {});
+};
+
+struct NativeVertexFetch {
+    struct Registers {
+        u32 attribute;
+        u32 control, address_upper, address_lower, size_upper, size_lower, instanced;
+    };
+    GPUVAddr address;
+    u64 size_bytes;
+    u32 stream, offset, stride, component_format;
+    // Initially active, noninstanced float attributes. The returned prefix is a
+    // conservative upload range that preserves the original vertex indices.
+    static std::optional<NativeVertexFetch> Decode(const Registers& regs, u32 maximum_index);
+};
+
+struct NativeDepthClip {
+    bool negative_one_to_one;
+    // XYZ primitive clipping, tight Z guardband and zero/one pixel clamps.
+    // Input NDC range is an independent register.
+    static std::optional<NativeDepthClip> Decode(u32 control, u32 input_range, u32 viewport_min_z,
+                                                 u32 viewport_max_z);
 };
 
 class NativeIndexedDraw {

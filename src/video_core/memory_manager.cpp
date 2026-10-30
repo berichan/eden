@@ -710,6 +710,10 @@ bool MemoryManager::MappingLease::ReadBlockChecked(GPUVAddr address, std::span<u
     return true;
 }
 
+bool MemoryManager::MappingLease::Protects(const MemoryManager& owner) const {
+    return lock.owns_lock() && manager == &owner;
+}
+
 u64 MemoryManager::MappingGeneration() const {
     return mapping_generation.load(std::memory_order_acquire);
 }

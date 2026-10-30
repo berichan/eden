@@ -120,6 +120,9 @@ public:
     struct NativeProgram {
         GPUVAddr header_address;
         std::stop_token stop;
+        // Optional caller-owned lease, which must outlive this environment and
+        // synchronous compilation. It also covers late constant-buffer reads.
+        const Tegra::MemoryManager::MappingLease* mapping{};
     };
     explicit GraphicsEnvironment() = default;
     explicit GraphicsEnvironment(Tegra::Engines::Maxwell3D& maxwell3d_,

@@ -138,6 +138,7 @@ public:
         size_t ContiguousPrefix(GPUVAddr address, size_t max_size, bool write,
                                 std::stop_token stop_token = {}) const;
         bool ReadBlockChecked(GPUVAddr address, std::span<u8> output) const;
+        bool Protects(const MemoryManager& owner) const;
 
     private:
         friend class MemoryManager;

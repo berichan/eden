@@ -239,6 +239,34 @@ void LogNativeDrawState(Maxwell3D& engine, MemoryManager& memory, u32 begin,
               engine.GetRegisterValue(0x55d), engine.GetRegisterValue(0x55e),
               engine.GetRegisterValue(0x55f), engine.GetRegisterValue(0x557),
               engine.GetRegisterValue(0x558), engine.GetRegisterValue(0x559));
+    LOG_DEBUG(HW_GPU,
+              "Native raster state: enable={:#x}, polygon={:#x}/{:#x}, cull={:#x}/{:#x}/{:#x}, "
+              "window={:#x}, pixel_center={:#x}, z_range={:#x}, clip={:#x}, viewport_enable={:#x}, "
+              "surface={:#x}/{:#x}",
+              engine.GetRegisterValue(0xdf), engine.GetRegisterValue(0x36b),
+              engine.GetRegisterValue(0x36c), engine.GetRegisterValue(0x646),
+              engine.GetRegisterValue(0x647), engine.GetRegisterValue(0x648),
+              engine.GetRegisterValue(0x4eb), engine.GetRegisterValue(0x649),
+              engine.GetRegisterValue(0x35f), engine.GetRegisterValue(0x64f),
+              engine.GetRegisterValue(0x64b), engine.GetRegisterValue(0x3fd),
+              engine.GetRegisterValue(0x3fe));
+    LOG_DEBUG(HW_GPU,
+              "Native viewport transform: scale={:#x}/{:#x}/{:#x}, translate={:#x}/{:#x}/{:#x}, "
+              "swizzle={:#x}, clip={:#x}/{:#x}, depth={:#x}/{:#x}",
+              engine.GetRegisterValue(0x280), engine.GetRegisterValue(0x281),
+              engine.GetRegisterValue(0x282), engine.GetRegisterValue(0x283),
+              engine.GetRegisterValue(0x284), engine.GetRegisterValue(0x285),
+              engine.GetRegisterValue(0x286), engine.GetRegisterValue(0x300),
+              engine.GetRegisterValue(0x301), engine.GetRegisterValue(0x302),
+              engine.GetRegisterValue(0x303));
+    LOG_DEBUG(HW_GPU,
+              "Native output masks: control={:#x}, target={:#x}, raster={:#x}/{:#x}/{:#x}/{:#x}, "
+              "constant={:#x}, coverage={:#x}, clamp={:#x}",
+              engine.GetRegisterValue(0x3e9), engine.GetRegisterValue(0x3ea),
+              engine.GetRegisterValue(0x3ef), engine.GetRegisterValue(0x3f0),
+              engine.GetRegisterValue(0x3f1), engine.GetRegisterValue(0x3f2),
+              engine.GetRegisterValue(0x3d0), engine.GetRegisterValue(0x47e),
+              engine.GetRegisterValue(0x980));
 }
 } // namespace
 
@@ -807,9 +835,9 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
                     IsNativeConstantBufferBind(method) ||
                     Control::DecodeNativeGraphicsCacheAction(method, value).has_value() ||
                     method == 0x4e || method == 0x154 || method == 0x155 || method == 0x556 ||
-                    method == 0x451 || method == 0x674 || method == 0x8c4 || method == 0x54 ||
-                    method == 0x55 || method == 0x6c || method == 0x6d || method == 0x585 ||
-                    method == 0x586 || method == 0x5f7 || method == 0x5f8 ||
+                    method == 0x451 || method == 0x378 || method == 0x674 || method == 0x8c4 ||
+                    method == 0x54 || method == 0x55 || method == 0x6c || method == 0x6d ||
+                    method == 0x585 || method == 0x586 || method == 0x5f7 || method == 0x5f8 ||
                     (method >= 0x8e4 && method <= 0x8f3)) {
                     self.engine.CallMethod(self.system, method, value, true);
                     return !self.engine.HasNativeMacroFailure();
@@ -935,6 +963,15 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
             // Bit 0 describes shader global stores. A real drain supplies stronger
             // ordering for either value without releasing parked QMD dependencies.
             native_action_failed = method_argument > 1 || !NativeWaitForIdle();
+            return;
+        }
+        if (method == 0x378) { // C797 PIXEL_SHADER_BARRIER
+            // A full host drain conservatively orders either pixel-only or
+            // pixel-plus-depth barriers. SYSMEMBAR_ENABLE requires a separate
+            // system-memory visibility adapter; do not accept it as a no-op.
+            native_action_failed = (method_argument & ~2U) || HasPendingNativeInlineUpload() ||
+                                   HasPendingNativeDraw() || native_instrumentation_pending ||
+                                   !NativeWaitForIdle();
             return;
         }
         if (method == 0x154 || method == 0x155) { // SET_MME_MEM_ADDRESS_A/B

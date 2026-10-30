@@ -95,6 +95,9 @@ TEST_CASE("Native graphics capture separates source headers, code and constant s
         REQUIRE(environment.TranslateProgramAddress(0) == 80);
         REQUIRE(environment.ReadInstruction(80) != 0);
         REQUIRE_FALSE(environment.CanBeSerialized());
+        REQUIRE_THROWS_AS(environment.ReadTextureType(0), Shader::RuntimeError);
+        REQUIRE_THROWS_AS(environment.ReadTexturePixelFormat(0xffffffff), Shader::RuntimeError);
+        REQUIRE_THROWS_AS(environment.IsTexturePixelFormatInteger(0), Shader::RuntimeError);
         Shader::ObjectPool<Shader::Maxwell::Flow::Block> flow_pool;
         Shader::ObjectPool<Shader::IR::Inst> inst_pool;
         Shader::ObjectPool<Shader::IR::Block> block_pool;
@@ -164,6 +167,18 @@ TEST_CASE("Native graphics capture separates source headers, code and constant s
     engine.state.shader_stages[4].const_buffers[0] = {base + 0x200, 4, true};
     Environment captured{engine, memory, Program::Pixel,
                          Environment::NativeProgram{header_address, {}}};
+    {
+        auto lease = memory.AcquireMappingLease();
+        REQUIRE(lease.Protects(memory));
+        Environment external{engine, memory, Program::Pixel,
+                             Environment::NativeProgram{header_address, {}, &lease}};
+        REQUIRE(external.ReadCbufValue(0, 0) == 0xabcdef01);
+        Tegra::MemoryManager other{system, backing, 32, 1ULL << 32, 16, 12};
+        REQUIRE_FALSE(lease.Protects(other));
+        REQUIRE_THROWS_AS((Environment{engine, other, Program::Pixel,
+                                       Environment::NativeProgram{header_address, {}, &lease}}),
+                          Shader::RuntimeError);
+    }
     memory.Unmap(base + Kernel::PageSize, Kernel::PageSize);
     REQUIRE(captured.ReadInstruction(80) != 0);
     REQUIRE_THROWS_AS(captured.ReadCbufValue(0, 0), Shader::RuntimeError);

@@ -92,6 +92,8 @@ public:
     void Clear(u32 layer_count) override;
     bool ClearNativeColor(const Tegra::Control::NativeColorClear& clear,
                           std::stop_token stop_token) override;
+    bool DrawNativeIndexed(const Tegra::Control::NativeIndexedDrawRequest& request,
+                           std::stop_token stop_token) override;
     void DispatchCompute() override;
     bool SynchronizeNativeWork() override;
     bool InvalidateNativeCaches(const Tegra::Control::NativeCacheInvalidation& action) override;
@@ -155,6 +157,7 @@ private:
         0x0100E95004038000ULL, // XC2
         0x0100A6301214E000ULL, // FE:Engage
     };
+    u32 native_draw_readbacks{};
     static constexpr size_t MAX_TEXTURES = 192;
     static constexpr size_t MAX_IMAGES = 48;
     static constexpr size_t MAX_IMAGE_VIEWS = MAX_TEXTURES + MAX_IMAGES;

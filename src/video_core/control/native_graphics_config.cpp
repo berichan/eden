@@ -83,13 +83,15 @@ NativeGraphicsConfig::Error NativeGraphicsConfig::ApplyMaskedRegister(u32 addres
         return Error::Cancelled;
     }
     if (bundle_index) {
-        // Native draws must remain guarded until bundle-state consumption is implemented.
+        // Preserve the exact hardware initialization presets. The synchronous
+        // draw adapter reads explicit method state instead of replaying bundle transport.
         auto& bundle = swdx_bundles[*bundle_index];
         bundle.value = (bundle.value & ~mask) | value;
         bundle.known_mask |= mask;
     } else if (setup_debug) {
         // Conservative-raster initialization clears bits23/24 independently of bit0.
-        // Draws remain guarded until the renderer implements these context policies.
+        // The bounded draw adapter rejects conservative raster and depth bias;
+        // those effects need to consume these policies when implemented.
         setup_debug_value = (setup_debug_value & ~mask) | value;
         setup_debug_known_mask |= mask;
     } else if (sm_dispatch_control) {
@@ -103,7 +105,7 @@ NativeGraphicsConfig::Error NativeGraphicsConfig::ApplyMaskedRegister(u32 addres
     } else {
         // NVIDIA names this register TEX_SAMP_DBG; deko3d initializes bit4 to zero.
         // Only that exact initialization is recorded. Its rendering meaning remains
-        // unresolved, so native textures and draw actions must remain unsupported.
+        // unresolved, so native texture operations remain unsupported.
         texture_sampler_debug = (texture_sampler_debug & ~mask) | value;
         texture_sampler_debug_known_mask |= mask;
     }

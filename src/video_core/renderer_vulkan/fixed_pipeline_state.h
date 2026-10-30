@@ -7,6 +7,7 @@
 #pragma once
 
 #include <array>
+#include <optional>
 #include <type_traits>
 
 #include "common/bit_field.h"
@@ -111,6 +112,14 @@ struct FixedPipelineState {
             return UnpackBlendFactor(factor_dest_a.Value());
         }
     };
+
+    struct NativeBlendState {
+        u32 enabled, separate_alpha;
+        u32 color_op, color_source, color_dest;
+        u32 alpha_op, alpha_source, alpha_dest;
+        u32 write_mask;
+    };
+    static std::optional<BlendingAttachment> DecodeNativeBlend(const NativeBlendState& state);
 
     union VertexAttribute {
         u32 raw;

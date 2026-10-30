@@ -263,6 +263,47 @@ void FixedPipelineState::Refresh(Tegra::Engines::Maxwell3D& maxwell3d, DynamicFe
     }
 }
 
+std::optional<FixedPipelineState::BlendingAttachment> FixedPipelineState::DecodeNativeBlend(
+    const NativeBlendState& state) {
+    if (state.enabled > 1 || state.separate_alpha > 1 || (state.write_mask & ~0x1111U))
+        return std::nullopt;
+    BlendingAttachment result{};
+    result.mask_r.Assign(state.write_mask & 1);
+    result.mask_g.Assign((state.write_mask >> 4) & 1);
+    result.mask_b.Assign((state.write_mask >> 8) & 1);
+    result.mask_a.Assign((state.write_mask >> 12) & 1);
+    if (!state.enabled)
+        return result;
+    const auto valid_op = [](u32 raw) {
+        return (raw >= 1 && raw <= 5) || raw == 0x8006 || raw == 0x8007 || raw == 0x8008 ||
+               raw == 0x800a || raw == 0x800b;
+    };
+    const auto valid_factor = [](u32 raw) {
+        // Coupled and dual-source factors require additional adapters.
+        return (raw >= 1 && raw <= 11) || raw == 14 || raw == 15 || raw == 0x4000 ||
+               raw == 0x4001 || (raw >= 0x4300 && raw <= 0x4308) ||
+               (raw >= 0xc001 && raw <= 0xc004);
+    };
+    const u32 alpha_op = state.separate_alpha ? state.alpha_op : state.color_op;
+    const u32 alpha_source = state.separate_alpha ? state.alpha_source : state.color_source;
+    const u32 alpha_dest = state.separate_alpha ? state.alpha_dest : state.color_dest;
+    if (!valid_op(state.color_op) || !valid_op(alpha_op) || !valid_factor(state.color_source) ||
+        !valid_factor(state.color_dest) || !valid_factor(alpha_source) || !valid_factor(alpha_dest))
+        return std::nullopt;
+    result.enable.Assign(1);
+    result.equation_rgb.Assign(
+        PackBlendEquation(static_cast<Maxwell::Blend::Equation>(state.color_op)));
+    result.equation_a.Assign(PackBlendEquation(static_cast<Maxwell::Blend::Equation>(alpha_op)));
+    result.factor_source_rgb.Assign(
+        PackBlendFactor(static_cast<Maxwell::Blend::Factor>(state.color_source)));
+    result.factor_dest_rgb.Assign(
+        PackBlendFactor(static_cast<Maxwell::Blend::Factor>(state.color_dest)));
+    result.factor_source_a.Assign(
+        PackBlendFactor(static_cast<Maxwell::Blend::Factor>(alpha_source)));
+    result.factor_dest_a.Assign(PackBlendFactor(static_cast<Maxwell::Blend::Factor>(alpha_dest)));
+    return result;
+}
+
 void FixedPipelineState::BlendingAttachment::Refresh(const Maxwell& regs, size_t index) {
     const auto& mask = regs.color_mask[regs.color_mask_common ? 0 : index];
 

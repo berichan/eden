@@ -454,11 +454,18 @@ GraphicsEnvironment::GraphicsEnvironment(Tegra::Engines::Maxwell3D& maxwell3d_,
     if (program_base >= AddressLimit || Header::SizeBytes > AddressLimit - program_base ||
         (program_base & 15))
         throw Shader::RuntimeError("Invalid native graphics header address: {:#x}", program_base);
-    auto mapping = gpu_memory->AcquireMappingLease();
+    std::optional<Tegra::MemoryManager::MappingLease> owned_mapping;
+    if (!native.mapping)
+        owned_mapping.emplace(gpu_memory->AcquireMappingLease());
+    const auto& mapping = native.mapping ? *native.mapping : *owned_mapping;
+    if (!mapping.Protects(*gpu_memory))
+        throw Shader::RuntimeError(
+            "Native graphics capture lease does not protect its address space");
     native_mapping_generation = gpu_memory->MappingGeneration();
     native_capture_mapping = &mapping;
     SCOPE_EXIT {
-        native_capture_mapping = nullptr;
+        if (!native.mapping)
+            native_capture_mapping = nullptr;
     };
     Header::Words source{};
     if (!mapping.ReadBlockChecked(program_base,

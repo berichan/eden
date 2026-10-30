@@ -6,6 +6,9 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
+#include <cmath>
+#include <cstring>
 #include <memory>
 #include <mutex>
 
@@ -14,6 +17,7 @@
 #include "video_core/renderer_vulkan/renderer_vulkan.h"
 
 #include "common/assert.h"
+#include "common/cityhash.h"
 #include "common/logging.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
@@ -21,6 +25,7 @@
 #include "video_core/control/channel_state.h"
 #include "video_core/control/native_cache.h"
 #include "video_core/control/native_color_clear.h"
+#include "video_core/control/native_indexed_draw.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/gpu_logging/gpu_logging.h"
@@ -40,6 +45,7 @@
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
 #include "video_core/shader_cache.h"
+#include "video_core/shader_environment.h"
 #include "video_core/texture_cache/texture_cache_base.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -838,6 +844,484 @@ void RasterizerVulkan::ResetCounter(VideoCommon::QueryType type) {
 
 bool RasterizerVulkan::SynchronizeNativeWork() {
     scheduler.Finish();
+    return true;
+}
+
+bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDrawRequest& request,
+                                         std::stop_token stop_token) {
+    using Request = Tegra::Control::NativeIndexedDrawRequest;
+    using Bounds = Tegra::Control::NativeIndexBounds;
+    using Fetch = Tegra::Control::NativeVertexFetch;
+    using Clear = Tegra::Control::NativeColorClear;
+    const auto reject = [](std::string_view reason) {
+        LOG_ERROR(HW_GPU, "Native Vulkan draw rejected: {}", reason);
+        return false;
+    };
+    if (!maxwell3d || !gpu_memory || stop_token.stop_requested())
+        return false;
+    const u32 index_format = static_cast<u32>(request.format);
+    constexpr u64 SnapshotLimit = 64ULL << 20;
+    if (index_format > 2 || request.size_bytes != (u64{request.count} << index_format) ||
+        request.address >= (u64{1} << 40) ||
+        request.size_bytes > (u64{1} << 40) - request.address || request.size_bytes > SnapshotLimit)
+        return reject("invalid or unsupported index snapshot size");
+    FlushWork();
+    gpu_memory->FlushCaching();
+    scheduler.Finish();
+    if (!request.count)
+        return !stop_token.stop_requested();
+    if (device.IsMoltenVK())
+        return reject("native triangle-list restart disable requires host support");
+    if (!device.SupportsMultiViewport() && device.GetMaxViewports() > 1)
+        return reject("native static viewport count requires host support");
+
+    const auto read = [&](u32 method) { return maxwell3d->GetRegisterValue(method); };
+    // The initial adapter models a single-sample, single-color triangle draw.
+    // Reject effects that have no native resource/state adapter yet.
+    bool unsupported_state{};
+    for (u32 method :
+         {0x1d0U, 0x1d1U, 0x370U, 0x371U, 0x372U, 0x374U, 0x3d0U, 0x3e9U, 0x452U, 0x47eU, 0x4b3U,
+          0x4bbU, 0x4d5U, 0x4e0U, 0x54dU, 0x54eU, 0x54fU, 0x59bU, 0x653U, 0x65fU, 0x66fU, 0x671U}) {
+        if (read(method)) {
+            LOG_ERROR(HW_GPU, "Unsupported native draw state: method={:#x}, value={:#x}", method,
+                      read(method));
+            unsupported_state = true;
+        }
+    }
+    if (unsupported_state)
+        return false;
+    if (read(0x545) > 1 || (read(0x545) && !Settings::IsGPULevelHigh()))
+        return reject("native pixel counting requires precise GPU queries");
+    // ZCULL_STATS enables internal counters without changing rasterization.
+    // Keep the stored enable state; native stats reports/resets remain rejected
+    // until their distinct counters can be materialized (not substituted by Z-pass).
+    if (read(0x547) > 1)
+        return reject("invalid native Z-cull statistics enable");
+    if (read(0xdf) > 1 || read(0x35f) > 1 || read(0x4eb) != 0 || read(0x649) != 0 ||
+        read(0x64b) != 1 || read(0x652) != 0 || read(0x54f) != 0 || read(0x3ee) != 0 ||
+        read(0x574) != 0 || read(0x646) > 1 || read(0x4d7) > 1 || read(0x36b) != 0x1b02 ||
+        read(0x36c) != 0x1b02)
+        return reject("unsupported raster, viewport or multisample mode");
+    const u32 clip = read(0x64f);
+    const auto depth_clip =
+        Tegra::Control::NativeDepthClip::Decode(clip, read(0x35f), read(0x302), read(0x303));
+    if (!depth_clip) {
+        LOG_ERROR(HW_GPU, "Unsupported native clipping policy: clip={:#x}, z_range={:#x}", clip,
+                  read(0x35f));
+        return false;
+    }
+    if ((read(0x487) & 0xf000000f) != 1 || ((read(0x487) >> 4) & 7) != 0 || read(0x800) & 1 ||
+        read(0x810) != 0x11 || read(0x850) != 0x51 || (read(0x820) & 1) || (read(0x830) & 1) ||
+        (read(0x840) & 1))
+        return reject("unsupported target mapping or shader-stage combination");
+    Clear::Registers target_regs{};
+    target_regs.argument = 0x3c;
+    for (u32 i = 0; i < target_regs.target.size(); ++i)
+        target_regs.target[i] = read(0x200 + i);
+    target_regs.srgb_write = read(0x56e);
+    const auto target = Clear::Decode(target_regs);
+    if (!target || (target->format == Clear::Format::RGBA8Srgb && read(0x56e) != 1))
+        return reject("unsupported native color target or sRGB write mode");
+    if (read(0x980) > 1 || (target->format == Clear::Format::B10G11R11Float && read(0x980)))
+        return reject("unsupported native floating-point color clamp");
+    const auto format = target->format == Clear::Format::RGBA8Srgb
+                            ? VideoCore::Surface::PixelFormat::A8B8G8R8_SRGB
+                            : VideoCore::Surface::PixelFormat::B10G11R11_FLOAT;
+    const VkFormat host_format = target->format == Clear::Format::RGBA8Srgb
+                                     ? VK_FORMAT_A8B8G8R8_SRGB_PACK32
+                                     : VK_FORMAT_B10G11R11_UFLOAT_PACK32;
+    const auto surface_format =
+        MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, false, format);
+    const auto view_format = MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, true, format);
+    VkFormatFeatureFlags required =
+        VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
+        VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+    if (surface_format.storage)
+        required |= VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
+    const auto limits = device.GetPhysical().GetProperties().limits;
+    if (!surface_format.attachable || surface_format.format != host_format ||
+        view_format.format != host_format ||
+        !device.IsFormatSupported(host_format, required, FormatType::Optimal) ||
+        target->width > limits.maxImageDimension2D || target->height > limits.maxImageDimension2D)
+        return reject("native target format or dimensions unavailable on host");
+
+    const auto& regs = maxwell3d->regs;
+    const auto& transform = regs.viewport_transform[0];
+    const std::array floats{transform.scale_x,     transform.scale_y,     transform.scale_z,
+                            transform.translate_x, transform.translate_y, transform.translate_z};
+    if (!std::ranges::all_of(floats, [](float value) { return std::isfinite(value); }) ||
+        transform.scale_x <= 0 || transform.scale_y == 0 || transform.swizzle.raw != 0x6420)
+        return reject("unsupported native viewport transform");
+    const auto viewport = GetViewportState(device, regs, 0, 1.f);
+    const float x1 = viewport.x + viewport.width;
+    const float y1 = viewport.y + viewport.height;
+    if (!std::isfinite(x1) || !std::isfinite(y1) ||
+        viewport.width > limits.maxViewportDimensions[0] ||
+        std::abs(viewport.height) > limits.maxViewportDimensions[1] ||
+        (std::min)(viewport.x, x1) < limits.viewportBoundsRange[0] ||
+        (std::max)(viewport.x, x1) > limits.viewportBoundsRange[1] ||
+        (std::min)(viewport.y, y1) < limits.viewportBoundsRange[0] ||
+        (std::max)(viewport.y, y1) > limits.viewportBoundsRange[1])
+        return reject("native viewport exceeds host limits");
+    const float min_depth = transform.translate_z - (read(0x35f) == 0 ? transform.scale_z : 0.f);
+    const float max_depth = transform.translate_z + transform.scale_z;
+    if (min_depth != 0.f || max_depth != 1.f)
+        return reject("native pixel depth clamps require the supported viewport depth range");
+    if (!std::isfinite(min_depth) || !std::isfinite(max_depth))
+        return reject("non-finite native viewport depth range");
+    if (!device.IsExtDepthRangeUnrestrictedSupported() &&
+        (min_depth < 0 || min_depth > 1 || max_depth < 0 || max_depth > 1))
+        return reject("native depth range requires unrestricted host support");
+    u32 x0{}, y0{}, x2 = target->width, y2 = target->height;
+    const auto intersect = [&](u32 horizontal, u32 vertical, bool origin_extent) {
+        const u32 left = horizontal & 0xffff, top = vertical & 0xffff;
+        const u32 right = origin_extent ? left + (horizontal >> 16) : horizontal >> 16;
+        const u32 bottom = origin_extent ? top + (vertical >> 16) : vertical >> 16;
+        x0 = (std::max)(x0, (std::min)(left, target->width));
+        y0 = (std::max)(y0, (std::min)(top, target->height));
+        x2 = (std::min)(x2, right);
+        y2 = (std::min)(y2, bottom);
+    };
+    intersect(read(0x3fd), read(0x3fe), true);
+    intersect(read(0x300), read(0x301), true);
+    if (read(0x380) > 1)
+        return reject("invalid native scissor enable");
+    if (read(0x380))
+        intersect(read(0x381), read(0x382), false);
+    const VkRect2D scissor{{static_cast<s32>(x0), static_cast<s32>(y0)},
+                           {x2 > x0 ? x2 - x0 : 0, y2 > y0 ? y2 - y0 : 0}};
+
+    auto lease = gpu_memory->AcquireMappingLease();
+    bool work_drained{};
+    SCOPE_EXIT {
+        if (!work_drained) {
+            try {
+                scheduler.Finish();
+            } catch (const std::exception& error) {
+                LOG_CRITICAL(Render_Vulkan, "Native draw prefix drain failed: {}", error.what());
+            }
+        }
+    };
+    const auto output = lease.ResolveContiguous(target->address, target->size_bytes, true);
+    if (!output)
+        return reject("unbacked native color target");
+    {
+        std::scoped_lock lock{buffer_cache.mutex};
+        if (buffer_cache.IsRegionGpuModified(*output, target->size_bytes))
+            return reject("native target overlaps pending buffer writes");
+    }
+    // Keep pixels private; bound actual guest-visible readback diagnostics to
+    // the first few completed draws and report only their hashes.
+    std::vector<u8> readback;
+    std::optional<u64> before_hash;
+    if (native_draw_readbacks < 4 && target->size_bytes <= SnapshotLimit) {
+        readback.resize(target->size_bytes);
+        if (!lease.ReadBlockChecked(target->address, readback))
+            return reject("native target initial snapshot");
+        before_hash =
+            Common::CityHash64(reinterpret_cast<const char*>(readback.data()), readback.size());
+    }
+    u64 snapshot_bytes{};
+    const auto snapshot = [&](GPUVAddr address, size_t size, std::vector<u8>& bytes) {
+        if (!size || size > SnapshotLimit - snapshot_bytes || stop_token.stop_requested())
+            return false;
+        const auto backing = lease.ResolveContiguous(address, size, false);
+        if (!backing || (*backing < *output + target->size_bytes && *output < *backing + size))
+            return false;
+        {
+            std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
+            if (buffer_cache.IsRegionGpuModified(*backing, size) ||
+                texture_cache.IsRegionGpuModified(*backing, size))
+                return false;
+        }
+        bytes.resize(size);
+        if (!lease.ReadBlockChecked(address, bytes))
+            return false;
+        snapshot_bytes += size;
+        return true;
+    };
+    std::vector<u8> indices;
+    if (!snapshot(request.address, static_cast<size_t>(request.size_bytes), indices))
+        return reject("native index backing or coherence");
+    const auto bounds = Bounds::Decode(request.format, indices, stop_token);
+    if (!bounds)
+        return reject("invalid native index data");
+    VkIndexType host_index_format = index_format == 2 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
+    if (request.format == Request::Format::U8) {
+        if (indices.size() > (SnapshotLimit - snapshot_bytes) / sizeof(u16))
+            return reject("native index widening exceeds snapshot capacity");
+        std::vector<u8> widened(indices.size() * sizeof(u16));
+        for (size_t i = 0; i < indices.size(); ++i) {
+            if ((i & 0xfff) == 0 && stop_token.stop_requested())
+                return false;
+            widened[2 * i] = indices[i];
+            widened[2 * i + 1] = 0;
+        }
+        snapshot_bytes += widened.size();
+        indices = std::move(widened);
+    }
+    const GPUVAddr vertex_header = (GPUVAddr{read(0x815)} << 32) | read(0x816);
+    const GPUVAddr fragment_header = (GPUVAddr{read(0x855)} << 32) | read(0x856);
+    VideoCommon::GraphicsEnvironment vertex{
+        *maxwell3d, *gpu_memory, Maxwell::ShaderType::VertexB,
+        VideoCommon::GraphicsEnvironment::NativeProgram{vertex_header, stop_token, &lease}};
+    VideoCommon::GraphicsEnvironment fragment{
+        *maxwell3d, *gpu_memory, Maxwell::ShaderType::Pixel,
+        VideoCommon::GraphicsEnvironment::NativeProgram{fragment_header, stop_token, &lease}};
+    GraphicsPipelineCacheKey key{};
+    key.unique_hashes[1] = vertex.CalculateHash();
+    key.unique_hashes[5] = fragment.CalculateHash();
+    key.state.topology.Assign(Maxwell::PrimitiveTopology::Triangles);
+    key.state.polygon_mode.Assign(FixedPipelineState::PackPolygonMode(Maxwell::PolygonMode::Fill));
+    key.state.alpha_test_func.Assign(
+        FixedPipelineState::PackComparisonOp(Maxwell::ComparisonOp::Always_GL));
+    key.state.ndc_minus_one_to_one.Assign(depth_clip->negative_one_to_one);
+    key.state.driver_id = device.GetDriverID();
+    key.state.driver_version = device.GetDriverVersion();
+    key.state.color_formats[0] = static_cast<u8>(read(0x204));
+    key.state.viewport_swizzles.fill(0x6420);
+    key.state.dynamic_state.rasterize_enable.Assign(read(0xdf));
+    key.state.dynamic_state.depth_clamp_disabled.Assign(1);
+    if (read(0x5a1) > 1 || (read(0x5a1) && !device.SupportsProvokingVertexLastMode()))
+        return reject("unsupported native provoking vertex mode");
+    key.state.provoking_vertex_last.Assign(read(0x5a1));
+    const u32 front = read(0x647), cull = read(0x648);
+    if ((front != 0x900 && front != 0x901) || (cull != 0x404 && cull != 0x405 && cull != 0x408))
+        return reject("unsupported native face mode");
+    key.state.dynamic_state.front_face.Assign(
+        FixedPipelineState::PackFrontFace(static_cast<Maxwell::FrontFace>(front)));
+    key.state.dynamic_state.cull_enable.Assign(read(0x646));
+    key.state.dynamic_state.cull_face.Assign(
+        FixedPipelineState::PackCullFace(static_cast<Maxwell::CullFace>(cull)));
+    const u32 color_mask = read(0x680);
+    if (color_mask & ~0x1111U)
+        return reject("invalid native color write mask");
+    if (read(0x4b9) > 1)
+        return reject("invalid native per-target blend enable");
+    const u32 blend_base = read(0x4b9) ? 0x780 : 0x4cf;
+    const auto blend = FixedPipelineState::DecodeNativeBlend(
+        {read(0x4d8), read(blend_base), read(blend_base + 1), read(blend_base + 2),
+         read(blend_base + 3), read(blend_base + 4), read(blend_base + 5),
+         read(blend_base + (read(0x4b9) ? 6 : 7)), color_mask});
+    if (!blend)
+        return reject("unsupported native blend operation or factors");
+    if (blend->enable &&
+        !device.IsFormatSupported(host_format, VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT,
+                                  FormatType::Optimal))
+        return reject("native target blending unavailable on host");
+    key.state.attachments[0] = *blend;
+    const std::array blend_constants{regs.blend_color.r, regs.blend_color.g, regs.blend_color.b,
+                                     regs.blend_color.a};
+    if (!std::ranges::all_of(blend_constants, [](float value) { return std::isfinite(value); }))
+        return reject("unsupported non-finite native blend constants");
+    std::array<std::vector<u8>, 32> vertices;
+    for (u32 attribute = 0; attribute < 32; ++attribute) {
+        const auto input = vertex.SPH().vtg.InputGeneric(attribute);
+        if (std::ranges::none_of(input, [](bool used) { return used; }))
+            continue;
+        const u32 raw = read(0x458 + attribute), stream = raw & 31;
+        const u32 stream_base = 0x700 + stream * 4;
+        const Fetch::Registers fetch_regs{raw,
+                                          read(stream_base),
+                                          read(stream_base + 1),
+                                          read(stream_base + 2),
+                                          read(0x180 + stream * 2),
+                                          read(0x181 + stream * 2),
+                                          read(0x620 + stream)};
+        const auto fetch = Fetch::Decode(fetch_regs, bounds->maximum);
+        if (!fetch || fetch->size_bytes > SnapshotLimit ||
+            attribute >= device.GetMaxVertexInputAttributes() ||
+            stream >= device.GetMaxVertexInputBindings() ||
+            fetch->stride > limits.maxVertexInputBindingStride ||
+            fetch->offset > limits.maxVertexInputAttributeOffset)
+            return reject("unsupported native vertex fetch range or format");
+        VkFormat vertex_format{};
+        switch (fetch->component_format) {
+        case 1:
+            vertex_format = VK_FORMAT_R32G32B32A32_SFLOAT;
+            break;
+        case 2:
+            vertex_format = VK_FORMAT_R32G32B32_SFLOAT;
+            break;
+        case 3:
+            vertex_format = VK_FORMAT_R16G16B16A16_SFLOAT;
+            break;
+        case 4:
+            vertex_format = VK_FORMAT_R32G32_SFLOAT;
+            break;
+        case 5:
+            vertex_format = VK_FORMAT_R16G16B16_SFLOAT;
+            break;
+        case 15:
+            vertex_format = VK_FORMAT_R16G16_SFLOAT;
+            break;
+        case 18:
+            vertex_format = VK_FORMAT_R32_SFLOAT;
+            break;
+        case 27:
+            vertex_format = VK_FORMAT_R16_SFLOAT;
+            break;
+        default:
+            return reject("unsupported native vertex component format");
+        }
+        if (!device.IsFormatSupported(vertex_format, VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT,
+                                      FormatType::Buffer) ||
+            MaxwellToVK::VertexFormat(device, Maxwell::VertexAttribute::Type::Float,
+                                      static_cast<Maxwell::VertexAttribute::Size>(
+                                          fetch->component_format)) != vertex_format)
+            return reject("native vertex format unavailable on host");
+        const u32 alignment = fetch->component_format == 1 || fetch->component_format == 2 ||
+                                      fetch->component_format == 4 || fetch->component_format == 18
+                                  ? 4
+                                  : 2;
+        if (fetch->offset % alignment || fetch->stride % alignment)
+            return reject("native vertex format alignment requires repacking");
+        auto& entry = key.state.attributes[attribute];
+        entry.enabled.Assign(1);
+        entry.buffer.Assign(stream);
+        entry.offset.Assign(fetch->offset);
+        entry.type.Assign(7);
+        entry.size.Assign(fetch->component_format);
+        key.state.vertex_strides[stream] = static_cast<u16>(fetch->stride);
+        if (fetch->size_bytes > vertices[stream].size() &&
+            !snapshot(fetch->address, static_cast<size_t>(fetch->size_bytes), vertices[stream]))
+            return reject("native vertex backing or coherence");
+    }
+    const std::array environments{&vertex, &fragment};
+    auto* pipeline = pipeline_cache.NativeGraphicsPipeline(key, environments);
+    if (!pipeline || stop_token.stop_requested())
+        return reject("native graphics pipeline construction");
+    if (pipeline->NativeStageInfo(4).loads[Shader::IR::Attribute::PositionZ])
+        return reject("native fragment depth reads require a pixel-clamp adapter");
+    std::array<std::array<std::vector<u8>, 18>, 5> constants;
+    std::vector<GraphicsPipeline::NativeUniformBuffer> uniforms;
+    for (u32 stage = 0; stage < 5; ++stage) {
+        const auto& shader = pipeline->NativeStageInfo(stage);
+        if (shader.uses_render_area && (!regs.surface_clip.width || !regs.surface_clip.height))
+            return reject("empty native render-area specialization");
+        for (const auto& descriptor : shader.constant_buffer_descriptors) {
+            if (descriptor.index >= constants[stage].size() || descriptor.count != 1)
+                return reject("unsupported native uniform descriptors");
+            const auto& binding =
+                maxwell3d->state.shader_stages[stage].const_buffers[descriptor.index];
+            const u32 size = shader.constant_buffer_used_sizes[descriptor.index];
+            if (!binding.enabled || !size || size > binding.size ||
+                size > limits.maxUniformBufferRange ||
+                !snapshot(binding.address, size, constants[stage][descriptor.index]))
+                return reject("native uniform backing, bounds or coherence");
+            uniforms.push_back({stage, descriptor.index, constants[stage][descriptor.index]});
+        }
+    }
+    {
+        std::scoped_lock lock{buffer_cache.mutex};
+        if (buffer_cache.IsRegionGpuModified(*output, target->size_bytes))
+            return reject("native target overlaps pending buffer writes");
+    }
+    VideoCommon::ImageInfo image;
+    image.format = format;
+    image.type = VideoCommon::ImageType::e2D;
+    image.size = {target->width, target->height, 1};
+    image.block = {0, target->block_height, 0};
+    image.layer_stride = image.maybe_unaligned_layer_stride = target->size_bytes;
+    image.layout = Tegra::Texture::BlockLinearLayout::TuringColor2D;
+    if (VideoCommon::CalculateGuestSizeInBytes(image) != target->size_bytes)
+        return reject("native target footprint mismatch");
+    const auto record = [&] {
+        std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
+        const auto framebuffer =
+            texture_cache.PrepareNativeClearTarget(image, target->address, *output);
+        if (!framebuffer || stop_token.stop_requested() ||
+            framebuffer->framebuffer->NumColorBuffers() != 1 ||
+            framebuffer->framebuffer->RenderArea().width != target->width ||
+            framebuffer->framebuffer->RenderArea().height != target->height ||
+            !pipeline->ConfigureNative(uniforms, framebuffer->framebuffer,
+                                       {static_cast<float>(regs.surface_clip.width),
+                                        static_cast<float>(regs.surface_clip.height)}))
+            return false;
+        // Native predicates are resolved explicitly by the engine. Keep any
+        // legacy conditional-rendering state out of this checked draw.
+        query_cache.NotifySegment(false);
+        query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64, read(0x545) != 0);
+        const auto index = staging_pool.Request(indices.size(), MemoryUsage::Upload);
+        if (!index.buffer || index.mapped_span.size() < indices.size() ||
+            index.offset % (index_format == 2 ? 4 : 2))
+            return false;
+        std::memcpy(index.mapped_span.data(), indices.data(), indices.size());
+        for (u32 stream = 0; stream < vertices.size(); ++stream) {
+            if (stop_token.stop_requested())
+                return false;
+            if (vertices[stream].empty())
+                continue;
+            const auto buffer = staging_pool.Request(vertices[stream].size(), MemoryUsage::Upload);
+            if (!buffer.buffer || buffer.mapped_span.size() < vertices[stream].size() ||
+                buffer.offset % 4)
+                return false;
+            std::memcpy(buffer.mapped_span.data(), vertices[stream].data(),
+                        vertices[stream].size());
+            scheduler.Record([stream, handle = buffer.buffer,
+                              offset = buffer.offset](vk::CommandBuffer command) {
+                command.BindVertexBuffers(stream, 1, &handle, &offset);
+            });
+        }
+        if (stop_token.stop_requested())
+            return false;
+        const u32 viewport_count = (std::min)(device.GetMaxViewports(), u32{Maxwell::NumViewports});
+        scheduler.Record(
+            [viewport, scissor, viewport_count, index_buffer = index.buffer,
+             index_offset = index.offset, host_index_format, count = request.count, stop_token,
+             blend_constants,
+             depth_bounds = device.IsDepthBoundsSupported()](vk::CommandBuffer command) {
+                if (stop_token.stop_requested())
+                    return;
+                std::array<VkViewport, Maxwell::NumViewports> viewports;
+                std::array<VkRect2D, Maxwell::NumViewports> scissors;
+                viewports.fill(viewport);
+                scissors.fill(scissor);
+                command.SetViewport(0, {viewports.data(), viewport_count});
+                command.SetScissor(0, {scissors.data(), viewport_count});
+                command.SetDepthBias(0.f, 0.f, 0.f);
+                command.SetBlendConstants(blend_constants.data());
+                if (depth_bounds)
+                    command.SetDepthBounds(0.f, 1.f);
+                command.SetStencilCompareMask(VK_STENCIL_FACE_FRONT_AND_BACK, 0xffffffff);
+                command.SetStencilWriteMask(VK_STENCIL_FACE_FRONT_AND_BACK, 0xffffffff);
+                command.SetStencilReference(VK_STENCIL_FACE_FRONT_AND_BACK, 0);
+                command.SetLineWidth(1.f);
+                command.BindIndexBuffer(index_buffer, index_offset, host_index_format);
+                command.DrawIndexed(count, 1, 0, 0, 0);
+            });
+        texture_cache.MarkModification(framebuffer->image_id);
+        return true;
+    };
+    const bool recorded = record();
+    scheduler.Finish();
+    if (!recorded) {
+        work_drained = true;
+        return reject("native graphics resource binding");
+    }
+    {
+        std::scoped_lock lock{texture_cache.mutex};
+        texture_cache.DownloadMemory(*output, target->size_bytes);
+    }
+    {
+        std::scoped_lock lock{buffer_cache.mutex};
+        buffer_cache.WriteMemory(*output, target->size_bytes);
+    }
+    if (stop_token.stop_requested())
+        return false;
+    if (before_hash) {
+        if (!lease.ReadBlockChecked(target->address, readback))
+            return reject("native target final readback");
+        const u64 after_hash =
+            Common::CityHash64(reinterpret_cast<const char*>(readback.data()), readback.size());
+        LOG_DEBUG(HW_GPU, "Native draw readback: before={:#x}, after={:#x}, changed={}",
+                  *before_hash, after_hash, *before_hash != after_hash);
+        ++native_draw_readbacks;
+    }
+    work_drained = true;
+    LOG_DEBUG(HW_GPU,
+              "Native indexed draw completed: count={}, minimum={}, maximum={}, extent={}x{}",
+              request.count, bounds->minimum, bounds->maximum, target->width, target->height);
     return true;
 }
 

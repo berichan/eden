@@ -110,6 +110,7 @@ public:
 private:
     friend class NativeGpuChannels;
     friend class NativeGpuSubmission;
+    friend struct NativeGpuBackendTest;
     NvResult ReserveSubmission(std::shared_ptr<NativeGpuSubmission>* out_job, NvFence* out_fence,
                                const std::shared_ptr<NativeGpuChannel>& self,
                                std::span<const u64> entries, u32 flags, u32 increment);

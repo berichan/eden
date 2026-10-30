@@ -11,6 +11,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
+#include <span>
 #include <type_traits>
 #include <vector>
 
@@ -76,6 +77,11 @@ class GraphicsPipeline {
     static constexpr size_t NUM_STAGES = Tegra::Engines::Maxwell3D::Regs::MaxShaderStage;
 
 public:
+    struct NativeUniformBuffer {
+        u32 stage;
+        u32 bank;
+        std::span<const u8> bytes;
+    };
     explicit GraphicsPipeline(
         Scheduler& scheduler, BufferCache& buffer_cache, TextureCache& texture_cache,
         vk::PipelineCache& pipeline_cache, VideoCore::ShaderNotify* shader_notify,
@@ -110,6 +116,15 @@ public:
         return configure_func(this, is_indexed);
     }
 
+    bool ConfigureNative(std::span<const NativeUniformBuffer> buffers,
+                         const Framebuffer* framebuffer, std::array<float, 2> render_area);
+    const Shader::Info& NativeStageInfo(size_t stage) const {
+        return stage_infos.at(stage);
+    }
+    bool IsBound() const {
+        return is_built.load(std::memory_order_acquire) && bool(pipeline);
+    }
+
     [[nodiscard]] GraphicsPipeline* Next(const GraphicsPipelineCacheKey& current_key) noexcept {
         if (key == current_key) {
             return this;
@@ -138,7 +153,8 @@ private:
     bool ConfigureImpl(bool is_indexed);
 
     bool ConfigureDraw(const RescalingPushConstant& rescaling,
-                       const RenderAreaPushConstant& render_are);
+                       const RenderAreaPushConstant& render_are,
+                       const Framebuffer* framebuffer = nullptr, bool native = false);
 
     void MakePipeline(VkRenderPass render_pass);
 

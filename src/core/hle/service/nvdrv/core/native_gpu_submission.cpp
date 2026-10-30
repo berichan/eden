@@ -11,6 +11,7 @@
 #include "common/scope_exit.h"
 #include "core/core.h"
 #include "core/core_timing.h"
+#include "core/hle/service/nvdrv/core/native_gpu_backend.h"
 #include "core/hle/service/nvdrv/core/native_gpu_error_notifier.h"
 #include "core/hle/service/nvdrv/core/native_gpu_submission.h"
 #include "video_core/control/channel_state.h"
@@ -29,110 +30,117 @@
 namespace Service::Nvidia::NvCore {
 using Stream = Tegra::Control::NativeCommandStream;
 
-struct NativeGpuChannel::Backend {
-    std::shared_ptr<Tegra::Control::ChannelState> channel;
-    std::array<u32, 8> classes{};
-    std::array<u32, 0x40> puller{};
-    Tegra::Control::NativeAtomicSequence atomic_sequence;
+bool NativeGpuChannel::Backend::PendingFrontendWork(
+    const Tegra::Control::NativeGpuGraphicsContext& context) const {
+    // Dependency-gated QMDs are parked context state, not an unfinished FIFO packet.
+    // SignalQmd executes ready descriptors synchronously and retains deferred ones.
+    return context.HasQmdFailure() || channel->payload->maxwell_3d.HasPendingNativeInlineUpload() ||
+           channel->payload->maxwell_3d.HasPendingNativeInstrumentation() ||
+           channel->payload->maxwell_3d.HasPendingNativeDraw() ||
+           channel->payload->maxwell_3d.HasPendingNativeMacro() ||
+           channel->payload->maxwell_3d.HasNativeMacroFailure() ||
+           channel->payload->kepler_compute.HasPendingNativeMacro() ||
+           channel->payload->kepler_compute.HasPendingNativeInlineUpload() ||
+           channel->payload->kepler_compute.HasNativeMethodFailure();
+}
 
-    bool PendingFrontendWork(const Tegra::Control::NativeGpuGraphicsContext& context) const {
-        // Dependency-gated QMDs are parked context state, not an unfinished FIFO packet.
-        // SignalQmd executes ready descriptors synchronously and retains deferred ones.
-        return context.HasQmdFailure() ||
-               channel->payload->maxwell_3d.HasPendingNativeInlineUpload() ||
-               channel->payload->maxwell_3d.HasPendingNativeInstrumentation() ||
-               channel->payload->maxwell_3d.HasPendingNativeDraw() ||
-               channel->payload->maxwell_3d.HasPendingNativeMacro() ||
-               channel->payload->maxwell_3d.HasNativeMacroFailure() ||
-               channel->payload->kepler_compute.HasPendingNativeMacro() ||
-               channel->payload->kepler_compute.HasPendingNativeInlineUpload() ||
-               channel->payload->kepler_compute.HasNativeMethodFailure();
+bool NativeGpuChannel::Backend::PendingFrontend(
+    const Tegra::Control::NativeGpuGraphicsContext& context) const {
+    return atomic_sequence.IsActive() || PendingFrontendWork(context);
+}
+
+bool NativeGpuChannel::Backend::Call(Core::System& system,
+                                     const Tegra::Control::NativeGpuGraphicsContext& context,
+                                     u32 subchannel, u32 method, u32 value, bool last,
+                                     std::stop_token stop_token) {
+    auto& gpu = system.GPU();
+    auto& rasterizer = *gpu.Renderer().ReadRasterizer();
+    return CallWithGpu(system, gpu, rasterizer, context, subchannel, method, value, last,
+                       stop_token);
+}
+
+bool NativeGpuChannel::Backend::CallWithGpu(Core::System& system, Tegra::GPU& gpu,
+                                            VideoCore::RasterizerInterface& rasterizer,
+                                            const Tegra::Control::NativeGpuGraphicsContext& context,
+                                            u32 subchannel, u32 method, u32 value, bool last,
+                                            std::stop_token stop_token) {
+    auto& payload = *channel->payload;
+    if (stop_token.stop_requested() || !atomic_sequence.AllowsSubchannel(subchannel)) {
+        return false;
     }
-
-    bool PendingFrontend(const Tegra::Control::NativeGpuGraphicsContext& context) const {
-        return atomic_sequence.IsActive() || PendingFrontendWork(context);
+    if (payload.maxwell_3d.HasPendingNativeDraw() && classes[subchannel] != 0xc797)
+        return false;
+    // This restricted scope supports state/ordering commands, not launches or
+    // macros whose output could publish a release before the scope is closed.
+    const bool restricted_scope =
+        atomic_sequence.IsActive() || payload.maxwell_3d.HasPendingNativeInstrumentation();
+    if ((classes[subchannel] == 0xc797 || classes[subchannel] == 0xc7c0) && method == 0x6c3 &&
+        PendingFrontend(context)) {
+        LOG_ERROR(HW_GPU, "Native report release blocked by unfinished frontend work");
+        return false;
     }
-
-    bool Call(Core::System& system, const Tegra::Control::NativeGpuGraphicsContext& context,
-              u32 subchannel, u32 method, u32 value, bool last, std::stop_token stop_token) {
-        auto& gpu = system.GPU();
-        auto& rasterizer = *gpu.Renderer().ReadRasterizer();
-        auto& payload = *channel->payload;
-        if (stop_token.stop_requested() || !atomic_sequence.AllowsSubchannel(subchannel)) {
+    if (classes[subchannel] == 0xc797 && (method == 0x674 || method == 0x586 || method == 0x378) &&
+        PendingFrontend(context)) {
+        LOG_ERROR(HW_GPU, "Native graphics action blocked by unfinished frontend work");
+        return false;
+    }
+    // A graphics macro may emit a clear. Its own ARG continuation is valid,
+    // but it cannot execute across unfinished or failed compute frontend work.
+    if (classes[subchannel] == 0xc797 && method >= 0xe00 &&
+        (context.HasQmdFailure() || payload.kepler_compute.HasPendingNativeMacro() ||
+         payload.kepler_compute.HasNativeMethodFailure())) {
+        return false;
+    }
+    if (restricted_scope && (method == 0x6c || method == 0x6d)) {
+        return false;
+    }
+    if ((restricted_scope || payload.maxwell_3d.HasPendingNativeInlineUpload() ||
+         payload.kepler_compute.HasPendingNativeInlineUpload()) &&
+        (method >= 0xe00 || (classes[subchannel] == 0xc7c0 && method == 0xb0))) {
+        return false;
+    }
+    if (method == 0) {
+        if ((value & ~0x1fffffU) || PendingFrontend(context)) {
             return false;
         }
-        if (payload.maxwell_3d.HasPendingNativeDraw() && classes[subchannel] != 0xc797)
-            return false;
-        // This restricted scope supports state/ordering commands, not launches or
-        // macros whose output could publish a release before the scope is closed.
-        const bool restricted_scope =
-            atomic_sequence.IsActive() || payload.maxwell_3d.HasPendingNativeInstrumentation();
-        if ((classes[subchannel] == 0xc797 || classes[subchannel] == 0xc7c0) && method == 0x6c3 &&
-            PendingFrontend(context)) {
-            LOG_ERROR(HW_GPU, "Native report release blocked by unfinished frontend work");
+        const u32 class_id = value & 0xffff;
+        if (class_id != 0xc797 && class_id != 0xc7c0 && class_id != 0x902d && class_id != 0xa140 &&
+            class_id != 0xc7b5) {
             return false;
         }
-        if (classes[subchannel] == 0xc797 && (method == 0x674 || method == 0x586) &&
-            PendingFrontend(context)) {
-            LOG_ERROR(HW_GPU, "Native graphics action blocked by unfinished frontend work");
-            return false;
-        }
-        // A graphics macro may emit a clear. Its own ARG continuation is valid,
-        // but it cannot execute across unfinished or failed compute frontend work.
-        if (classes[subchannel] == 0xc797 && method >= 0xe00 &&
-            (context.HasQmdFailure() || payload.kepler_compute.HasPendingNativeMacro() ||
-             payload.kepler_compute.HasNativeMethodFailure())) {
-            return false;
-        }
-        if (restricted_scope && (method == 0x6c || method == 0x6d)) {
-            return false;
-        }
-        if ((restricted_scope || payload.maxwell_3d.HasPendingNativeInlineUpload() ||
-             payload.kepler_compute.HasPendingNativeInlineUpload()) &&
-            (method >= 0xe00 || (classes[subchannel] == 0xc7c0 && method == 0xb0))) {
-            return false;
-        }
-        if (method == 0) {
-            if ((value & ~0x1fffffU) || PendingFrontend(context)) {
-                return false;
-            }
-            const u32 class_id = value & 0xffff;
-            if (class_id != 0xc797 && class_id != 0xc7c0 && class_id != 0x902d &&
-                class_id != 0xa140 && class_id != 0xc7b5) {
-                return false;
-            }
-            classes[subchannel] = class_id;
+        classes[subchannel] = class_id;
+        return true;
+    }
+    if (method < 0x40) {
+        switch (method) {
+        case 2: // NO_OPERATION
             return true;
-        }
-        if (method < 0x40) {
-            switch (method) {
-            case 2: // NO_OPERATION
-                return true;
-            case 4: // SEMAPHOREA
-                if (value > 0xff)
+        case 4: // SEMAPHOREA
+            if (value > 0xff)
+                return false;
+            break;
+        case 5: // SEMAPHOREB
+            if (value & 3)
+                return false;
+            break;
+        case 6:   // SEMAPHOREC
+        case 0xa: // MEM_OP_A-C
+        case 0xb:
+        case 0xc:
+            break;
+        case 7: { // SEMAPHORED: checked acquire and release forms
+            if (value == 0x100002) {
+                if (PendingFrontend(context))
                     return false;
-                break;
-            case 5: // SEMAPHOREB
-                if (value & 3)
-                    return false;
-                break;
-            case 6:   // SEMAPHOREC
-            case 0xa: // MEM_OP_A-C
-            case 0xb:
-            case 0xc:
-                break;
-            case 7: { // SEMAPHORED: checked acquire and release forms
-                if (value == 0x100002) {
-                    if (PendingFrontend(context))
-                        return false;
-                    using Release = Tegra::Control::NativeSemaphoreRelease;
-                    struct ReleaseContext {
-                        const Tegra::Control::NativeGpuGraphicsContext& graphics;
-                        VideoCore::RasterizerInterface& rasterizer;
-                        Core::System& system;
-                        std::stop_token token;
-                    } release_context{context, rasterizer, system, stop_token};
-                    const Release::Host host{
+                using Release = Tegra::Control::NativeSemaphoreRelease;
+                struct ReleaseContext {
+                    const Tegra::Control::NativeGpuGraphicsContext& graphics;
+                    VideoCore::RasterizerInterface& rasterizer;
+                    Core::System& system;
+                    std::stop_token token;
+                } release_context{context, rasterizer, system, stop_token};
+                const Release::Host
+                    host{
                         &release_context,
                         [](void* opaque, GPUVAddr address, size_t size) {
                             return static_cast<ReleaseContext*>(opaque)
@@ -158,26 +166,26 @@ struct NativeGpuChannel::Backend {
                             return static_cast<ReleaseContext*>(opaque)->token.stop_requested();
                         },
                     };
-                    const auto status =
-                        Release::Release(puller[4], puller[5], puller[6], value, host);
-                    if (status != Release::Error::None) {
-                        LOG_ERROR(
-                            HW_GPU,
-                            "Native timestamped release failed: upper={:#x}, lower={:#x}, error={}",
-                            puller[4], puller[5], static_cast<u32>(status));
-                    }
-                    return status == Release::Error::None;
+                const auto status = Release::Release(puller[4], puller[5], puller[6], value, host);
+                if (status != Release::Error::None) {
+                    LOG_ERROR(
+                        HW_GPU,
+                        "Native timestamped release failed: upper={:#x}, lower={:#x}, error={}",
+                        puller[4], puller[5], static_cast<u32>(status));
                 }
-                if (value == 0x1004) {
-                    if (PendingFrontend(context))
-                        return false;
-                    using Acquire = Tegra::Control::NativeSemaphoreAcquire;
-                    struct AcquireContext {
-                        const Tegra::Control::NativeGpuGraphicsContext& graphics;
-                        VideoCore::RasterizerInterface& rasterizer;
-                        std::stop_token token;
-                    } acquire_context{context, rasterizer, stop_token};
-                    const Acquire::Host host{
+                return status == Release::Error::None;
+            }
+            if (value == 0x1004) {
+                if (PendingFrontend(context))
+                    return false;
+                using Acquire = Tegra::Control::NativeSemaphoreAcquire;
+                struct AcquireContext {
+                    const Tegra::Control::NativeGpuGraphicsContext& graphics;
+                    VideoCore::RasterizerInterface& rasterizer;
+                    std::stop_token token;
+                } acquire_context{context, rasterizer, stop_token};
+                const Acquire::Host
+                    host{
                         &acquire_context,
                         [](void* opaque, GPUVAddr address, size_t size) {
                             return static_cast<AcquireContext*>(opaque)
@@ -202,82 +210,77 @@ struct NativeGpuChannel::Backend {
                             return static_cast<AcquireContext*>(opaque)->token.stop_requested();
                         },
                     };
-                    const auto status =
-                        Acquire::Check(puller[4], puller[5], puller[6], value, host);
-                    if (status != Acquire::Error::None) {
-                        LOG_ERROR(HW_GPU,
-                                  "Native semaphore acquire cannot continue: upper={:#x}, "
-                                  "lower={:#x}, payload={:#x}, error={}",
-                                  puller[4], puller[5], puller[6], static_cast<u32>(status));
-                    }
-                    return status == Acquire::Error::None;
+                const auto status = Acquire::Check(puller[4], puller[5], puller[6], value, host);
+                if (status != Acquire::Error::None) {
+                    LOG_ERROR(HW_GPU,
+                              "Native semaphore acquire cannot continue: upper={:#x}, "
+                              "lower={:#x}, payload={:#x}, error={}",
+                              puller[4], puller[5], puller[6], static_cast<u32>(status));
                 }
-                if ((value & ~0x0110001fU) || (value & 0x1f) != 2 || !(value & (1U << 24)) ||
-                    PendingFrontend(context) ||
-                    (!(value & (1U << 20)) && context.HasPendingQmd())) {
-                    return false;
-                }
-                const GPUVAddr address = (GPUVAddr{puller[4]} << 32) | puller[5];
-                if (!context.GetAddressSpace()->IsBackedWritableRange(address, sizeof(u32)) ||
-                    !rasterizer.SynchronizeNativeWork() || stop_token.stop_requested()) {
-                    return false;
-                }
-                const u32 data = puller[6];
-                if (!context.GetAddressSpace()->WriteBackedBlockChecked(
-                        address, {reinterpret_cast<const u8*>(&data), sizeof(data)}, stop_token)) {
-                    return false;
-                }
-                break;
+                return status == Acquire::Error::None;
             }
-            case 0xd: { // C76F MEM_OP_D: serialize supported cache/memory barriers.
-                const u32 operation = value >> 27;
-                if ((value & 0x07ffffffU) ||
-                    (operation != 5 && operation != 14 && operation != 16) ||
-                    !rasterizer.SynchronizeNativeWork()) {
-                    return false;
-                }
-                gpu.InvalidateGPUCache();
-                break;
-            }
-            case 0x1e: // WFI
-                if (value > 1 || !rasterizer.SynchronizeNativeWork())
-                    return false;
-                break;
-            default:
+            if ((value & ~0x0110001fU) || (value & 0x1f) != 2 || !(value & (1U << 24)) ||
+                PendingFrontend(context) || (!(value & (1U << 20)) && context.HasPendingQmd())) {
                 return false;
             }
-            puller[method] = value;
-            return true;
+            const GPUVAddr address = (GPUVAddr{puller[4]} << 32) | puller[5];
+            if (!context.GetAddressSpace()->IsBackedWritableRange(address, sizeof(u32)) ||
+                !rasterizer.SynchronizeNativeWork() || stop_token.stop_requested()) {
+                return false;
+            }
+            const u32 data = puller[6];
+            if (!context.GetAddressSpace()->WriteBackedBlockChecked(
+                    address, {reinterpret_cast<const u8*>(&data), sizeof(data)}, stop_token)) {
+                return false;
+            }
+            break;
         }
-        if ((classes[subchannel] == 0xc797 || classes[subchannel] == 0xc7c0) &&
-            (method == 0x52 || method == 0x53)) {
-            // The GPU worker cannot bind another channel during this job. Keep scopes
-            // inside that execution boundary; pending frontend state rejects retirement.
-            if (PendingFrontendWork(context)) {
+        case 0xd: { // C76F MEM_OP_D: serialize supported cache/memory barriers.
+            const u32 operation = value >> 27;
+            if ((value & 0x07ffffffU) || (operation != 5 && operation != 14 && operation != 16) ||
+                !rasterizer.SynchronizeNativeWork()) {
                 return false;
             }
-            return method == 0x52 ? atomic_sequence.Begin(subchannel, value)
-                                  : atomic_sequence.End(subchannel, value);
+            gpu.InvalidateGPUCache();
+            break;
         }
-        switch (classes[subchannel]) {
-        case 0xc797:
-            return payload.maxwell_3d.CallNativeMethod(system, method, value, last, stop_token);
-        case 0xc7c0:
-            return payload.kepler_compute.CallNativeMethod(method, value, last, stop_token);
-        case 0x902d:
-            // This class is unchanged, but executable 2D methods need validated native resources.
-            if (method >= Tegra::Engines::Fermi2D::Regs::NUM_REGS ||
-                payload.fermi_2d.execution_mask[method]) {
+        case 0x1e: // WFI
+            if (value > 1 || !rasterizer.SynchronizeNativeWork())
                 return false;
-            }
-            payload.fermi_2d.CallMethod(system, method, value, last);
-            return true;
+            break;
         default:
             return false;
         }
+        puller[method] = value;
+        return true;
     }
-};
-
+    if ((classes[subchannel] == 0xc797 || classes[subchannel] == 0xc7c0) &&
+        (method == 0x52 || method == 0x53)) {
+        // The GPU worker cannot bind another channel during this job. Keep scopes
+        // inside that execution boundary; pending frontend state rejects retirement.
+        if (PendingFrontendWork(context)) {
+            return false;
+        }
+        return method == 0x52 ? atomic_sequence.Begin(subchannel, value)
+                              : atomic_sequence.End(subchannel, value);
+    }
+    switch (classes[subchannel]) {
+    case 0xc797:
+        return payload.maxwell_3d.CallNativeMethod(system, method, value, last, stop_token);
+    case 0xc7c0:
+        return payload.kepler_compute.CallNativeMethod(method, value, last, stop_token);
+    case 0x902d:
+        // This class is unchanged, but executable 2D methods need validated native resources.
+        if (method >= Tegra::Engines::Fermi2D::Regs::NUM_REGS ||
+            payload.fermi_2d.execution_mask[method]) {
+            return false;
+        }
+        payload.fermi_2d.CallMethod(system, method, value, last);
+        return true;
+    default:
+        return false;
+    }
+}
 bool NativeGpuChannel::RetireBackend(Core::System& system) {
     std::shared_ptr<Backend> retired;
     {

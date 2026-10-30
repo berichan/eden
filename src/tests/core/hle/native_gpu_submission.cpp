@@ -12,17 +12,93 @@
 #include "common/swap.h"
 #include "core/core.h"
 #include "core/device_memory.h"
+#include "core/hle/service/nvdrv/core/native_gpu_backend.h"
 #include "core/hle/service/nvdrv/core/native_gpu_submission.h"
 #include "core/hle/service/nvdrv/devices/nvhost_native_gpu.h"
 #include "video_core/control/channel_state_cache.inc"
+#include "video_core/control/native_gpu_context.h"
 #include "video_core/control/native_report_semaphore.h"
 #include "video_core/gpu_thread.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/memory_manager.h"
+#include "video_core/renderer_null/null_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_state_tracker.h"
 #ifdef HAS_OPENGL
 #include "video_core/renderer_opengl/gl_state_tracker.h"
 #endif
+
+namespace Service::Nvidia::NvCore {
+struct NativeGpuBackendTest {
+    static void Run(bool compute_upload) {
+        Core::System system;
+        Core::DeviceMemory memory;
+        Tegra::MaxwellDeviceMemoryManager backing{memory};
+        auto space =
+            std::make_shared<Tegra::MemoryManager>(system, backing, 32, 1ULL << 32, 16, 12);
+        Tegra::GPU gpu{system, false, false};
+        Null::RasterizerNull rasterizer{gpu};
+        backing.BindInterface(&rasterizer);
+        auto graphics = std::make_shared<Tegra::Control::AmpereGraphicsState>();
+        auto context = std::make_shared<Tegra::Control::NativeGpuGraphicsContext>(graphics, space);
+        NativeGpuChannel::Backend backend;
+        backend.channel = std::make_shared<Tegra::Control::ChannelState>(0);
+        backend.channel->memory_manager = space.get();
+        backend.channel->Init(system, 0);
+        backend.channel->BindRasterizer(&rasterizer);
+        auto& payload = *backend.channel->payload;
+        payload.maxwell_3d.SetNativeMacroState(graphics);
+        payload.kepler_compute.SetNativeContext(context);
+        const auto call = [&](u32 subchannel, u32 method, u32 value) {
+            return backend.CallWithGpu(system, gpu, rasterizer, *context, subchannel, method, value,
+                                       true, {});
+        };
+        REQUIRE(call(0, 0, 0xc797));
+        REQUIRE(call(1, 0, 0xc7c0));
+        if (compute_upload) {
+            REQUIRE(space->MapSparse(0x8000000, 0x1000, false) == 0x8000000);
+            REQUIRE(call(1, 0x60, 8));
+            REQUIRE(call(1, 0x61, 1));
+            REQUIRE(call(1, 0x62, 0));
+            REQUIRE(call(1, 0x63, 0x8000000));
+            REQUIRE(call(1, 0x64, 0));
+            REQUIRE(call(1, 0x6c, 0x1011));
+            REQUIRE(call(1, 0x6d, 0x12345678));
+            REQUIRE(payload.kepler_compute.HasPendingNativeInlineUpload());
+        } else {
+            REQUIRE(call(0, 0x52, 0));
+            REQUIRE(backend.atomic_sequence.IsActive());
+        }
+        REQUIRE(backend.PendingFrontend(*context));
+        REQUIRE_FALSE(call(0, 0x378, 2));
+        REQUIRE_FALSE(call(0, 0x586, 4));
+        REQUIRE_FALSE(payload.maxwell_3d.HasPendingNativeDraw());
+        REQUIRE_FALSE(payload.maxwell_3d.HasNativeMacroFailure());
+        REQUIRE(payload.maxwell_3d.GetRegisterValue(0x586) == 0);
+        if (!compute_upload) {
+            REQUIRE(call(0, 0x53, 0));
+            REQUIRE_FALSE(backend.PendingFrontend(*context));
+            REQUIRE(call(0, 0x651, 2));
+            REQUIRE(call(0, 0x8f, 3));
+            REQUIRE(call(0, 0x586, 4));
+            REQUIRE(backend.PendingFrontend(*context));
+            REQUIRE(call(0, 0x5f8, 3));
+            REQUIRE(backend.PendingFrontend(*context));
+            REQUIRE_FALSE(call(0, 0x6c3, 0xf006));
+            REQUIRE(call(0, 0x585, 0));
+            REQUIRE_FALSE(backend.PendingFrontend(*context));
+        }
+    }
+};
+} // namespace Service::Nvidia::NvCore
+
+TEST_CASE("Native backend rejects graphics BEGIN inside an atomic scope", "[core][ipc]") {
+    Service::Nvidia::NvCore::NativeGpuBackendTest::Run(false);
+}
+
+TEST_CASE("Native backend rejects graphics BEGIN across incomplete compute uploads",
+          "[core][ipc]") {
+    Service::Nvidia::NvCore::NativeGpuBackendTest::Run(true);
+}
 
 namespace {
 using namespace Service::Nvidia;

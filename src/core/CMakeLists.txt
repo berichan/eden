@@ -868,6 +868,7 @@ add_library(core STATIC
     hle/service/nvdrv/core/native_gpu_channel.cpp
     hle/service/nvdrv/core/native_gpu_channel.h
     hle/service/nvdrv/core/native_gpu_submission.cpp
+    hle/service/nvdrv/core/native_gpu_backend.h
     hle/service/nvdrv/core/native_gpu_submission.h
     hle/service/nvdrv/core/native_gpu_error_notifier.cpp
     hle/service/nvdrv/core/native_gpu_error_notifier.h
