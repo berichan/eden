@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <memory>
 #include "core/hle/service/kernel_helpers.h"
 #include "core/hle/service/service.h"
 
@@ -12,6 +13,7 @@ class SyncpointManager;
 }
 
 namespace Service::GSV {
+class NativeSyncpointWaitPool;
 
 class SyncptSession final : public ServiceFramework<SyncptSession> {
 public:
@@ -26,6 +28,9 @@ private:
     void SetEventCount(HLERequestContext& ctx);
     void CreateEvent(HLERequestContext& ctx);
     void QueryCounter(HLERequestContext& ctx);
+    void WaitCounter(HLERequestContext& ctx);
+    void CancelWait(HLERequestContext& ctx);
+    NativeSyncpointWaitPool& WaitPool();
 
     // The application quick context has 63 client slots and one additional internal slot.
     static constexpr u32 MaxEventCount = 63;
@@ -33,6 +38,7 @@ private:
     std::array<Kernel::KEvent*, MaxEventCount + 1> m_events{};
     u32 m_event_count{};
     Tegra::Host1x::SyncpointManager* m_syncpoints;
+    std::unique_ptr<NativeSyncpointWaitPool> m_waits;
 };
 
 } // namespace Service::GSV

@@ -28,6 +28,7 @@ add_executable(tests
     core/hle/native_gpu_submission.cpp
     core/hle/native_gpu_context.cpp
     core/hle/native_syncpoint_shim.cpp
+    core/hle/native_syncpoint_wait.cpp
     core/hle/gpu_memory_attribute.cpp
     core/hle/native_image_layout.cpp
     core/internal_network/network.cpp

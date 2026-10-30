@@ -916,6 +916,27 @@ TEST_CASE("Native syncpoint queries return completed counters with the verified 
     REQUIRE(RequestWords(caller, service, 103, identifier, 4).first == Kernel::ResultNotFound);
 }
 
+TEST_CASE("Native syncpoint wait packets reject malformed sizes and uncreated event slots",
+          "[core][ipc][gsv]") {
+    Caller caller;
+    Tegra::Host1x::SyncpointManager counters;
+    Service::GSV::SyncptSession service{caller.system, &counters};
+    REQUIRE(RequestWords(caller, service, 201, {}).first == Kernel::ResultInvalidSize);
+    REQUIRE(RequestWords(caller, service, 202, {}).first == Kernel::ResultInvalidSize);
+    const std::array<u32, 1> count{63};
+    REQUIRE(RequestWords(caller, service, 21, count).first.IsSuccess());
+    for (u32 slot : {0U, 63U, 64U, 0x10000U, 0xffffffffU}) {
+        const std::array<u32, 5> wait{slot, ~17U, 2, 0, 0xaabbcc00};
+        REQUIRE(RequestWords(caller, service, 201, wait).first == Result{0x100f3});
+        REQUIRE(RequestWords(caller, service, 201, std::span{wait}.first(4)).first ==
+                Kernel::ResultInvalidSize);
+        const std::array<u32, 1> cancel{slot};
+        REQUIRE(RequestWords(caller, service, 202, cancel).first == Result{0x100f3});
+        const std::array<u32, 2> extra{slot, 0};
+        REQUIRE(RequestWords(caller, service, 202, extra).first == Kernel::ResultInvalidSize);
+    }
+}
+
 TEST_CASE("Copied guest objects remain referenced until the IPC reply is released", "[core][ipc]") {
     Caller caller;
     const auto references = caller.process.GetReferenceCount();

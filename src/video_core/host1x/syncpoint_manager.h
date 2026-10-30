@@ -34,9 +34,10 @@ public:
 
     private:
         friend class SyncpointManager;
-        Reservation(std::shared_ptr<Allocations> allocations, u32 id);
+        Reservation(std::shared_ptr<Allocations> allocations, u32 id, bool borrowed = false);
         std::shared_ptr<Allocations> allocations;
         u32 id;
+        bool borrowed;
     };
 
     SyncpointManager();
@@ -44,6 +45,9 @@ public:
     bool TryReserveSyncpoint(u32 id);
     void ReleaseSyncpoint(u32 id);
     std::optional<Reservation> AllocateNativeChannelSyncpoint();
+    // Pin the current allocation without extending its owner's lifetime. Retired IDs
+    // cannot be reused until all pending waits have released their pins.
+    std::optional<Reservation> BorrowSyncpoint(u32 id);
     u32 GetGuestSyncpointValue(u32 id) const {
         return syncpoints_guest[id].load(std::memory_order_acquire);
     }
@@ -60,6 +64,17 @@ public:
         std::function<void()> action;
     };
     using ActionHandle = std::list<RegisteredAction>::iterator;
+
+    class NativeAction;
+    using NativeActionHandle = std::shared_ptr<NativeAction>;
+    static bool IsNativeReady(u32 current, u32 target) {
+        return u32(current - target) < 0x80000000U;
+    }
+    // Unlike legacy action iterators, these identities remain safe to cancel after
+    // completion or slot reuse. Callbacks run outside the counter lock. The caller
+    // retains an allocation pin until cancellation or callback completion.
+    NativeActionHandle RegisterNativeHostAction(u32 id, u32 target, std::function<void()> action);
+    void DeregisterNativeHostAction(const NativeActionHandle& action);
 
     template <typename Func>
     ActionHandle RegisterGuestAction(u32 syncpoint_id, u32 expected_value, Func&& action) {
@@ -98,6 +113,13 @@ public:
     }
 
 private:
+    struct NativeRegistration {
+        u32 target;
+        NativeActionHandle action;
+    };
+    using NativeActions = std::list<NativeRegistration>;
+    void CollectNativeActions(u32 id, NativeActions& ready);
+    static void RunNativeActions(NativeActions& ready);
     std::shared_ptr<Allocations> allocations;
     void Increment(std::atomic<u32>& syncpoint, std::condition_variable& wait_cv,
                    std::list<RegisteredAction>& action_storage);
@@ -117,6 +139,7 @@ private:
 
     std::array<std::list<RegisteredAction>, NUM_MAX_SYNCPOINTS> guest_action_storage;
     std::array<std::list<RegisteredAction>, NUM_MAX_SYNCPOINTS> host_action_storage;
+    std::array<NativeActions, NUM_MAX_SYNCPOINTS> native_host_actions;
 
     std::mutex guard;
     std::condition_variable wait_guest_cv;

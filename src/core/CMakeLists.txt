@@ -713,6 +713,8 @@ add_library(core STATIC
     hle/service/gsv/native_memory_descriptions.h
     hle/service/gsv/syncpt_session.cpp
     hle/service/gsv/syncpt_session.h
+    hle/service/gsv/native_syncpoint_wait_pool.cpp
+    hle/service/gsv/native_syncpoint_wait_pool.h
     hle/service/gsv/user_session.cpp
     hle/service/gsv/user_session.h
     hle/service/hid/active_vibration_device_list.cpp

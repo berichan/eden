@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <cstring>
+#include <new>
 
 #include "core/core.h"
 #include "core/hle/kernel/k_event.h"
 #include "core/hle/kernel/k_readable_event.h"
 #include "core/hle/kernel/svc_results.h"
+#include "core/hle/service/gsv/native_syncpoint_wait_pool.h"
 #include "core/hle/service/gsv/syncpt_session.h"
 #include "core/hle/service/ipc_helpers.h"
 #include "video_core/host1x/host1x.h"
@@ -25,6 +27,15 @@ bool HasInputWords(HLERequestContext& ctx, u32 words) {
            ctx.GetDataPayloadOffset() <= IPC::COMMAND_BUFFER_LENGTH - words;
 }
 
+bool HasPlainInputWords(HLERequestContext& ctx, u32 words) {
+    IPC::CommandHeader header{};
+    std::memcpy(&header, ctx.CommandBuffer(), sizeof(header));
+    return HasInputWords(ctx, words) && header.num_buf_a_descriptors == 0 &&
+           header.num_buf_b_descriptors == 0 && header.num_buf_x_descriptors == 0 &&
+           header.num_buf_w_descriptors == 0 && header.enable_handle_descriptor == 0 &&
+           header.buf_c_descriptor_flags == IPC::CommandHeader::BufferDescriptorCFlag::Disabled;
+}
+
 void Reply(HLERequestContext& ctx, Result result) {
     IPC::ResponseBuilder rb{ctx, 2};
     rb.Push(result);
@@ -41,11 +52,14 @@ SyncptSession::SyncptSession(Core::System& system, Tegra::Host1x::SyncpointManag
         {21, &SyncptSession::SetEventCount, "SetEventCount"},
         {22, &SyncptSession::CreateEvent, "CreateEvent"},
         {103, &SyncptSession::QueryCounter, "QueryCounter"},
+        {201, &SyncptSession::WaitCounter, "WaitCounter"},
+        {202, &SyncptSession::CancelWait, "CancelWait"},
     };
     RegisterHandlersTipc(functions);
 }
 
 SyncptSession::~SyncptSession() {
+    m_waits.reset();
     for (auto* event : m_events) {
         m_service_context.CloseEvent(event);
     }
@@ -104,6 +118,8 @@ void SyncptSession::CreateEvent(HLERequestContext& ctx) {
         auto* event = m_service_context.CreateEvent("GsvSyncptEvent");
         R_UNLESS(event != nullptr, Kernel::ResultOutOfResource);
         m_events[index] = event;
+        if (m_waits)
+            m_waits->Enable(index);
         ctx.AddCopyObject(&event->GetReadableEvent());
         LOG_DEBUG(Service, "GSV syncpoint event created: index={}", index);
         R_SUCCEED();
@@ -115,15 +131,7 @@ void SyncptSession::CreateEvent(HLERequestContext& ctx) {
 void SyncptSession::QueryCounter(HLERequestContext& ctx) {
     u64 value{};
     const auto result = [&]() -> Result {
-        R_UNLESS(HasInputWords(ctx, 1), Kernel::ResultInvalidSize);
-        IPC::CommandHeader header{};
-        std::memcpy(&header, ctx.CommandBuffer(), sizeof(header));
-        R_UNLESS(header.num_buf_a_descriptors == 0 && header.num_buf_b_descriptors == 0 &&
-                     header.num_buf_x_descriptors == 0 && header.num_buf_w_descriptors == 0 &&
-                     header.enable_handle_descriptor == 0 &&
-                     header.buf_c_descriptor_flags ==
-                         IPC::CommandHeader::BufferDescriptorCFlag::Disabled,
-                 Kernel::ResultInvalidSize);
+        R_UNLESS(HasPlainInputWords(ctx, 1), Kernel::ResultInvalidSize);
         IPC::RequestParser rp{ctx};
         // Native GPU counter identifiers are the bitwise complement of the hardware ID.
         const u32 id = ~rp.Pop<u32>();
@@ -140,6 +148,66 @@ void SyncptSession::QueryCounter(HLERequestContext& ctx) {
     rb.Push(result);
     rb.Push(value);
     rb.Push<u32>(0); // Native GPU counters use 32-bit circular comparisons.
+}
+
+NativeSyncpointWaitPool& SyncptSession::WaitPool() {
+    if (!m_waits) {
+        auto& manager = m_syncpoints ? *m_syncpoints : system.Host1x().GetSyncpointManager();
+        m_waits = std::make_unique<NativeSyncpointWaitPool>(
+            manager,
+            NativeSyncpointWaitPool::Host{this,
+                                          [](void* context, u32 slot) {
+                                              auto& self = *static_cast<SyncptSession*>(context);
+                                              self.m_events[slot]->Clear(self.system.Kernel());
+                                          },
+                                          [](void* context, u32 slot) {
+                                              auto& self = *static_cast<SyncptSession*>(context);
+                                              self.m_events[slot]->Signal(self.system.Kernel());
+                                          }});
+        for (u32 slot = 0; slot < m_event_count; ++slot) {
+            if (m_events[slot])
+                m_waits->Enable(slot);
+        }
+    }
+    return *m_waits;
+}
+
+void SyncptSession::WaitCounter(HLERequestContext& ctx) {
+    const auto result = [&]() -> Result {
+        R_UNLESS(HasPlainInputWords(ctx, 5), Kernel::ResultInvalidSize);
+        IPC::RequestParser rp{ctx};
+        const auto slot = rp.Pop<u32>();
+        const u32 counter = ~rp.Pop<u32>();
+        const auto target = rp.Pop<u64>();
+        // Only the low byte is initialized by the SDK; the remaining bytes are padding.
+        const auto mode = static_cast<u8>(rp.Pop<u32>());
+        R_UNLESS(slot < m_event_count && m_events[slot], ResultInvalidEvent);
+        try {
+            const auto result = WaitPool().Arm(slot, counter, target, mode);
+            LOG_DEBUG(Service,
+                      "Native syncpoint wait armed: slot={}, id={}, target={}, mode={}, "
+                      "result={:#x}",
+                      slot, counter, target, mode, result.raw);
+            return result;
+        } catch (const std::bad_alloc&) {
+            return Kernel::ResultOutOfResource;
+        }
+    }();
+    Reply(ctx, result);
+}
+
+void SyncptSession::CancelWait(HLERequestContext& ctx) {
+    const auto result = [&]() -> Result {
+        R_UNLESS(HasPlainInputWords(ctx, 1), Kernel::ResultInvalidSize);
+        IPC::RequestParser rp{ctx};
+        const auto slot = rp.Pop<u32>();
+        R_UNLESS(slot < m_event_count && m_events[slot], ResultInvalidEvent);
+        if (m_waits)
+            return m_waits->Cancel(slot);
+        // A valid idle slot still acknowledges cancellation to the SDK waiter.
+        return m_events[slot]->Signal(system.Kernel());
+    }();
+    Reply(ctx, result);
 }
 
 } // namespace Service::GSV

@@ -18,6 +18,16 @@ namespace Host1x {
 struct SyncpointManager::Allocations {
     std::mutex mutex;
     std::bitset<NativeSyncpointCount> reserved;
+    std::array<u32, NativeSyncpointCount> pins{};
+};
+
+class SyncpointManager::NativeAction {
+public:
+    NativeAction(u32 id_, std::function<void()> callback_)
+        : id{id_}, callback{std::move(callback_)} {}
+    const u32 id;
+    std::atomic<bool> active{true};
+    const std::function<void()> callback;
 };
 
 SyncpointManager::SyncpointManager() : allocations{std::make_shared<Allocations>()} {}
@@ -41,7 +51,7 @@ bool SyncpointManager::TryReserveSyncpoint(u32 id) {
         return false;
     }
     std::scoped_lock lock{allocations->mutex};
-    if (allocations->reserved.test(id)) {
+    if (allocations->reserved.test(id) || allocations->pins[id] != 0) {
         return false;
     }
     allocations->reserved.set(id);
@@ -54,17 +64,23 @@ void SyncpointManager::ReleaseSyncpoint(u32 id) {
     allocations->reserved.reset(id);
 }
 
-SyncpointManager::Reservation::Reservation(std::shared_ptr<Allocations> allocations_, u32 id_)
-    : allocations{std::move(allocations_)}, id{id_} {}
+SyncpointManager::Reservation::Reservation(std::shared_ptr<Allocations> allocations_, u32 id_,
+                                           bool borrowed_)
+    : allocations{std::move(allocations_)}, id{id_}, borrowed{borrowed_} {}
 
 SyncpointManager::Reservation::Reservation(Reservation&& other) noexcept
-    : allocations{std::move(other.allocations)}, id{other.id} {}
+    : allocations{std::move(other.allocations)}, id{other.id}, borrowed{other.borrowed} {}
 
 SyncpointManager::Reservation::~Reservation() {
     if (allocations) {
         std::scoped_lock lock{allocations->mutex};
-        ASSERT(allocations->reserved.test(id));
-        allocations->reserved.reset(id);
+        if (borrowed) {
+            ASSERT(allocations->pins[id] != 0);
+            --allocations->pins[id];
+        } else {
+            ASSERT(allocations->reserved.test(id));
+            allocations->reserved.reset(id);
+        }
     }
 }
 
@@ -75,12 +91,74 @@ u32 SyncpointManager::Reservation::GetId() const {
 std::optional<SyncpointManager::Reservation> SyncpointManager::AllocateNativeChannelSyncpoint() {
     std::scoped_lock lock{allocations->mutex};
     for (u32 id = NativeChannelSyncpointBase; id < NativeSyncpointCount; ++id) {
-        if (!IsFixedSyncpoint(id) && !allocations->reserved.test(id)) {
+        if (!IsFixedSyncpoint(id) && !allocations->reserved.test(id) &&
+            allocations->pins[id] == 0) {
             allocations->reserved.set(id);
             return Reservation{allocations, id};
         }
     }
     return std::nullopt;
+}
+
+std::optional<SyncpointManager::Reservation> SyncpointManager::BorrowSyncpoint(u32 id) {
+    if (id >= NativeSyncpointCount)
+        return std::nullopt;
+    std::scoped_lock lock{allocations->mutex};
+    if ((!IsFixedSyncpoint(id) && !allocations->reserved.test(id)) ||
+        allocations->pins[id] == UINT32_MAX)
+        return std::nullopt;
+    ++allocations->pins[id];
+    return Reservation{allocations, id, true};
+}
+
+SyncpointManager::NativeActionHandle SyncpointManager::RegisterNativeHostAction(
+    u32 id, u32 target, std::function<void()> action) {
+    ASSERT(id < NativeSyncpointCount);
+    auto handle = std::make_shared<NativeAction>(id, std::move(action));
+    NativeActions ready;
+    {
+        std::scoped_lock lock{guard};
+        if (IsNativeReady(syncpoints_host[id].load(std::memory_order_acquire), target)) {
+            ready.push_back({target, handle});
+        } else {
+            native_host_actions[id].push_back({target, handle});
+        }
+    }
+    RunNativeActions(ready);
+    return handle;
+}
+
+void SyncpointManager::DeregisterNativeHostAction(const NativeActionHandle& action) {
+    if (!action)
+        return;
+    action->active.store(false, std::memory_order_release);
+    std::scoped_lock lock{guard};
+    native_host_actions[action->id].remove_if(
+        [&](const auto& entry) { return entry.action == action; });
+}
+
+void SyncpointManager::CollectNativeActions(u32 id, NativeActions& ready) {
+    const auto current = syncpoints_host[id].load(std::memory_order_acquire);
+    auto& pending = native_host_actions[id];
+    for (auto it = pending.begin(); it != pending.end();) {
+        auto entry = it++;
+        if (IsNativeReady(current, entry->target))
+            ready.splice(ready.end(), pending, entry);
+    }
+}
+
+void SyncpointManager::RunNativeActions(NativeActions& ready) {
+    for (auto& entry : ready) {
+        if (!entry.action->active.exchange(false, std::memory_order_acq_rel))
+            continue;
+        try {
+            entry.action->callback();
+        } catch (const std::exception& error) {
+            LOG_ERROR(HW_GPU, "Native syncpoint wait notification failed: {}", error.what());
+        } catch (...) {
+            LOG_ERROR(HW_GPU, "Native syncpoint wait notification failed");
+        }
+    }
 }
 
 SyncpointManager::ActionHandle SyncpointManager::RegisterAction(
@@ -133,13 +211,20 @@ void SyncpointManager::IncrementGuest(u32 syncpoint_id) {
 
 void SyncpointManager::IncrementHost(u32 syncpoint_id) {
     Increment(syncpoints_host[syncpoint_id], wait_host_cv, host_action_storage[syncpoint_id]);
+    NativeActions ready;
+    {
+        std::scoped_lock lock{guard};
+        CollectNativeActions(syncpoint_id, ready);
+    }
+    RunNativeActions(ready);
 }
 
 bool SyncpointManager::PublishNativeCompletion(u32 syncpoint_id, u32 target, u32 increments) {
     if (syncpoint_id >= NUM_MAX_SYNCPOINTS || increments == 0 || target < increments) {
         return false;
     }
-    std::scoped_lock lock{guard};
+    NativeActions ready;
+    std::unique_lock lock{guard};
     const auto previous = target - increments;
     if (syncpoints_guest[syncpoint_id].load(std::memory_order_acquire) != previous ||
         syncpoints_host[syncpoint_id].load(std::memory_order_acquire) != previous) {
@@ -165,6 +250,9 @@ bool SyncpointManager::PublishNativeCompletion(u32 syncpoint_id, u32 target, u32
     notify(host_action_storage[syncpoint_id]);
     wait_guest_cv.notify_all();
     wait_host_cv.notify_all();
+    CollectNativeActions(syncpoint_id, ready);
+    lock.unlock();
+    RunNativeActions(ready);
     return true;
 }
 
