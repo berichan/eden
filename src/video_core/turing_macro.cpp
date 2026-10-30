@@ -133,9 +133,18 @@ public:
             }
             LoadParameters();
             const auto mask = PredicateMask();
+            // Ordinary operands are sampled by both lanes before either writes
+            // its register result. Carry chaining and output latches stay ordered.
+            std::array<std::array<u32, 2>, 2> operands{};
             for (u32 slot = 0; slot < 2 && result.error == Error::None; ++slot) {
                 if ((mask & (1U << slot)) != 0) {
-                    EvaluateAlu(slot);
+                    const auto& alu = inst.alu[slot];
+                    operands[slot] = {Register(alu.source_a, slot), Register(alu.source_b, slot)};
+                }
+            }
+            for (u32 slot = 0; slot < 2 && result.error == Error::None; ++slot) {
+                if ((mask & (1U << slot)) != 0) {
+                    EvaluateAlu(slot, operands[slot][0], operands[slot][1]);
                 }
             }
             for (u32 slot = 0; slot < 2 && result.error == Error::None; ++slot) {
@@ -274,10 +283,8 @@ private:
         }
     }
 
-    void EvaluateAlu(u32 slot) {
+    void EvaluateAlu(u32 slot, u32 x, u32 y) {
         const auto& alu = inst.alu[slot];
-        const u32 x = Register(alu.source_a, slot);
-        const u32 y = Register(alu.source_b, slot);
         if (result.error != Error::None) {
             return;
         }

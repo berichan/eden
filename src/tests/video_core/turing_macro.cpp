@@ -185,7 +185,7 @@ TEST_CASE("Turing MME instruction reads require a complete bounded upload", "[vi
     REQUIRE(words == Engine::EncodedInstruction{1, 2, 3});
 }
 
-TEST_CASE("Turing MME executes dual ALUs with forwarding and signed arithmetic",
+TEST_CASE("Turing MME executes dual ALUs with sampled operands and signed arithmetic",
           "[video_core][ipc]") {
     struct Case {
         Op op;
@@ -217,22 +217,25 @@ TEST_CASE("Turing MME executes dual ALUs with forwarding and signed arithmetic",
     };
     Engine engine;
     for (const auto& test : cases) {
+        Inst seed;
+        seed.alu[0] = {Op::Add, 23, I, Z};
+        seed.immediate[0] = 0x1234;
         Inst work;
         work.alu[0] = {test.op, 23, L0, L1};
         work.alu[1] = {Op::Add, Z, 23, Z};
         work.immediate[0] = test.immediate;
         work.output = {Engine::Output{0, 1}, Engine::Output{0, 2}};
         work.end_next = true;
-        Upload(engine, std::array{Method(), work, Inst{}});
+        Upload(engine, std::array{Method(), seed, work, Inst{}});
         Host host;
         host.parameters = {test.x, test.y};
         const auto result = engine.Execute(0, host.Bind(), 20);
         REQUIRE(result.Succeeded());
-        REQUIRE(result.instructions == 3);
+        REQUIRE(result.instructions == 4);
         REQUIRE(result.parameters == 2);
         REQUIRE(result.methods == 2);
         REQUIRE(host.methods ==
-                std::vector<std::pair<u16, u32>>{{0x100, test.expected}, {0x104, test.expected}});
+                std::vector<std::pair<u16, u32>>{{0x100, test.expected}, {0x104, 0x1234}});
     }
     for (const auto op : {Op::AddCarry, Op::SubtractBorrow, Op::MultiplyHigh}) {
         Inst work;
@@ -271,6 +274,63 @@ TEST_CASE("Turing MME keeps register 23 separate from its ALU result latches",
     host.parameters = {0x11112222};
     REQUIRE(engine.Execute(0, host.Bind(), 20).Succeeded());
     REQUIRE(host.methods.back().second == 0x11112222);
+}
+
+TEST_CASE("Turing MME paired writes use the old address and retain the new payload",
+          "[video_core][ipc]") {
+    Engine engine;
+    constexpr u32 first = 0x405;
+    REQUIRE(engine.WriteData(first - 1, 0xaaaaaaaa));
+    REQUIRE(engine.WriteData(first + 2, 0xbbbbbbbb));
+    Inst seed, replace, write;
+    seed.alu[0] = {Op::Add, 5, L0, Z};
+    seed.alu[1] = {Op::Add, 8, L1, Z};
+    replace.alu[0] = {Op::Add, 5, L0, Z};
+    replace.alu[1] = {Op::DataWrite, Z, 5, 8};
+    write.alu[0] = {Op::DataWrite, Z, I, 5};
+    write.immediate[0] = first + 1;
+    write.end_next = true;
+    Upload(engine, std::array{seed, replace, write, Inst{}});
+    Host host;
+    host.parameters = {first, 0x12345678, 0x01000405};
+    const auto result = engine.Execute(0, host.Bind(), 20);
+    REQUIRE(result.Succeeded());
+    u32 value{};
+    REQUIRE(engine.ReadData(first, value));
+    REQUIRE(value == 0x12345678);
+    REQUIRE(engine.ReadData(first + 1, value));
+    REQUIRE(value == 0x01000405);
+    REQUIRE(engine.ReadData(first - 1, value));
+    REQUIRE(value == 0xaaaaaaaa);
+    REQUIRE(engine.ReadData(first + 2, value));
+    REQUIRE(value == 0xbbbbbbbb);
+}
+
+TEST_CASE("Turing MME paired operands preserve old definitions and lane predication",
+          "[video_core][ipc]") {
+    Engine engine;
+    Inst use;
+    use.alu[0] = {Op::Add, 5, I, Z};
+    use.immediate[0] = 0x1234;
+    use.alu[1] = {Op::Add, Z, 5, Z};
+    use.end_next = true;
+    Upload(engine, std::array{use, Inst{}});
+    const auto undefined = engine.Execute(0, {}, 20);
+    REQUIRE(undefined.error == Engine::Error::UndefinedRegister);
+    REQUIRE(undefined.undefined_register == 5);
+    // A disabled second lane must not read its undefined input.
+    use.predicate_mode = 5; // TFUU with predicate zero disables ALU1.
+    use.predicate = Z;
+    use.end_next = false;
+    Inst verify;
+    verify.alu[0] = {Op::DataWrite, Z, I, 5};
+    verify.immediate[0] = 0x410;
+    verify.end_next = true;
+    Upload(engine, std::array{use, verify, Inst{}});
+    REQUIRE(engine.Execute(0, {}, 20).Succeeded());
+    u32 value{};
+    REQUIRE(engine.ReadData(0x410, value));
+    REQUIRE(value == 0x1234);
 }
 
 TEST_CASE("Turing MME predication consumes loads before enabling individual execution slots",
