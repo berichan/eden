@@ -602,8 +602,8 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
                 if (NativeVersionRegister(method) || IsNativeVersionSet(method) ||
                     IsNativeConstantBufferBind(method) ||
                     Control::DecodeNativeGraphicsCacheAction(method, value).has_value() ||
-                    method == 0x8c4 || method == 0x54 || method == 0x55 || method == 0x6c ||
-                    method == 0x6d || (method >= 0x8e4 && method <= 0x8f3)) {
+                    method == 0x451 || method == 0x8c4 || method == 0x54 || method == 0x55 ||
+                    method == 0x6c || method == 0x6d || (method >= 0x8e4 && method <= 0x8f3)) {
                     self.engine.CallMethod(self.system, method, value, true);
                     return !self.engine.HasNativeMacroFailure();
                 }
@@ -645,6 +645,12 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
         }
         if (method == 0x44) {
             native_action_failed = !NativeWaitForIdle();
+            return;
+        }
+        if (method == 0x451) { // C797 FLUSH_PENDING_WRITES
+            // Bit 0 describes shader global stores. A real drain supplies stronger
+            // ordering for either value without releasing parked QMD dependencies.
+            native_action_failed = method_argument > 1 || !NativeWaitForIdle();
             return;
         }
         if (const auto action = Control::DecodeNativeGraphicsCacheAction(method, method_argument)) {

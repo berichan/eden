@@ -222,11 +222,10 @@ NvResult NativeGpuChannel::SetTimeout(u32 timeout_) {
 }
 
 NvResult NativeGpuChannel::AllocateObjectContext(u32 class_id, u32 flags) {
-    if (class_id != Tegra::Control::AmpereGraphicsState::ClassId) {
+    if (class_id != Tegra::Control::AmpereGraphicsState::ClassId && class_id != 0xc7c0) {
         switch (class_id) {
         case 0x902d:
         case 0xa140:
-        case 0xc7c0:
         case 0xc76f:
         case 0xc7b5:
             return NvResult::NotSupported;

@@ -68,18 +68,21 @@ TEST_CASE("Native graphics context requests allocate owned class state with a va
         set_word(0, class_id);
         REQUIRE(device.Ioctl1(4, allocate, input, output) == NvResult::BadParameter);
     }
-    for (u32 class_id : {0x902dU, 0xa140U, 0xc7c0U, 0xc76fU, 0xc7b5U}) {
+    for (u32 class_id : {0x902dU, 0xa140U, 0xc76fU, 0xc7b5U}) {
         set_word(0, class_id);
         REQUIRE(device.Ioctl1(4, allocate, input, output) == NvResult::NotSupported);
     }
-    set_word(0, 0xc797);
-    for (u32 flags : {1U, 2U, 4U, 0xffffffffU}) {
-        set_word(4, flags);
-        REQUIRE(device.Ioctl1(4, allocate, input, output) == NvResult::NotSupported);
+    for (u32 class_id : {0xc797U, 0xc7c0U}) {
+        set_word(0, class_id);
+        for (u32 flags : {1U, 2U, 4U, 0xffffffffU}) {
+            set_word(4, flags);
+            REQUIRE(device.Ioctl1(4, allocate, input, output) == NvResult::NotSupported);
+        }
     }
     REQUIRE(channel->GetGraphicsContext() == nullptr);
     REQUIRE(output.front() == 0xcc);
     REQUIRE(output.back() == 0xcc);
+    set_word(0, 0xc797);
     set_word(4, 0);
     REQUIRE(device.Ioctl1(4, allocate, input, output) == NvResult::Success);
     REQUIRE(std::memcmp(input.data(), output.data(), input.size()) == 0);
@@ -134,7 +137,8 @@ TEST_CASE("Native graphics state follows scheduling groups and retains address s
                     NvResult::Success);
             REQUIRE(channel->BindGroup(fd == 7 ? separate_group : group, fd == 6 ? 1 : 0) ==
                     NvResult::Success);
-            REQUIRE(channels.AllocateObjectContext(fd, owner, 0xc797, 0) == NvResult::Success);
+            REQUIRE(channels.AllocateObjectContext(fd, owner, fd == 5 ? 0xc7c0 : 0xc797, 0) ==
+                    NvResult::Success);
         }
         retained = channels.Get(4, owner)->GetGraphicsContext();
         weak_state = retained->GetState();
@@ -147,6 +151,9 @@ TEST_CASE("Native graphics state follows scheduling groups and retains address s
         REQUIRE(retained->SignalQmd(0x1000, 3, {}).error ==
                 Tegra::Control::NativeQmdScheduler::Error::ReadFault);
         REQUIRE(channels.Get(5, owner)->GetGraphicsContext()->HasQmdFailure());
+        REQUIRE(channels.AllocateObjectContext(5, owner, 0xc7c0, 0) == NvResult::Success);
+        REQUIRE(channels.Get(5, owner)->GetGraphicsContext() == retained);
+        REQUIRE(channels.Get(5, owner)->GetGraphicsContext()->HasQmdFailure());
         REQUIRE_FALSE(alternate->HasQmdFailure());
         REQUIRE(channels.Get(7, owner)->GetGraphicsContext()->GetState() != retained->GetState());
         retained->GetState()->registers[0x202] = 2560;
@@ -155,6 +162,10 @@ TEST_CASE("Native graphics state follows scheduling groups and retains address s
         REQUIRE(retained->GetState()->macro_engine.WriteData(0x123, 0x76543210));
         u32 macro_data{};
         REQUIRE(alternate->GetState()->macro_engine.ReadData(0x123, macro_data));
+        REQUIRE(macro_data == 0x76543210);
+        REQUIRE(channels.AllocateObjectContext(4, owner, 0xc7c0, 0) == NvResult::Success);
+        REQUIRE(channels.Get(4, owner)->GetGraphicsContext() == retained);
+        REQUIRE(retained->GetState()->macro_engine.ReadData(0x123, macro_data));
         REQUIRE(macro_data == 0x76543210);
         REQUIRE(channels.Get(7, owner)->GetGraphicsContext()->GetState()->macro_engine.ReadData(
             0x123, macro_data));
@@ -165,6 +176,7 @@ TEST_CASE("Native graphics state follows scheduling groups and retains address s
         REQUIRE(copy->BindAddressSpace(first_space) == NvResult::Success);
         REQUIRE(copy->BindGroup(copy_group, 0) == NvResult::Success);
         REQUIRE(channels.AllocateObjectContext(8, owner, 0xc797, 0) == NvResult::BadParameter);
+        REQUIRE(channels.AllocateObjectContext(8, owner, 0xc7c0, 0) == NvResult::BadParameter);
         REQUIRE(copy->GetGraphicsContext() == nullptr);
         first_space.reset();
         second_space.reset();
