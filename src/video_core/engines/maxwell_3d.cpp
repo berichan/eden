@@ -185,6 +185,34 @@ void LogNativeDrawState(Maxwell3D& engine, MemoryManager& memory, u32 begin,
                     info.texture_descriptors.size() + info.texture_buffer_descriptors.size(),
                     info.image_descriptors.size() + info.image_buffer_descriptors.size(),
                     info.uses_render_area);
+                for (u32 slot = 0; slot < info.constant_buffer_used_sizes.size(); ++slot) {
+                    if (info.constant_buffer_mask & (1U << slot))
+                        LOG_DEBUG(
+                            HW_GPU,
+                            "Native graphics constant footprint: stage={}, slot={}, bytes={:#x}",
+                            stage, slot, info.constant_buffer_used_sizes[slot]);
+                }
+                if (stage == 1) {
+                    for (u32 attribute = 0; attribute < 32; ++attribute) {
+                        if (!(generic_inputs & (1U << attribute)))
+                            continue;
+                        const u32 format = engine.GetRegisterValue(0x458 + attribute);
+                        const u32 stream = format & 31;
+                        const u32 stream_base = 0x700 + stream * 4;
+                        LOG_DEBUG(
+                            HW_GPU,
+                            "Native vertex input: attribute={}, format={:#x}, stream={}, "
+                            "control={:#x}, "
+                            "address={:#x}/{:#x}, bytes={:#x}/{:#x}, frequency={}, instanced={:#x}",
+                            attribute, format, stream, engine.GetRegisterValue(stream_base),
+                            engine.GetRegisterValue(stream_base + 1),
+                            engine.GetRegisterValue(stream_base + 2),
+                            engine.GetRegisterValue(0x180 + stream * 2),
+                            engine.GetRegisterValue(0x181 + stream * 2),
+                            engine.GetRegisterValue(stream_base + 3),
+                            engine.GetRegisterValue(0x620 + stream));
+                    }
+                }
             } catch (const Shader::Exception& error) {
                 LOG_DEBUG(HW_GPU, "Native graphics capture rejected: stage={}, reason={}", stage,
                           error.what());
@@ -240,6 +268,7 @@ void Maxwell3D::SetNativeMacroState(std::shared_ptr<Control::AmpereGraphicsState
     current_macro_dirty = false;
     native_action_failed = false;
     native_instrumentation_pending = false;
+    native_indexed_draw = {};
     native_graphics_state = native_state;
     native_macro_processor =
         native_state ? std::make_unique<Control::NativeMacroProcessor>(std::move(native_state))
@@ -271,6 +300,10 @@ bool Maxwell3D::HasPendingNativeInstrumentation() const {
 
 bool Maxwell3D::HasPendingNativeInlineUpload() const {
     return native_inline_upload && native_inline_upload->IsPending();
+}
+
+bool Maxwell3D::HasPendingNativeDraw() const {
+    return native_indexed_draw.IsPending();
 }
 
 const Control::NativeGraphicsConfig& Maxwell3D::GetNativeGraphicsConfig() const {
@@ -746,6 +779,12 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
         return;
     }
     if (native_macro_processor) {
+        // The first native adapter supports one synchronous draw per normal
+        // BEGIN/END pair. Do not change its state or publish releases after COUNT.
+        if (native_indexed_draw.HasSubmitted() && method < MacroRegistersStart && method != 0x585) {
+            native_action_failed = true;
+            return;
+        }
         if (method >= MacroRegistersStart || (method >= 0x45 && method <= 0x48)) {
             ConsumeSink(system);
         }
@@ -769,7 +808,8 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
                     Control::DecodeNativeGraphicsCacheAction(method, value).has_value() ||
                     method == 0x4e || method == 0x154 || method == 0x155 || method == 0x556 ||
                     method == 0x451 || method == 0x674 || method == 0x8c4 || method == 0x54 ||
-                    method == 0x55 || method == 0x6c || method == 0x6d ||
+                    method == 0x55 || method == 0x6c || method == 0x6d || method == 0x585 ||
+                    method == 0x586 || method == 0x5f7 || method == 0x5f8 ||
                     (method >= 0x8e4 && method <= 0x8f3)) {
                     self.engine.CallMethod(self.system, method, value, true);
                     return !self.engine.HasNativeMacroFailure();
@@ -829,6 +869,60 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
             native_action_failed = !NativeWaitForIdle();
             return;
         }
+        if (method == 0x585 || method == 0x586 || method == 0x5f8) {
+            using Draw = Control::NativeIndexedDraw;
+            Draw::Error error{};
+            if (HasPendingNativeInlineUpload() || native_instrumentation_pending ||
+                native_stop_token.stop_requested()) {
+                native_action_failed = true;
+                return;
+            }
+            if (method == 0x586) {
+                error = native_indexed_draw.Begin(method_argument);
+            } else if (method == 0x585) {
+                error = native_indexed_draw.End(method_argument);
+            } else {
+                const Draw::Registers snapshot{GetRegisterValue(0x5f2), GetRegisterValue(0x5f3),
+                                               GetRegisterValue(0x8e),  GetRegisterValue(0x8f),
+                                               GetRegisterValue(0x5f6), GetRegisterValue(0x5f7),
+                                               method_argument,         GetRegisterValue(0x50d),
+                                               GetRegisterValue(0x50e), GetRegisterValue(0x591)};
+                const Draw::Host draw_host{
+                    this,
+                    [](void* opaque, const Control::NativeIndexedDrawRequest& request) {
+                        auto& engine = *static_cast<Maxwell3D*>(opaque);
+                        const u32 override = engine.GetRegisterValue(0x651);
+                        if (override > 2)
+                            return false;
+                        if (override == 2 || (override == 0 && !engine.ShouldExecute()))
+                            return true;
+                        return engine.rasterizer && engine.rasterizer->DrawNativeIndexed(
+                                                        request, engine.native_stop_token);
+                    },
+                    [](void* opaque) {
+                        return static_cast<Maxwell3D*>(opaque)->native_stop_token.stop_requested();
+                    }};
+                error = native_indexed_draw.Draw(snapshot, draw_host);
+            }
+            native_action_failed = error != Draw::Error::None;
+            if (native_action_failed) {
+                LOG_ERROR(HW_GPU,
+                          "Native indexed draw rejected: method={:#x}, argument={:#x}, error={}",
+                          method, method_argument, static_cast<u32>(error));
+                if (method == 0x5f8) {
+                    LogNativeDrawState(*this, memory_manager, GetRegisterValue(0x586), {},
+                                       NativeWaitForIdle(), native_stop_token);
+                    LogNativeClearState(*this, 0x3c);
+                }
+            } else {
+                ProcessDirtyRegisters(method, method_argument);
+            }
+            return;
+        }
+        if (method == 0x5f7) { // C797 INDEX_BUFFER_FIRST, state rather than a legacy draw action.
+            ProcessDirtyRegisters(method, method_argument);
+            return;
+        }
         if (method == 0x4e) { // C797 SET_GLOBAL_RENDER_ENABLE_C
             // Global conditional rendering is not modeled by the legacy local
             // predicate. Accept only an explicitly unconditional enable.
@@ -886,7 +980,7 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
             // Conditional mode writes remain guarded. Honor the supported override
             // and the engine's existing unconditional execution state.
             native_action_failed = !clear || override > 2 || HasPendingNativeInlineUpload() ||
-                                   native_instrumentation_pending ||
+                                   HasPendingNativeDraw() || native_instrumentation_pending ||
                                    native_stop_token.stop_requested() || !rasterizer;
             if (!native_action_failed && override != 2 && (override == 1 || ShouldExecute()))
                 native_action_failed = !rasterizer->ClearNativeColor(*clear, native_stop_token);
@@ -898,7 +992,8 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
             return;
         }
         if (method == 0x6c3) { // C797 SET_REPORT_SEMAPHORE_D
-            if (HasPendingNativeInlineUpload() || native_instrumentation_pending) {
+            if (HasPendingNativeInlineUpload() || native_instrumentation_pending ||
+                HasPendingNativeDraw()) {
                 native_action_failed = true;
                 return;
             }

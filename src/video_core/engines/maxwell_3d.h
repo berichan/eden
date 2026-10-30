@@ -22,6 +22,7 @@
 #include "common/common_types.h"
 #include "common/math_util.h"
 #include "video_core/control/native_graphics_config.h"
+#include "video_core/control/native_indexed_draw.h"
 #include "video_core/engines/const_buffer_info.h"
 #include "video_core/engines/engine_interface.h"
 #include "video_core/engines/engine_upload.h"
@@ -75,6 +76,7 @@ public:
     bool HasPendingNativeMacro() const;
     bool HasPendingNativeInstrumentation() const;
     bool HasPendingNativeInlineUpload() const;
+    bool HasPendingNativeDraw() const;
     // GPU-worker access only, like the native context settings themselves.
     const Control::NativeGraphicsConfig& GetNativeGraphicsConfig() const;
     bool CallNativeMethod(Core::System& system, u32 method, u32 value, bool last,
@@ -3290,6 +3292,7 @@ private:
     std::unique_ptr<Control::NativeInlineUpload> native_inline_upload;
     bool native_action_failed{};
     bool native_instrumentation_pending{};
+    Control::NativeIndexedDraw native_indexed_draw;
     std::shared_ptr<Control::AmpereGraphicsState> native_graphics_state;
     std::stop_token native_stop_token;
 

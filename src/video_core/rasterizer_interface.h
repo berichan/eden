@@ -29,6 +29,7 @@ namespace Control {
 struct ChannelState;
 struct NativeCacheInvalidation;
 struct NativeColorClear;
+struct NativeIndexedDrawRequest;
 }
 } // namespace Tegra
 
@@ -57,6 +58,12 @@ public:
     /// Clear the current framebuffer
     virtual void Clear(u32 layer_count) = 0;
     virtual bool ClearNativeColor(const Tegra::Control::NativeColorClear&, std::stop_token) {
+        return false;
+    }
+    // Native draw completion must come from a checked backend adapter. Legacy
+    // void Draw and its skipped-pipeline/null-buffer paths cannot supply success.
+    virtual bool DrawNativeIndexed(const Tegra::Control::NativeIndexedDrawRequest&,
+                                   std::stop_token) {
         return false;
     }
 

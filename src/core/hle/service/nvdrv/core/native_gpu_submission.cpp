@@ -41,6 +41,7 @@ struct NativeGpuChannel::Backend {
         return context.HasQmdFailure() ||
                channel->payload->maxwell_3d.HasPendingNativeInlineUpload() ||
                channel->payload->maxwell_3d.HasPendingNativeInstrumentation() ||
+               channel->payload->maxwell_3d.HasPendingNativeDraw() ||
                channel->payload->maxwell_3d.HasPendingNativeMacro() ||
                channel->payload->maxwell_3d.HasNativeMacroFailure() ||
                channel->payload->kepler_compute.HasPendingNativeMacro() ||
@@ -60,6 +61,8 @@ struct NativeGpuChannel::Backend {
         if (stop_token.stop_requested() || !atomic_sequence.AllowsSubchannel(subchannel)) {
             return false;
         }
+        if (payload.maxwell_3d.HasPendingNativeDraw() && classes[subchannel] != 0xc797)
+            return false;
         // This restricted scope supports state/ordering commands, not launches or
         // macros whose output could publish a release before the scope is closed.
         const bool restricted_scope =
@@ -69,8 +72,9 @@ struct NativeGpuChannel::Backend {
             LOG_ERROR(HW_GPU, "Native report release blocked by unfinished frontend work");
             return false;
         }
-        if (classes[subchannel] == 0xc797 && method == 0x674 && PendingFrontend(context)) {
-            LOG_ERROR(HW_GPU, "Native clear blocked by unfinished frontend work");
+        if (classes[subchannel] == 0xc797 && (method == 0x674 || method == 0x586) &&
+            PendingFrontend(context)) {
+            LOG_ERROR(HW_GPU, "Native graphics action blocked by unfinished frontend work");
             return false;
         }
         // A graphics macro may emit a clear. Its own ARG continuation is valid,
