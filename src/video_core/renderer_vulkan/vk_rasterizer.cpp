@@ -1272,6 +1272,7 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
         VideoCommon::ImageInfo info;
         VkFormat host_format;
         VkSampler sampler;
+        VkComponentMapping components;
         std::vector<u8> uploaded_pixels;
     };
     std::vector<SampledRequest> sampled_requests;
@@ -1360,7 +1361,7 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
                 features |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
             const bool packed_float = binding->texture.IsB10G11R11Float2D() || volume;
             const bool astc = binding->texture.IsAstc4x4Unorm2D();
-            const bool bc4 = binding->texture.IsBc4UnormRrr1_2D();
+            const bool bc4 = binding->texture.IsBc4Unorm2D();
             const VkFormat sampled_format = packed_float ? VK_FORMAT_B10G11R11_UFLOAT_PACK32
                                             : bc4        ? VK_FORMAT_R8_UNORM
                                             : binding->texture.srgb
@@ -1466,8 +1467,23 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
                 .borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,
                 .unnormalizedCoordinates = VK_FALSE,
             }));
-            sampled_requests.push_back({stage, i, mip->address, *backing, sampled, sampled_format,
-                                        *native_samplers.back(), std::move(uploaded_pixels)});
+            // The supported BC4 descriptors select only R and ONE_FLOAT.
+            // Preserve that frozen per-component mapping for grayscale and
+            // alpha-mask views of the same private R8 decode.
+            const auto component = [&](u32 index) {
+                return !bc4                                   ? VK_COMPONENT_SWIZZLE_IDENTITY
+                       : binding->texture.swizzle[index] == 2 ? VK_COMPONENT_SWIZZLE_R
+                                                              : VK_COMPONENT_SWIZZLE_ONE;
+            };
+            sampled_requests.push_back({stage,
+                                        i,
+                                        mip->address,
+                                        *backing,
+                                        sampled,
+                                        sampled_format,
+                                        *native_samplers.back(),
+                                        {component(0), component(1), component(2), component(3)},
+                                        std::move(uploaded_pixels)});
             LOG_DEBUG(HW_GPU,
                       "Native sampled mip: level={}, address={:#x}, extent={}x{}x{}, "
                       "block_height={}, block_depth={}",
@@ -1625,14 +1641,7 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
                         .image = uploaded.Handle(),
                         .viewType = VK_IMAGE_VIEW_TYPE_2D,
                         .format = sampled.host_format,
-                        .components =
-                            bc4 ? VkComponentMapping{VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R,
-                                                     VK_COMPONENT_SWIZZLE_R,
-                                                     VK_COMPONENT_SWIZZLE_ONE}
-                                : VkComponentMapping{VK_COMPONENT_SWIZZLE_IDENTITY,
-                                                     VK_COMPONENT_SWIZZLE_IDENTITY,
-                                                     VK_COMPONENT_SWIZZLE_IDENTITY,
-                                                     VK_COMPONENT_SWIZZLE_IDENTITY},
+                        .components = sampled.components,
                         .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
                     }));
                 sampled_images.push_back(

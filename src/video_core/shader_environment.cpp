@@ -640,7 +640,7 @@ Shader::TexturePixelFormat GraphicsEnvironment::ReadTexturePixelFormat(u32 handl
             return static_cast<Shader::TexturePixelFormat>(
                 texture.srgb ? VideoCore::Surface::PixelFormat::ASTC_2D_4X4_SRGB
                              : VideoCore::Surface::PixelFormat::ASTC_2D_4X4_UNORM);
-        if (texture.IsBc4UnormRrr1_2D())
+        if (texture.IsBc4Unorm2D())
             return static_cast<Shader::TexturePixelFormat>(
                 VideoCore::Surface::PixelFormat::BC4_UNORM);
         return static_cast<Shader::TexturePixelFormat>(
@@ -695,7 +695,7 @@ const GraphicsEnvironment::NativeTextureBinding& GraphicsEnvironment::CaptureNat
     if (!texture || !sampler ||
         !(texture->IsRgba8Unorm2D() || texture->IsB10G11R11Float2D() ||
           texture->IsAstc4x4Unorm2D() || texture->IsB10G11R11Float3D() ||
-          texture->IsBc4UnormRrr1_2D())) {
+          texture->IsBc4Unorm2D())) {
         LOG_DEBUG(HW_GPU,
                   "Native texture metadata rejected: handle={:#x}, "
                   "tic={:#x}/{:#x}/{:#x}/{:#x}/{:#x}/{:#x}/{:#x}/{:#x}, "

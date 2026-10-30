@@ -92,10 +92,10 @@ bool NativeTextureDescriptor::IsAstc4x4Unorm2D() const {
            swizzle == std::array<u32, 4>{2, 3, 4, 5};
 }
 
-bool NativeTextureDescriptor::IsBc4UnormRrr1_2D() const {
+bool NativeTextureDescriptor::IsBc4Unorm2D() const {
     return format == 0x27 && (type == 1 || type == 7) && depth == 1 && samples == 0 && !packed &&
            !depth_texture && !srgb && component_types == std::array<u32, 4>{2, 2, 2, 2} &&
-           swizzle == std::array<u32, 4>{2, 2, 2, 7};
+           (swizzle == std::array<u32, 4>{2, 2, 2, 7} || swizzle == std::array<u32, 4>{7, 7, 7, 2});
 }
 
 std::optional<NativeSamplerDescriptor> NativeSamplerDescriptor::Decode(
@@ -139,7 +139,7 @@ std::optional<NativeSamplerDescriptor> NativeSamplerDescriptor::Decode(
 std::optional<NativeSampledMip> SelectNativeSampledMip(const NativeTextureDescriptor& texture,
                                                        const NativeSamplerDescriptor& sampler) {
     const bool astc = texture.IsAstc4x4Unorm2D();
-    const bool bc4 = texture.IsBc4UnormRrr1_2D();
+    const bool bc4 = texture.IsBc4Unorm2D();
     const bool compressed = astc || bc4;
     const bool volume = texture.IsB10G11R11Float3D();
     if (!(texture.IsRgba8Unorm2D() || (astc && texture.srgb) || texture.IsB10G11R11Float2D() ||

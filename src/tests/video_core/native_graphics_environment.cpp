@@ -325,6 +325,19 @@ TEST_CASE("Native graphics capture separates source headers, code and constant s
         repeated.FinalizeNativeResources();
         REQUIRE(repeated.CalculateHash() != bc4_hash);
         sampler[0] ^= 2;
+        texture[0] = 0x2ffa4927;
+        update_descriptors();
+        REQUIRE(grayscale.NativeTextures()[0].texture.swizzle == std::array<u32, 4>{2, 2, 2, 7});
+        REQUIRE(grayscale.CalculateHash() == bc4_hash);
+        Environment alpha_mask{engine, memory, Program::Pixel,
+                               Environment::NativeProgram{header_address, {}}};
+        REQUIRE(alpha_mask.ReadTextureType(Handle) == Shader::TextureType::Color2D);
+        REQUIRE(static_cast<VideoCore::Surface::PixelFormat>(alpha_mask.ReadTexturePixelFormat(
+                    Handle)) == VideoCore::Surface::PixelFormat::BC4_UNORM);
+        REQUIRE_FALSE(alpha_mask.IsTexturePixelFormatInteger(Handle));
+        REQUIRE(alpha_mask.NativeTextures()[0].texture.swizzle == std::array<u32, 4>{7, 7, 7, 2});
+        alpha_mask.FinalizeNativeResources();
+        REQUIRE(alpha_mask.CalculateHash() != bc4_hash);
     }
     texture[0] = 0x78d7ffa1;
     texture[3] = 3U << 6;

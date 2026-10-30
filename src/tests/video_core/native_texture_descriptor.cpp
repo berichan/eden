@@ -17,7 +17,7 @@ TEST_CASE("Native BC4 grayscale base mip preserves compressed bounds and repeat 
     const auto sampler = NativeSamplerDescriptor::Decode(state);
     REQUIRE(texture);
     REQUIRE(sampler);
-    REQUIRE(texture->IsBc4UnormRrr1_2D());
+    REQUIRE(texture->IsBc4Unorm2D());
     REQUIRE(texture->swizzle == std::array<u32, 4>{2, 2, 2, 7});
     REQUIRE(sampler->wrap == std::array<u32, 3>{0, 0, 2});
     REQUIRE(sampler->max_lod == 15 * 256);
@@ -42,7 +42,7 @@ TEST_CASE("Native BC4 grayscale base mip preserves compressed bounds and repeat 
         changed[word] ^= 1U << bit;
         const auto decoded = NativeTextureDescriptor::Decode(changed);
         REQUIRE(decoded);
-        REQUIRE_FALSE(decoded->IsBc4UnormRrr1_2D());
+        REQUIRE_FALSE(decoded->IsBc4Unorm2D());
         REQUIRE_FALSE(SelectNativeSampledMip(*decoded, *sampler));
     }
     auto changed = *texture;
@@ -57,6 +57,51 @@ TEST_CASE("Native BC4 grayscale base mip preserves compressed bounds and repeat 
     REQUIRE(clipped->block_height == 0);
     changed = *texture;
     changed.address = (u64{1} << 40) - 4096;
+    REQUIRE_FALSE(SelectNativeSampledMip(changed, *sampler));
+}
+
+TEST_CASE("Native BC4 alpha masks preserve source bounds and exact channel mapping",
+          "[native-shader]") {
+    constexpr NativeDescriptorWords image{0x2ffa4927, 0x6886c000, 0x00600011, 0x00070018,
+                                          0xe88001f3, 0x80000110, 0x03000000, 0};
+    constexpr NativeDescriptorWords state{0x26092,    0x3a2,      0xfff00000, 0x0ffff000,
+                                          0x3f800000, 0x3f800000, 0x3f800000, 0x3f800000};
+    const auto texture = NativeTextureDescriptor::Decode(image);
+    const auto sampler = NativeSamplerDescriptor::Decode(state);
+    REQUIRE(texture);
+    REQUIRE(sampler);
+    REQUIRE(texture->IsBc4Unorm2D());
+    REQUIRE(texture->words == image);
+    REQUIRE(texture->swizzle == std::array<u32, 4>{7, 7, 7, 2});
+    const auto mip = SelectNativeSampledMip(*texture, *sampler);
+    REQUIRE(mip);
+    REQUIRE(mip->address == 0x116886c000ULL);
+    REQUIRE(mip->width == 500);
+    REQUIRE(mip->height == 273);
+    REQUIRE(mip->block_height == 3);
+    REQUIRE(mip->size_bytes == 0x20000);
+    for (u32 channel = 0; channel < 4; ++channel) {
+        for (u32 source = 0; source < 8; ++source) {
+            auto changed = *texture;
+            changed.swizzle[channel] = source;
+            REQUIRE(SelectNativeSampledMip(changed, *sampler).has_value() ==
+                    (source == texture->swizzle[channel]));
+        }
+    }
+    for (const auto [word, bit] : std::array<std::pair<u32, u32>, 7>{
+             {{0, 0}, {0, 7}, {0, 31}, {3, 27}, {4, 22}, {4, 24}, {5, 16}}}) {
+        auto changed = image;
+        changed[word] ^= 1U << bit;
+        const auto decoded = NativeTextureDescriptor::Decode(changed);
+        REQUIRE(decoded);
+        REQUIRE_FALSE(decoded->IsBc4Unorm2D());
+        REQUIRE_FALSE(SelectNativeSampledMip(*decoded, *sampler));
+    }
+    auto changed = *texture;
+    changed.max_mip = changed.view_max_mip = 1;
+    REQUIRE_FALSE(SelectNativeSampledMip(changed, *sampler));
+    changed = *texture;
+    changed.address = (u64{1} << 40) - 0x1fe00;
     REQUIRE_FALSE(SelectNativeSampledMip(changed, *sampler));
 }
 

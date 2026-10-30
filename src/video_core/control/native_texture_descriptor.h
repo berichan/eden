@@ -35,7 +35,7 @@ struct NativeTextureDescriptor {
     bool IsB10G11R11Float2D() const;
     bool IsB10G11R11Float3D() const;
     bool IsAstc4x4Unorm2D() const;
-    bool IsBc4UnormRrr1_2D() const;
+    bool IsBc4Unorm2D() const;
 };
 
 struct NativeSamplerDescriptor {
