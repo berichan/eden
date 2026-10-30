@@ -36,6 +36,8 @@ add_library(video_core STATIC
     control/native_atomic_sequence.h
     control/native_cache.cpp
     control/native_cache.h
+    control/native_color_clear.cpp
+    control/native_color_clear.h
     control/native_constant_buffer.cpp
     control/native_constant_buffer.h
     control/native_report_semaphore.cpp
@@ -289,6 +291,7 @@ add_library(video_core STATIC
     textures/bcn.h
     textures/decoders.cpp
     textures/decoders.h
+    textures/block_linear_layout.h
     textures/texture.cpp
     textures/texture.h
     textures/workers.cpp

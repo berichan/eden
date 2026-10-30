@@ -8,6 +8,7 @@
 #include "video_core/engines/maxwell_dma.h"
 #include "video_core/surface.h"
 #include "video_core/texture_cache/types.h"
+#include "video_core/textures/block_linear_layout.h"
 
 namespace VideoCommon {
 
@@ -37,6 +38,7 @@ struct ImageInfo {
     u32 maybe_unaligned_layer_stride = 0;
     u32 num_samples = 1;
     u32 tile_width_spacing = 0;
+    Tegra::Texture::BlockLinearLayout layout = Tegra::Texture::BlockLinearLayout::Tegra;
     bool rescaleable = false;
     bool downscaleable = false;
     bool forced_flushed = false;

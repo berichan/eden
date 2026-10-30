@@ -38,7 +38,7 @@ void incrpdep(u32& value) {
 
 template <bool TO_LINEAR, u32 BYTES_PER_PIXEL>
 void SwizzleImpl(std::span<u8> output, std::span<const u8> input, u32 width, u32 height, u32 depth,
-                 u32 block_height, u32 block_depth, u32 stride) {
+                 u32 block_height, u32 block_depth, u32 stride, BlockLinearLayout layout) {
     // The origin of the transformation can be configured here, leave it as zero as the current API
     // doesn't expose it.
     static constexpr u32 origin_x = 0;
@@ -77,7 +77,14 @@ void SwizzleImpl(std::span<u8> output, std::span<const u8> input, u32 width, u32
                 const u32 offset_x = (x >> GOB_SIZE_X_SHIFT) << x_shift;
 
                 const u32 base_swizzled_offset = offset_z + offset_y + offset_x;
-                const u32 swizzled_offset = base_swizzled_offset + (swizzled_x | swizzled_y);
+                u32 intra_gob = swizzled_x | swizzled_y;
+                if (layout == BlockLinearLayout::TuringColor2D) {
+                    // Mesa NIL TuringColor2D uses a different 32-byte sector order.
+                    // Internal 16-byte runs stay intact; depth/stencil is not this layout.
+                    intra_gob = (intra_gob & ~0x60U) | ((intra_gob & 0x20) << 1) |
+                                ((intra_gob & 0x40) >> 1);
+                }
+                const u32 swizzled_offset = base_swizzled_offset + intra_gob;
 
                 const u32 unswizzled_offset =
                     slice * pitch * height + line * pitch + column * BYTES_PER_PIXEL;
@@ -156,12 +163,13 @@ void SwizzleSubrectImpl(std::span<u8> output, std::span<const u8> input, u32 wid
 
 template <bool TO_LINEAR>
 void Swizzle(std::span<u8> output, std::span<const u8> input, u32 bytes_per_pixel, u32 width,
-             u32 height, u32 depth, u32 block_height, u32 block_depth, u32 stride_alignment) {
+             u32 height, u32 depth, u32 block_height, u32 block_depth, u32 stride_alignment,
+             BlockLinearLayout layout) {
     switch (bytes_per_pixel) {
 #define BPP_CASE(x)                                                                                \
     case x:                                                                                        \
         return SwizzleImpl<TO_LINEAR, x>(output, input, width, height, depth, block_height,        \
-                                         block_depth, stride_alignment);
+                                         block_depth, stride_alignment, layout);
         BPP_CASE(1)
         BPP_CASE(2)
         BPP_CASE(3)
@@ -181,24 +189,24 @@ void Swizzle(std::span<u8> output, std::span<const u8> input, u32 bytes_per_pixe
 
 void UnswizzleTexture(std::span<u8> output, std::span<const u8> input, u32 bytes_per_pixel,
                       u32 width, u32 height, u32 depth, u32 block_height, u32 block_depth,
-                      u32 stride_alignment) {
+                      u32 stride_alignment, BlockLinearLayout layout) {
     const u32 stride = Common::AlignUpLog2(width, stride_alignment) * bytes_per_pixel;
     const u32 new_bpp = (std::min)(4U, static_cast<u32>(std::countr_zero(width * bytes_per_pixel)));
     width = (width * bytes_per_pixel) >> new_bpp;
     bytes_per_pixel = 1U << new_bpp;
     Swizzle<false>(output, input, bytes_per_pixel, width, height, depth, block_height, block_depth,
-                   stride);
+                   stride, layout);
 }
 
 void SwizzleTexture(std::span<u8> output, std::span<const u8> input, u32 bytes_per_pixel, u32 width,
-                    u32 height, u32 depth, u32 block_height, u32 block_depth,
-                    u32 stride_alignment) {
+                    u32 height, u32 depth, u32 block_height, u32 block_depth, u32 stride_alignment,
+                    BlockLinearLayout layout) {
     const u32 stride = Common::AlignUpLog2(width, stride_alignment) * bytes_per_pixel;
     const u32 new_bpp = (std::min)(4U, static_cast<u32>(std::countr_zero(width * bytes_per_pixel)));
     width = (width * bytes_per_pixel) >> new_bpp;
     bytes_per_pixel = 1U << new_bpp;
     Swizzle<true>(output, input, bytes_per_pixel, width, height, depth, block_height, block_depth,
-                  stride);
+                  stride, layout);
 }
 
 void SwizzleSubrect(std::span<u8> output, std::span<const u8> input, u32 bytes_per_pixel, u32 width,

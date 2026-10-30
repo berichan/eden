@@ -13,6 +13,7 @@
 #include "core/core.h"
 #include "core/core_timing.h"
 #include "video_core/control/native_cache.h"
+#include "video_core/control/native_color_clear.h"
 #include "video_core/control/native_constant_buffer.h"
 #include "video_core/control/native_gpu_context.h"
 #include "video_core/control/native_inline_upload.h"
@@ -161,6 +162,7 @@ bool Maxwell3D::IsNativeStateMethod(u32 method) {
     // no executable method at the same offset. NVIDIA classes/3d/clc797.h.
     switch (method) {
     case 0x43:  // NOTIFY
+    case 0x4e:  // SET_GLOBAL_RENDER_ENABLE_C
     case 0x4f:  // SEND_GO_IDLE
     case 0x50:  // PM_TRIGGER
     case 0x51:  // PM_TRIGGER_WFI
@@ -634,8 +636,9 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
                 if (NativeVersionRegister(method) || IsNativeVersionSet(method) ||
                     IsNativeConstantBufferBind(method) ||
                     Control::DecodeNativeGraphicsCacheAction(method, value).has_value() ||
-                    method == 0x451 || method == 0x8c4 || method == 0x54 || method == 0x55 ||
-                    method == 0x6c || method == 0x6d || (method >= 0x8e4 && method <= 0x8f3)) {
+                    method == 0x4e || method == 0x451 || method == 0x674 || method == 0x8c4 ||
+                    method == 0x54 || method == 0x55 || method == 0x6c || method == 0x6d ||
+                    (method >= 0x8e4 && method <= 0x8f3)) {
                     self.engine.CallMethod(self.system, method, value, true);
                     return !self.engine.HasNativeMacroFailure();
                 }
@@ -682,10 +685,56 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
             native_action_failed = !NativeWaitForIdle();
             return;
         }
+        if (method == 0x4e) { // C797 SET_GLOBAL_RENDER_ENABLE_C
+            // Global conditional rendering is not modeled by the legacy local
+            // predicate. Accept only an explicitly unconditional enable.
+            native_action_failed = method_argument != 1;
+            if (!native_action_failed)
+                ProcessDirtyRegisters(method, method_argument);
+            return;
+        }
         if (method == 0x451) { // C797 FLUSH_PENDING_WRITES
             // Bit 0 describes shader global stores. A real drain supplies stronger
             // ordering for either value without releasing parked QMD dependencies.
             native_action_failed = method_argument > 1 || !NativeWaitForIdle();
+            return;
+        }
+        if (method == 0x674) { // C797 CLEAR_SURFACE
+            using Clear = Control::NativeColorClear;
+            Clear::Registers snapshot{};
+            snapshot.argument = method_argument;
+            const u32 target = (method_argument >> 6) & 15;
+            if (target < 8) {
+                for (u32 i = 0; i < snapshot.target.size(); ++i)
+                    snapshot.target[i] = GetRegisterValue(0x200 + target * 0x10 + i);
+            }
+            for (u32 i = 0; i < snapshot.color.size(); ++i)
+                snapshot.color[i] = GetRegisterValue(0x360 + i);
+            snapshot.control = GetRegisterValue(0x43e);
+            snapshot.rect_x = GetRegisterValue(0x35b);
+            snapshot.rect_y = GetRegisterValue(0x35c);
+            snapshot.scissor_enable = GetRegisterValue(0x380);
+            snapshot.scissor_x = GetRegisterValue(0x381);
+            snapshot.scissor_y = GetRegisterValue(0x382);
+            snapshot.viewport_x = GetRegisterValue(0x300);
+            snapshot.viewport_y = GetRegisterValue(0x301);
+            snapshot.anti_alias_raster = GetRegisterValue(0x3ee);
+            snapshot.anti_alias_enable = GetRegisterValue(0x54d);
+            snapshot.anti_alias = GetRegisterValue(0x574);
+            const auto clear = Clear::Decode(snapshot);
+            const u32 override = GetRegisterValue(0x651);
+            // Conditional mode writes remain guarded. Honor the supported override
+            // and the engine's existing unconditional execution state.
+            native_action_failed = !clear || override > 2 || HasPendingNativeInlineUpload() ||
+                                   native_instrumentation_pending ||
+                                   native_stop_token.stop_requested() || !rasterizer;
+            if (!native_action_failed && override != 2 && (override == 1 || ShouldExecute()))
+                native_action_failed = !rasterizer->ClearNativeColor(*clear, native_stop_token);
+            if (native_action_failed) {
+                LogNativeClearState(*this, method_argument);
+            } else {
+                ProcessDirtyRegisters(method, method_argument);
+            }
             return;
         }
         if (method == 0x6c3) { // C797 SET_REPORT_SEMAPHORE_D

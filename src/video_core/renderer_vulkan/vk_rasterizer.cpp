@@ -20,6 +20,7 @@
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/control/native_cache.h"
+#include "video_core/control/native_color_clear.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/gpu_logging/gpu_logging.h"
@@ -395,6 +396,102 @@ void RasterizerVulkan::DrawTexture() {
                          static_cast<u32>(ScaleSrc(texture.size.height)), texture.size.depth};
     blit_image.BlitColor(framebuffer, texture.RenderTarget(), texture.ImageHandle(),
                          sampler->Handle(), dst_region, src_region, src_size);
+}
+
+bool RasterizerVulkan::ClearNativeColor(const Tegra::Control::NativeColorClear& clear,
+                                        std::stop_token stop_token) {
+    if (stop_token.stop_requested() || !gpu_memory)
+        return false;
+    if (clear.Empty())
+        return true;
+    const auto limit = device.GetPhysical().GetProperties().limits.maxImageDimension2D;
+    if (clear.width > limit || clear.height > limit ||
+        !device.IsFormatSupported(VK_FORMAT_B10G11R11_UFLOAT_PACK32,
+                                  VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT, FormatType::Optimal))
+        return false;
+    FlushWork();
+    gpu_memory->FlushCaching();
+    auto lease = gpu_memory->AcquireMappingLease();
+    const auto backing = lease.ResolveContiguous(clear.address, clear.size_bytes, true);
+    if (!backing || stop_token.stop_requested())
+        return false;
+    {
+        std::scoped_lock lock{buffer_cache.mutex};
+        // Partial clears preserve the previous pixels. The initial native image
+        // adapter cannot merge dirty SSBO contents into a cached image yet.
+        if (buffer_cache.IsRegionGpuModified(*backing, clear.size_bytes)) {
+            LOG_ERROR(HW_GPU, "Native clear overlaps pending buffer writes");
+            return false;
+        }
+    }
+    VideoCommon::ImageInfo info;
+    info.format = VideoCore::Surface::PixelFormat::B10G11R11_FLOAT;
+    info.type = VideoCommon::ImageType::e2D;
+    info.size = {clear.width, clear.height, 1};
+    info.block = {0, clear.block_height, 0};
+    info.layer_stride = clear.size_bytes;
+    info.maybe_unaligned_layer_stride = clear.size_bytes;
+    info.layout = Tegra::Texture::BlockLinearLayout::TuringColor2D;
+    if (VideoCommon::CalculateGuestSizeInBytes(info) != clear.size_bytes)
+        return false;
+    const auto record_clear = [&] {
+        std::scoped_lock lock{texture_cache.mutex};
+        const auto target = texture_cache.PrepareNativeClearTarget(info, clear.address, *backing);
+        if (!target || stop_token.stop_requested() ||
+            target->framebuffer->RenderArea().width != clear.width ||
+            target->framebuffer->RenderArea().height != clear.height ||
+            target->framebuffer->NumColorBuffers() != 1 ||
+            !target->framebuffer->HasAspectColorBit(0))
+            return false;
+        VkClearValue value{};
+        std::memcpy(value.color.uint32, clear.color.data(), sizeof(value.color.uint32));
+        const VkClearRect rect{
+            .rect = {{static_cast<s32>(clear.x), static_cast<s32>(clear.y)},
+                     {clear.extent_x, clear.extent_y}},
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        };
+        scheduler.RequestRenderpass(target->framebuffer);
+        scheduler.Record([value, rect](vk::CommandBuffer cmdbuf) {
+            const VkClearAttachment attachment{
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .colorAttachment = 0,
+                .clearValue = value,
+            };
+            cmdbuf.ClearAttachments(attachment, rect);
+        });
+        texture_cache.MarkModification(target->image_id);
+        return true;
+    };
+    try {
+        const bool recorded = record_clear();
+        // Preparation can queue uploads even when the clear fails. Drain them
+        // outside the cache lock, retaining the mapping lease on every exit.
+        scheduler.Finish();
+        if (!recorded)
+            return false;
+        {
+            std::scoped_lock lock{texture_cache.mutex};
+            // Publish the accepted clear to guest backing before future native
+            // SSBO reads. The exact-image check bounds this download to the lease.
+            texture_cache.DownloadMemory(*backing, clear.size_bytes);
+        }
+        {
+            std::scoped_lock lock{buffer_cache.mutex};
+            buffer_cache.WriteMemory(*backing, clear.size_bytes);
+        }
+    } catch (...) {
+        try {
+            scheduler.Finish();
+        } catch (const std::exception& error) {
+            LOG_CRITICAL(Render_Vulkan, "Native clear prefix drain failed: {}", error.what());
+        }
+        throw;
+    }
+    LOG_DEBUG(HW_GPU, "Native color clear completed: address={:#x}, extent={}x{}, rect={},{}/{},{}",
+              clear.address, clear.width, clear.height, clear.x, clear.y, clear.extent_x,
+              clear.extent_y);
+    return !stop_token.stop_requested();
 }
 
 void RasterizerVulkan::Clear(u32 layer_count) {

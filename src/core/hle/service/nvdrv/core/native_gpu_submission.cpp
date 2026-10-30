@@ -69,6 +69,17 @@ struct NativeGpuChannel::Backend {
             LOG_ERROR(HW_GPU, "Native report release blocked by unfinished frontend work");
             return false;
         }
+        if (classes[subchannel] == 0xc797 && method == 0x674 && PendingFrontend(context)) {
+            LOG_ERROR(HW_GPU, "Native clear blocked by unfinished frontend work");
+            return false;
+        }
+        // A graphics macro may emit a clear. Its own ARG continuation is valid,
+        // but it cannot execute across unfinished or failed compute frontend work.
+        if (classes[subchannel] == 0xc797 && method >= 0xe00 &&
+            (context.HasQmdFailure() || payload.kepler_compute.HasPendingNativeMacro() ||
+             payload.kepler_compute.HasNativeMethodFailure())) {
+            return false;
+        }
         if (restricted_scope && (method == 0x6c || method == 0x6d)) {
             return false;
         }

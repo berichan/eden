@@ -9,6 +9,7 @@
 #include <functional>
 #include <optional>
 #include <span>
+#include <stop_token>
 #include <utility>
 #include "common/common_types.h"
 #include "common/polyfill_thread.h"
@@ -27,6 +28,7 @@ class AccelerateDMAInterface;
 namespace Control {
 struct ChannelState;
 struct NativeCacheInvalidation;
+struct NativeColorClear;
 }
 } // namespace Tegra
 
@@ -54,6 +56,9 @@ public:
 
     /// Clear the current framebuffer
     virtual void Clear(u32 layer_count) = 0;
+    virtual bool ClearNativeColor(const Tegra::Control::NativeColorClear&, std::stop_token) {
+        return false;
+    }
 
     /// Dispatches a compute shader invocation
     virtual void DispatchCompute() = 0;

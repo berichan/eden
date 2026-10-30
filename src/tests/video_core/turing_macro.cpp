@@ -689,6 +689,36 @@ TEST_CASE("Native graphics configuration survives channel binding in the same gr
     REQUIRE(state->graphics_config.PolygonOffsetNanIsZero());
 }
 
+TEST_CASE("Native graphics macros route clear actions and propagate backend failure",
+          "[ipc][video_core]") {
+    Core::System system;
+    Core::DeviceMemory memory;
+    Tegra::MaxwellDeviceMemoryManager backing{memory};
+    Tegra::GPU gpu{system, false, false};
+    Null::RasterizerNull rasterizer{gpu};
+    Tegra::MemoryManager space{system, backing, 32, 1ULL << 32, 16, 12};
+    space.BindRasterizer(&rasterizer);
+    auto state = std::make_shared<Tegra::Control::AmpereGraphicsState>();
+    MethodHost host;
+    Processor uploader{state};
+    Upload(uploader, SumProgram(0x674), host);
+    for (bool disabled : {false, true}) {
+        Tegra::Engines::Maxwell3D engine{space};
+        engine.BindRasterizer(&rasterizer);
+        engine.SetNativeMacroState(state);
+        const std::array<u32, 10> target{0, 0x100000, 16, 8, 0xe0, 0, 1, 128, 0, 0};
+        for (u32 i = 0; i < target.size(); ++i)
+            REQUIRE(engine.CallNativeMethod(system, 0x200 + i, target[i], true, {}));
+        REQUIRE(engine.CallNativeMethod(system, 0x651, disabled ? 2 : 0, true, {}));
+        REQUIRE(engine.CallNativeMethod(system, 0xe0a, 20, false, {}));
+        REQUIRE(engine.HasPendingNativeMacro());
+        REQUIRE(engine.CallNativeMethod(system, 0xe0b, 40, true, {}) == disabled);
+        REQUIRE_FALSE(engine.HasPendingNativeMacro());
+        REQUIRE(engine.HasNativeMacroFailure() == !disabled);
+        REQUIRE(engine.GetRegisterValue(0x674) == (disabled ? 0x3cU : 0U));
+    }
+}
+
 TEST_CASE("Native constant-buffer bindings retain canonical addresses without physical cache binds",
           "[ipc][video_core]") {
     Core::System system;

@@ -90,6 +90,8 @@ public:
     void DrawIndirect() override;
     void DrawTexture() override;
     void Clear(u32 layer_count) override;
+    bool ClearNativeColor(const Tegra::Control::NativeColorClear& clear,
+                          std::stop_token stop_token) override;
     void DispatchCompute() override;
     bool SynchronizeNativeWork() override;
     bool InvalidateNativeCaches(const Tegra::Control::NativeCacheInvalidation& action) override;

@@ -566,7 +566,7 @@ void SwizzleBlockLinearImage(Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr
                 dst(gpu_memory, gpu_addr + guest_offset, subresource_size, &tmp_buffer);
 
             SwizzleTexture(dst, src, bytes_per_block, num_tiles.width, num_tiles.height,
-                           num_tiles.depth, block.height, block.depth);
+                           num_tiles.depth, block.height, block.depth, 1, info.layout);
         }
 
         host_offset += host_bytes_per_layer;
@@ -913,7 +913,8 @@ boost::container::small_vector<BufferImageCopy, 16> UnswizzleImage(Tegra::Memory
             const std::span<u8> dst = output.subspan(host_offset);
             const std::span<const u8> src = input.subspan(guest_offset + guest_layer_offset);
             UnswizzleTexture(dst, src, 1U << bpp_log2, num_tiles.width, num_tiles.height,
-                             num_tiles.depth, block.height, block.depth, stride_alignment);
+                             num_tiles.depth, block.height, block.depth, stride_alignment,
+                             info.layout);
             guest_layer_offset += layer_stride;
             host_offset += host_bytes_per_layer;
         }
@@ -1105,6 +1106,8 @@ void SwizzleImage(Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, const Ima
 
 bool IsBlockLinearSizeCompatible(const ImageInfo& lhs, const ImageInfo& rhs, u32 lhs_level,
                                  u32 rhs_level, bool strict_size) noexcept {
+    if (lhs.layout != rhs.layout)
+        return false;
     ASSERT(lhs.type != ImageType::Linear);
     ASSERT(rhs.type != ImageType::Linear);
     if (strict_size) {
@@ -1120,6 +1123,8 @@ bool IsBlockLinearSizeCompatible(const ImageInfo& lhs, const ImageInfo& rhs, u32
 
 bool IsBlockLinearSizeCompatibleBPPRelaxed(const ImageInfo& lhs, const ImageInfo& rhs,
                                            u32 lhs_level, u32 rhs_level) noexcept {
+    if (lhs.layout != rhs.layout)
+        return false;
     ASSERT(lhs.type != ImageType::Linear);
     ASSERT(rhs.type != ImageType::Linear);
     const auto lhs_bpp = BytesPerBlock(lhs.format);
@@ -1174,6 +1179,8 @@ std::optional<OverlapResult> ResolveOverlap(const ImageInfo& new_info, GPUVAddr 
 }
 
 bool IsLayerStrideCompatible(const ImageInfo& lhs, const ImageInfo& rhs) {
+    if (lhs.layout != rhs.layout)
+        return false;
     // If either of the layer strides is zero, we can assume they are compatible
     // These images generally come from rendertargets
     if (lhs.layer_stride == 0) {
@@ -1250,6 +1257,8 @@ bool IsSubresource(const ImageInfo& candidate, const ImageBase& image, GPUVAddr 
 }
 
 bool IsSubCopy(const ImageInfo& candidate, const ImageBase& image, GPUVAddr candidate_addr) {
+    if (candidate.layout != image.info.layout)
+        return false;
     const std::optional<SubresourceBase> base = image.TryFindBase(candidate_addr);
     if (!base) {
         return false;
