@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include "common/logging.h"
 #include "video_core/control/native_qmd.h"
 
 namespace Tegra::Control {
@@ -116,6 +117,21 @@ NativeQmdScheduler::Result NativeQmdScheduler::Signal(GPUVAddr address, u32 argu
         Descriptor current;
         if (!host.read || !host.read(host.context, request.address, current)) {
             return fail(Error::ReadFault, request.address);
+        }
+        if (!ValidDescriptor(current)) {
+            return fail(Error::UnsupportedDescriptor, request.address);
+        }
+        // The exact native cache/fetch partition is not established. Support patched
+        // releases, but reject changed launch/scheduling fields before publishing work.
+        for (size_t word = 0; word < current.size(); ++word) {
+            if ((word >= 24 && word < 32) || (word >= 52 && word < 56)) {
+                continue;
+            }
+            if (current[word] != state.descriptor[word]) {
+                LOG_ERROR(HW_GPU, "Native QMD changed unsupported field: address={:#x}, word={}",
+                          request.address, word);
+                return fail(Error::UnsupportedDescriptor, request.address);
+            }
         }
         std::array<Release, 3> releases;
         size_t release_count{};

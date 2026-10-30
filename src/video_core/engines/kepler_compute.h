@@ -63,6 +63,7 @@ public:
     bool CallNativeMethod(u32 method, u32 value, bool last, std::stop_token stop_token = {});
     bool HasNativeMethodFailure() const;
     bool HasPendingNativeMacro() const;
+    bool HasPendingNativeInlineUpload() const;
 
     static constexpr std::size_t NumConstBuffers = 8;
 
@@ -227,6 +228,9 @@ public:
     bool ConfigureNativeLaunch(std::span<const u32, 64> descriptor);
     bool DispatchNativeCompute(std::span<const u32, 64> descriptor);
     bool ReadNativeConstantBuffer(u32 index, u32 offset, std::span<u8> output) const;
+    std::stop_token GetNativeStopToken() const {
+        return native_stop_token;
+    }
     bool IsNativeLaunchSupported(std::array<u32, 3> max_grid, std::array<u32, 3> max_block,
                                  u32 max_invocations, u32 max_shared_memory) const;
     bool IsNativeMode() const {
@@ -258,6 +262,7 @@ private:
     };
     std::vector<UploadInfo> uploads;
     std::optional<GPUVAddr> indirect_compute{};
+    std::stop_token native_stop_token;
     bool native_mode{};
     std::unique_ptr<Control::NativeCompute> native_compute;
 };

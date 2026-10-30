@@ -278,6 +278,9 @@ public:
 
     void BindComputeStorageBuffer(size_t ssbo_index, u32 cbuf_index, u32 cbuf_offset,
                                   bool is_written);
+    void SetNativeComputeUniformBuffers(
+        const std::array<Binding, NUM_COMPUTE_UNIFORM_BUFFERS>& bindings);
+    bool BindNativeComputeStorageBuffer(size_t ssbo_index, const Binding& binding, bool is_written);
 
     void UnbindComputeTextureBuffers();
 

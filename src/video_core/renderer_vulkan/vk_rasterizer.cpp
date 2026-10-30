@@ -18,11 +18,11 @@
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "video_core/buffer_cache/buffer_cache.h"
-#include "video_core/gpu_logging/gpu_logging.h"
 #include "video_core/control/channel_state.h"
-#include "video_core/engines/maxwell_3d.h"
+#include "video_core/control/native_cache.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/gpu_logging/gpu_logging.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/renderer_vulkan/blit_image.h"
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
@@ -591,7 +591,8 @@ bool RasterizerVulkan::DispatchNativeCompute() {
 }
 
 bool RasterizerVulkan::DispatchComputeImpl(bool require_bound_pipeline) {
-    if (require_bound_pipeline &&
+    const bool native = kepler_compute->IsNativeMode();
+    if ((require_bound_pipeline || native) &&
         !kepler_compute->IsNativeLaunchSupported(
             device.GetMaxComputeWorkGroupCount(), device.GetMaxComputeWorkGroupSize(),
             device.GetMaxComputeWorkGroupInvocations(), device.GetMaxComputeSharedMemorySize())) {
@@ -600,64 +601,102 @@ bool RasterizerVulkan::DispatchComputeImpl(bool require_bound_pipeline) {
     FlushWork();
     gpu_memory->FlushCaching();
 
+    const u64 mapping_generation = gpu_memory->MappingGeneration();
     ComputePipeline* const pipeline{pipeline_cache.CurrentComputePipeline()};
-    if (!pipeline || (require_bound_pipeline && !pipeline->IsBound())) {
+    if (!pipeline || ((require_bound_pipeline || native) && !pipeline->IsBound())) {
         return false;
     }
-    std::scoped_lock lock{texture_cache.mutex, buffer_cache.mutex};
-    if (!pipeline->Configure(*kepler_compute, *gpu_memory, scheduler, buffer_cache,
-                             texture_cache)) {
-        return false;
-    }
+    const auto record_dispatch = [&](const ComputePipeline::NativeBindings* native_bindings) {
+        if (native && kepler_compute->GetNativeStopToken().stop_requested()) {
+            return false;
+        }
+        std::scoped_lock lock{texture_cache.mutex, buffer_cache.mutex};
+        if (!pipeline->Configure(*kepler_compute, *gpu_memory, scheduler, buffer_cache,
+                                 texture_cache, native_bindings)) {
+            return false;
+        }
+        if (native && kepler_compute->GetNativeStopToken().stop_requested()) {
+            return false;
+        }
 
-    const auto& qmd{kepler_compute->launch_description};
-    auto indirect_address = kepler_compute->GetIndirectComputeAddress();
-    if (indirect_address) {
-        // DispatchIndirect
-        static constexpr auto sync_info = VideoCommon::ObtainBufferSynchronize::FullSynchronize;
-        const auto post_op = VideoCommon::ObtainBufferOperation::DiscardWrite;
-        const auto [buffer, offset] =
-            buffer_cache.ObtainBuffer(*indirect_address, 12, sync_info, post_op);
+        const auto& qmd{kepler_compute->launch_description};
+        auto indirect_address = kepler_compute->GetIndirectComputeAddress();
+        if (indirect_address) {
+            // DispatchIndirect
+            static constexpr auto sync_info = VideoCommon::ObtainBufferSynchronize::FullSynchronize;
+            const auto post_op = VideoCommon::ObtainBufferOperation::DiscardWrite;
+            const auto [buffer, offset] =
+                buffer_cache.ObtainBuffer(*indirect_address, 12, sync_info, post_op);
+            scheduler.RequestOutsideRenderPassOperationContext();
+            scheduler.Record([pipeline, indirect_buffer = buffer->Handle(),
+                              indirect_offset = offset](vk::CommandBuffer cmdbuf) {
+                if (!pipeline->IsBound()) {
+                    return;
+                }
+                cmdbuf.DispatchIndirect(indirect_buffer, indirect_offset);
+            });
+            return true;
+        }
+        const std::array<u32, 3> dim{qmd.grid_dim_x, qmd.grid_dim_y, qmd.grid_dim_z};
+        const std::array<u32, 3> max_dim{device.GetMaxComputeWorkGroupCount()};
+        if (dim[0] > max_dim[0] || dim[1] > max_dim[1] || dim[2] > max_dim[2]) {
+            return false;
+        }
         scheduler.RequestOutsideRenderPassOperationContext();
-        scheduler.Record([pipeline, indirect_buffer = buffer->Handle(),
-                          indirect_offset = offset](vk::CommandBuffer cmdbuf) {
+        static constexpr VkMemoryBarrier READ_BARRIER{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .pNext = nullptr,
+            .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT,
+        };
+        scheduler.Record([](vk::CommandBuffer cmdbuf) {
+            cmdbuf.PipelineBarrier(vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER,
+                                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, READ_BARRIER);
+        });
+        scheduler.Record([pipeline, dim](vk::CommandBuffer cmdbuf) {
             if (!pipeline->IsBound()) {
                 return;
             }
-            cmdbuf.DispatchIndirect(indirect_buffer, indirect_offset);
+            cmdbuf.Dispatch(dim[0], dim[1], dim[2]);
         });
+
+        // Log compute dispatch
+        if (GPU::Logging::IsActive() && Settings::values.gpu_log_vulkan_calls.GetValue()) {
+            const std::string params = fmt::format("groupCountX={}, groupCountY={}, groupCountZ={}",
+                                                   dim[0], dim[1], dim[2]);
+            GPU::Logging::GPULogger::GetInstance().LogVulkanCall("vkCmdDispatch", params,
+                                                                 VK_SUCCESS);
+        }
         return true;
+    };
+    if (!native) {
+        return record_dispatch(nullptr);
     }
-    const std::array<u32, 3> dim{qmd.grid_dim_x, qmd.grid_dim_y, qmd.grid_dim_z};
-    const std::array<u32, 3> max_dim{device.GetMaxComputeWorkGroupCount()};
-    if (dim[0] > max_dim[0] || dim[1] > max_dim[1] || dim[2] > max_dim[2]) {
+    // Checked descriptor reads may flush cache-backed memory. Snapshot them before
+    // taking the mapping lease or renderer locks; never reread under those locks.
+    auto bindings = pipeline->SnapshotNativeBindings(*kepler_compute);
+    if (!bindings) {
         return false;
     }
-    scheduler.RequestOutsideRenderPassOperationContext();
-    static constexpr VkMemoryBarrier READ_BARRIER{
-        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-        .pNext = nullptr,
-        .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
-        .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT,
-    };
-    scheduler.Record([](vk::CommandBuffer cmdbuf) { cmdbuf.PipelineBarrier(vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                               0, READ_BARRIER); });
-    scheduler.Record([pipeline, dim](vk::CommandBuffer cmdbuf) {
-        if (!pipeline->IsBound()) {
-            return;
-        }
-        cmdbuf.Dispatch(dim[0], dim[1], dim[2]);
-    });
-
-    // Log compute dispatch
-    if (GPU::Logging::IsActive() &&
-        Settings::values.gpu_log_vulkan_calls.GetValue()) {
-        const std::string params = fmt::format("groupCountX={}, groupCountY={}, groupCountZ={}",
-            dim[0], dim[1], dim[2]);
-        GPU::Logging::GPULogger::GetInstance().LogVulkanCall(
-            "vkCmdDispatch", params, VK_SUCCESS);
+    auto lease = gpu_memory->AcquireMappingLease();
+    if (gpu_memory->MappingGeneration() != mapping_generation ||
+        !pipeline->ResolveNativeBindings(*bindings, lease, kepler_compute->GetNativeStopToken())) {
+        return false;
     }
-    return true;
+    try {
+        const bool recorded = record_dispatch(&*bindings);
+        // The cache locks have been released. Unmap/free must wait until actual GPU
+        // completion, including any uploads recorded by a partially failed Configure.
+        scheduler.Finish();
+        return recorded;
+    } catch (...) {
+        try {
+            scheduler.Finish();
+        } catch (const std::exception& error) {
+            LOG_CRITICAL(Render_Vulkan, "Native compute prefix drain failed: {}", error.what());
+        }
+        throw;
+    }
 }
 
 void RasterizerVulkan::ResetCounter(VideoCommon::QueryType type) {
@@ -676,6 +715,23 @@ void RasterizerVulkan::ResetCounter(VideoCommon::QueryType type) {
 
 bool RasterizerVulkan::SynchronizeNativeWork() {
     scheduler.Finish();
+    return true;
+}
+
+bool RasterizerVulkan::InvalidateNativeCaches(
+    const Tegra::Control::NativeCacheInvalidation& action) {
+    scheduler.Finish();
+    gpu.InvalidateGPUCache();
+    if (action.instructions) {
+        pipeline_cache.SyncGuestHost();
+    }
+    // Native code/CBUF bytes are freshly checked before every dispatch. SSBOs stay
+    // GPU-resident and the dispatch barrier orders prior writes; never discard their
+    // GPU-modified contents as if this were a CPU overwrite. Native sampling remains unsupported.
+    if (action.texture_headers || action.samplers) {
+        std::scoped_lock lock{texture_cache.mutex};
+        return texture_cache.InvalidateDescriptorTables(action.texture_headers, action.samplers);
+    }
     return true;
 }
 

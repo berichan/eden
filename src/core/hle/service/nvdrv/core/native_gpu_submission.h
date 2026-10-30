@@ -19,6 +19,8 @@ namespace Service::Nvidia::NvCore {
 
 class NativeGpuSubmission {
 public:
+    // Complete retires this FIFO stream and drains issued work. Dependency-gated QMDs
+    // remain in the retained graphics context until a later scheduling signal.
     enum class State { Reserved, Queued, Running, Complete, Failed, Cancelled };
     ~NativeGpuSubmission();
     bool MarkQueued();

@@ -26,6 +26,7 @@ class AccelerateDMAInterface;
 }
 namespace Control {
 struct ChannelState;
+struct NativeCacheInvalidation;
 }
 } // namespace Tegra
 
@@ -65,6 +66,9 @@ public:
     // Native CPU-side releases require actual host GPU completion, independent of
     // the accuracy setting's legacy fence shortcuts.
     virtual bool SynchronizeNativeWork() {
+        return false;
+    }
+    virtual bool InvalidateNativeCaches(const Tegra::Control::NativeCacheInvalidation&) {
         return false;
     }
 

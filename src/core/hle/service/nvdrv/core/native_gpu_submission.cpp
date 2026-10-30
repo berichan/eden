@@ -29,18 +29,21 @@ struct NativeGpuChannel::Backend {
     std::array<u32, 0x40> puller{};
     Tegra::Control::NativeAtomicSequence atomic_sequence;
 
-    bool PendingEngineWork(const Tegra::Control::NativeGpuGraphicsContext& context) const {
-        return context.HasPendingQmd() || context.HasQmdFailure() ||
+    bool PendingFrontendWork(const Tegra::Control::NativeGpuGraphicsContext& context) const {
+        // Dependency-gated QMDs are parked context state, not an unfinished FIFO packet.
+        // SignalQmd executes ready descriptors synchronously and retains deferred ones.
+        return context.HasQmdFailure() ||
                channel->payload->maxwell_3d.HasPendingNativeInlineUpload() ||
                channel->payload->maxwell_3d.HasPendingNativeInstrumentation() ||
                channel->payload->maxwell_3d.HasPendingNativeMacro() ||
                channel->payload->maxwell_3d.HasNativeMacroFailure() ||
                channel->payload->kepler_compute.HasPendingNativeMacro() ||
+               channel->payload->kepler_compute.HasPendingNativeInlineUpload() ||
                channel->payload->kepler_compute.HasNativeMethodFailure();
     }
 
-    bool Pending(const Tegra::Control::NativeGpuGraphicsContext& context) const {
-        return atomic_sequence.IsActive() || PendingEngineWork(context);
+    bool PendingFrontend(const Tegra::Control::NativeGpuGraphicsContext& context) const {
+        return atomic_sequence.IsActive() || PendingFrontendWork(context);
     }
 
     bool Call(Core::System& system, const Tegra::Control::NativeGpuGraphicsContext& context,
@@ -58,12 +61,13 @@ struct NativeGpuChannel::Backend {
         if (restricted_scope && (method == 0x6c || method == 0x6d)) {
             return false;
         }
-        if ((restricted_scope || payload.maxwell_3d.HasPendingNativeInlineUpload()) &&
+        if ((restricted_scope || payload.maxwell_3d.HasPendingNativeInlineUpload() ||
+             payload.kepler_compute.HasPendingNativeInlineUpload()) &&
             (method >= 0xe00 || (classes[subchannel] == 0xc7c0 && method == 0xb0))) {
             return false;
         }
         if (method == 0) {
-            if ((value & ~0x1fffffU) || Pending(context)) {
+            if ((value & ~0x1fffffU) || PendingFrontend(context)) {
                 return false;
             }
             const u32 class_id = value & 0xffff;
@@ -93,7 +97,8 @@ struct NativeGpuChannel::Backend {
                 break;
             case 7: { // SEMAPHORED: plain four-byte RELEASE only
                 if ((value & ~0x0110001fU) || (value & 0x1f) != 2 || !(value & (1U << 24)) ||
-                    Pending(context)) {
+                    PendingFrontend(context) ||
+                    (!(value & (1U << 20)) && context.HasPendingQmd())) {
                     return false;
                 }
                 const GPUVAddr address = (GPUVAddr{puller[4]} << 32) | puller[5];
@@ -131,8 +136,8 @@ struct NativeGpuChannel::Backend {
         if ((classes[subchannel] == 0xc797 || classes[subchannel] == 0xc7c0) &&
             (method == 0x52 || method == 0x53)) {
             // The GPU worker cannot bind another channel during this job. Keep scopes
-            // inside that execution boundary; Pending rejects open-scope completion/releases.
-            if (PendingEngineWork(context)) {
+            // inside that execution boundary; pending frontend state rejects retirement.
+            if (PendingFrontendWork(context)) {
                 return false;
             }
             return method == 0x52 ? atomic_sequence.Begin(subchannel, value)
@@ -338,7 +343,7 @@ void NativeGpuSubmission::Execute(Core::System& system, std::stop_token stop_tok
         };
         Stream stream;
         executed = stream.Execute(entries, bindings);
-        if (executed.Succeeded() && (backend.Pending(*graphics) || graphics->HasQmdFailure())) {
+        if (executed.Succeeded() && backend.PendingFrontend(*graphics)) {
             executed.error = Stream::Error::MethodFailed;
         }
     } catch (const std::exception& error) {
@@ -384,6 +389,9 @@ void NativeGpuSubmission::Execute(Core::System& system, std::stop_token stop_tok
                   "words={}, methods={}",
                   static_cast<u32>(executed.error), executed.address, executed.subchannel,
                   executed.method, executed.words, executed.methods);
+    } else {
+        LOG_DEBUG(HW_GPU, "Native GPU job retired: words={}, methods={}, parked_qmd={}",
+                  executed.words, executed.methods, graphics->HasPendingQmd());
     }
     Finish(executed.Succeeded() ? State::Complete
            : was_cancelled      ? State::Cancelled

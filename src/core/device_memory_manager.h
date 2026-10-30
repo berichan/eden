@@ -210,8 +210,18 @@ private:
         tracked_entries.GetUnchecked(page_index).cpu_backing_address = address | (asid.id << asid_start_bit);
     }
 
-    std::array<TranslationEntry, 4> t_slot{};
-    u32 cache_cursor = 0;
+    // Slots belong to the reader thread. A unique identity also excludes stale TLS
+    // entries when a destroyed manager's storage address is reused.
+    struct ThreadTranslationCache {
+        u64 identity{};
+        u64 generation{};
+        std::array<TranslationEntry, 4> slots{};
+        u32 cursor{};
+    };
+    ThreadTranslationCache& TranslationCache() const;
+    inline static std::atomic<u64> next_instance_identity{1};
+    const u64 instance_identity{next_instance_identity.fetch_add(1, std::memory_order_relaxed)};
+    std::atomic<u64> translation_generation{};
     using CounterType = u8;
     using CounterAtomicType = std::atomic_uint8_t;
     static constexpr size_t subentries = 8 / sizeof(CounterType);

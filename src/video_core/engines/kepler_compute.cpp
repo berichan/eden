@@ -36,6 +36,7 @@ void KeplerCompute::SetNativeContext(
     method_sink.clear();
     uploads.clear();
     indirect_compute.reset();
+    native_stop_token = {};
     native_compute =
         context ? std::make_unique<Control::NativeCompute>(std::move(context)) : nullptr;
     native_mode = false;
@@ -53,6 +54,7 @@ bool KeplerCompute::CallNativeMethod(u32 method, u32 value, bool last, std::stop
     if (!native_compute) {
         return false;
     }
+    native_stop_token = stop_token;
     using Qmd = Control::NativeQmdScheduler;
     struct HostContext {
         KeplerCompute& owner;
@@ -95,6 +97,10 @@ bool KeplerCompute::HasNativeMethodFailure() const {
 
 bool KeplerCompute::HasPendingNativeMacro() const {
     return native_compute && native_compute->HasPendingMacro();
+}
+
+bool KeplerCompute::HasPendingNativeInlineUpload() const {
+    return native_compute && native_compute->HasPendingInlineUpload();
 }
 
 void KeplerCompute::BindRasterizer(VideoCore::RasterizerInterface* rasterizer_) {

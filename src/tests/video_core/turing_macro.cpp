@@ -295,6 +295,50 @@ TEST_CASE("Turing MME predication consumes loads before enabling individual exec
     }
 }
 
+TEST_CASE("Turing MME taken branch bit14 suppresses only its own end marker", "[video_core][ipc]") {
+    for (const bool cancel_end : {false, true}) {
+        Engine engine;
+        Inst initialize, body, decrement, branch, delay;
+        initialize.alu[0] = {Op::Add, 0, I, Z};
+        initialize.immediate[0] = 3;
+        body.alu[0] = {Op::Add, Z, 0, Z};
+        body.output[0].emit = 1;
+        decrement.alu[0] = {Op::Subtract, 0, 0, I};
+        decrement.immediate[0] = 1;
+        branch.alu[0] = {Op::BranchEqual, Z, 0, Z};
+        branch.immediate[0] = cancel_end ? 0x5ffe : 0x1ffe;
+        branch.end_next = true;
+        delay.immediate[0] = 0xbeef;
+        delay.output[0].emit = 5;
+        Upload(engine, std::array{Method(), initialize, body, decrement, branch, delay});
+        Host host;
+        const auto result = engine.Execute(0, host.Bind(), 100);
+        REQUIRE(result.Succeeded());
+        if (cancel_end) {
+            REQUIRE(host.methods == std::vector<std::pair<u16, u32>>{
+                                        {0x100, 3}, {0x104, 2}, {0x108, 1}, {0x10c, 0xbeef}});
+            REQUIRE(result.instructions == 12);
+        } else {
+            REQUIRE(host.methods == std::vector<std::pair<u16, u32>>{{0x100, 3}, {0x104, 2}});
+            REQUIRE(result.instructions == 6);
+        }
+    }
+    Engine engine;
+    Inst arm, branch, unreachable;
+    arm.end_next = true;
+    branch.alu[0] = {Op::BranchEqual, Z, Z, Z};
+    branch.immediate[0] = 0xc001;
+    branch.end_next = true;
+    unreachable.immediate[0] = 0xbeef;
+    unreachable.output[0].emit = 5;
+    Upload(engine, std::array{Method(), arm, branch, unreachable});
+    Host host;
+    const auto result = engine.Execute(0, host.Bind(), 100);
+    REQUIRE(result.Succeeded());
+    REQUIRE(result.instructions == 3);
+    REQUIRE(host.methods.empty());
+}
+
 TEST_CASE("Turing MME follows counted loops, signed branches and exit delay slots",
           "[video_core][ipc]") {
     Engine engine;
@@ -866,12 +910,19 @@ TEST_CASE("Native compute methods fail unsupported actions without invoking lega
     REQUIRE_FALSE(compute.execution_mask[0xad]);
     REQUIRE(compute.execution_mask[KEPLER_COMPUTE_REG_INDEX(launch)]);
     using Compute = Tegra::Control::NativeCompute;
-    for (const u32 method : {0xaeU, 0x6cU, 0x6dU, 0x157U, 0x16aU}) {
+    for (const u32 method : {0xaeU, 0x157U, 0x16aU}) {
         Compute rejected{context};
         REQUIRE_FALSE(rejected.CallMethod(method, 1, true, {}));
         REQUIRE(rejected.GetError() == Compute::Error::UnsupportedMethod);
         REQUIRE(rejected.ReadRegister(method) == 0);
         REQUIRE_FALSE(rejected.CallMethod(0xad, 0x20, true, {}));
+    }
+    for (const u32 method : {0x6cU, 0x6dU}) {
+        Compute missing_setup{context};
+        REQUIRE_FALSE(missing_setup.CallMethod(method, 1, true, {}));
+        REQUIRE(missing_setup.GetError() == Compute::Error::UploadFailed);
+        REQUIRE(missing_setup.ReadRegister(method) == 0);
+        REQUIRE_FALSE(missing_setup.CallMethod(0xad, 0x20, true, {}));
     }
     Compute shadow{context};
     REQUIRE(shadow.CallMethod(0x49, 1, true, {}));

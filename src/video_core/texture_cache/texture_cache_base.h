@@ -187,6 +187,7 @@ public:
 
     /// Refresh the state for graphics/compute image view and sampler descriptors
     void SynchronizeDescriptors(bool compute);
+    bool InvalidateDescriptorTables(bool headers, bool samplers);
 
     /// Updates the Render Targets if they can be rescaled
     /// @retval True if the Render Targets have been rescaled.

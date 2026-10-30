@@ -6,6 +6,7 @@
 #include <array>
 #include <memory>
 #include "video_core/control/native_gpu_context.h"
+#include "video_core/control/native_inline_upload.h"
 #include "video_core/control/native_macro_processor.h"
 
 namespace Tegra::Control {
@@ -18,13 +19,22 @@ public:
         NativeGpuGraphicsContext::QmdBackend qmd;
         bool (*barrier)(void*){};
     };
-    enum class Error { None, InvalidMethod, UnsupportedMethod, MacroFailed, QmdFailed, Cancelled };
+    enum class Error {
+        None,
+        InvalidMethod,
+        UnsupportedMethod,
+        MacroFailed,
+        QmdFailed,
+        Cancelled,
+        UploadFailed
+    };
 
     explicit NativeCompute(std::shared_ptr<const NativeGpuGraphicsContext> context);
     bool CallMethod(u32 method, u32 value, bool last, const Host& host);
     u32 ReadRegister(u32 method) const;
     Error GetError() const;
     bool HasPendingMacro() const;
+    bool HasPendingInlineUpload() const;
     const NativeQmdScheduler::Result& GetQmdResult() const;
 
 private:
@@ -34,6 +44,7 @@ private:
 
     const std::shared_ptr<const NativeGpuGraphicsContext> context;
     NativeMacroProcessor macros;
+    NativeInlineUpload inline_upload;
     std::array<u32, NativeMacroProcessor::MacroMethodStart> registers{};
     Error error{};
     NativeQmdScheduler::Result qmd_result;

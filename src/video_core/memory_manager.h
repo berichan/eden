@@ -12,6 +12,7 @@
 #include <mutex>
 #include <optional>
 #include <span>
+#include <stop_token>
 #include <vector>
 #include <boost/container/small_vector.hpp>
 
@@ -115,6 +116,27 @@ public:
     bool WriteBlockChecked(GPUVAddr address, std::span<const u8> input);
     bool IsReadableRange(GPUVAddr address, size_t size) const;
     bool IsWritableRange(GPUVAddr address, size_t size) const;
+
+    // Keep mappings and their backing allocations stable through a native GPU dispatch.
+    // Acquire before renderer cache locks; finish GPU work before releasing the lease.
+    class MappingLease {
+    public:
+        MappingLease(MappingLease&&) noexcept = default;
+        MappingLease& operator=(MappingLease&&) noexcept = default;
+        MappingLease(const MappingLease&) = delete;
+        MappingLease& operator=(const MappingLease&) = delete;
+        std::optional<DAddr> ResolveContiguous(GPUVAddr address, size_t size, bool write) const;
+        size_t ContiguousPrefix(GPUVAddr address, size_t max_size, bool write,
+                                std::stop_token stop_token = {}) const;
+
+    private:
+        friend class MemoryManager;
+        explicit MappingLease(MemoryManager& manager);
+        MemoryManager* manager;
+        std::unique_lock<std::mutex> lock;
+    };
+    MappingLease AcquireMappingLease();
+    u64 MappingGeneration() const;
 
     /**
      * Checks if a gpu region can be simply read with a pointer.
@@ -251,6 +273,7 @@ private:
 
     mutable std::mutex guard;
     mutable std::mutex mapping_guard;
+    std::atomic<u64> mapping_generation{};
 
     static constexpr size_t continuous_bits = 64;
 

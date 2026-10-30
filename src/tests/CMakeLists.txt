@@ -18,6 +18,7 @@ add_executable(tests
     common/unique_function.cpp
     core/kernel/cpu_topology.cpp
     core/core_timing.cpp
+    core/file_sys/real_vfs.cpp
     core/hle/tipc.cpp
     core/hle/native_gpu_characteristics.cpp
     core/hle/native_gpu_address_space.cpp
@@ -33,6 +34,7 @@ add_executable(tests
     video_core/memory_tracker.cpp
     video_core/native_compute.cpp
     video_core/native_atomic_sequence.cpp
+    video_core/native_cache.cpp
     video_core/native_constant_buffer.cpp
     video_core/native_inline_upload.cpp
     video_core/native_graphics_config.cpp

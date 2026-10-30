@@ -12,6 +12,7 @@
 #include "common/settings.h"
 #include "core/core.h"
 #include "core/core_timing.h"
+#include "video_core/control/native_cache.h"
 #include "video_core/control/native_constant_buffer.h"
 #include "video_core/control/native_gpu_context.h"
 #include "video_core/control/native_inline_upload.h"
@@ -599,9 +600,10 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
                     return self.engine.NativeWaitForIdle();
                 }
                 if (NativeVersionRegister(method) || IsNativeVersionSet(method) ||
-                    IsNativeConstantBufferBind(method) || method == 0x8c4 || method == 0x54 ||
-                    method == 0x55 || method == 0x6c || method == 0x6d ||
-                    (method >= 0x8e4 && method <= 0x8f3)) {
+                    IsNativeConstantBufferBind(method) ||
+                    Control::DecodeNativeGraphicsCacheAction(method, value).has_value() ||
+                    method == 0x8c4 || method == 0x54 || method == 0x55 || method == 0x6c ||
+                    method == 0x6d || (method >= 0x8e4 && method <= 0x8f3)) {
                     self.engine.CallMethod(self.system, method, value, true);
                     return !self.engine.HasNativeMacroFailure();
                 }
@@ -643,6 +645,15 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
         }
         if (method == 0x44) {
             native_action_failed = !NativeWaitForIdle();
+            return;
+        }
+        if (const auto action = Control::DecodeNativeGraphicsCacheAction(method, method_argument)) {
+            native_action_failed = native_stop_token.stop_requested() || !rasterizer ||
+                                   !rasterizer->InvalidateNativeCaches(*action) ||
+                                   native_stop_token.stop_requested();
+            if (!native_action_failed) {
+                ProcessDirtyRegisters(method, method_argument);
+            }
             return;
         }
         if (IsNativeConstantBufferBind(method)) {

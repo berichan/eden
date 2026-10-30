@@ -9,10 +9,13 @@
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
+#include <optional>
+#include <vector>
 
 #include "common/common_types.h"
 #include "common/thread_worker.h"
 #include "shader_recompiler/shader_info.h"
+#include "video_core/memory_manager.h"
 #include "video_core/renderer_vulkan/pipeline_helper.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vk_descriptor_buffer.h"
@@ -48,9 +51,32 @@ public:
     ComputePipeline& operator=(const ComputePipeline&) = delete;
     ComputePipeline(const ComputePipeline&) = delete;
 
+    struct NativeBindings {
+        struct Uniform {
+            GPUVAddr address{};
+            u32 size{};
+            DAddr device_address{};
+        };
+        struct Storage {
+            GPUVAddr address{};
+            std::optional<u64> size_hint;
+            bool written{};
+            VideoCommon::Binding binding;
+        };
+        std::array<Uniform, 8> uniforms{};
+        std::vector<Storage> storage;
+        bool resolved{};
+    };
+    std::optional<NativeBindings> SnapshotNativeBindings(
+        Tegra::Engines::KeplerCompute& kepler_compute) const;
+    bool ResolveNativeBindings(NativeBindings& bindings,
+                               const Tegra::MemoryManager::MappingLease& lease,
+                               std::stop_token stop_token) const;
+
     [[nodiscard]] bool Configure(Tegra::Engines::KeplerCompute& kepler_compute,
                                  Tegra::MemoryManager& gpu_memory, Scheduler& scheduler,
-                                 BufferCache& buffer_cache, TextureCache& texture_cache);
+                                 BufferCache& buffer_cache, TextureCache& texture_cache,
+                                 const NativeBindings* native_bindings = nullptr);
 
     bool IsBound() const noexcept {
         return static_cast<bool>(pipeline);

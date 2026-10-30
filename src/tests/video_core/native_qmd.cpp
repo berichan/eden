@@ -84,7 +84,6 @@ TEST_CASE("Native QMD dependencies gate real dispatch and all three ordered rele
     REQUIRE(host.dispatches.empty());
     REQUIRE(host.releases.empty());
     host.descriptors[0x1000][26] = 99;
-    host.descriptors[0x1000][48] = 0x5678;
     result = scheduler.Signal(0x1000, 7, host.Bind());
     REQUIRE(result.Succeeded());
     REQUIRE(result.dispatches == 1);
@@ -95,6 +94,50 @@ TEST_CASE("Native QMD dependencies gate real dispatch and all three ordered rele
     REQUIRE(host.releases[0].payload == 99);
     REQUIRE(host.releases[2].address == 0x3008);
     REQUIRE(host.releases[2].SizeBytes() == 4);
+}
+
+TEST_CASE("Parked native QMD nodes retain dependencies across frontend submissions",
+          "[ipc][video_core]") {
+    Scheduler scheduler;
+    Host host;
+    host.descriptors[0x1000] = Descriptor(2, false);
+    const auto scheduled = scheduler.Signal(0x1000, 3, host.Bind());
+    REQUIRE(scheduled.Succeeded());
+    REQUIRE(scheduler.HasPendingDispatch());
+    const auto first_epoch = scheduler.Signal(0x1000, 7, host.Bind());
+    REQUIRE(first_epoch.Succeeded());
+    REQUIRE(first_epoch.dispatches == 0);
+    REQUIRE(first_epoch.releases == 0);
+    REQUIRE(scheduler.HasPendingDispatch());
+    REQUIRE_FALSE(scheduler.HasFailed());
+    REQUIRE(host.events.empty());
+    host.descriptors[0x1000][26] = 123;
+    const auto next_epoch = scheduler.Signal(0x1000, 7, host.Bind());
+    REQUIRE(next_epoch.Succeeded());
+    REQUIRE(next_epoch.dispatches == 0);
+    REQUIRE(next_epoch.releases == 3);
+    REQUIRE_FALSE(scheduler.HasPendingDispatch());
+    REQUIRE(host.events == "VVVRRR");
+    REQUIRE(host.releases.front().payload == 123);
+}
+
+TEST_CASE("Parked native QMD launch mutations cannot publish stale work or releases",
+          "[ipc][video_core]") {
+    for (const u32 word : {4U, 12U, 15U, 16U, 18U, 48U}) {
+        Scheduler scheduler;
+        Host host;
+        host.descriptors[0x1000] = Descriptor(2, false);
+        REQUIRE(scheduler.Signal(0x1000, 3, host.Bind()).Succeeded());
+        host.descriptors[0x1000][word] ^= 1;
+        REQUIRE(scheduler.Signal(0x1000, 7, host.Bind()).Succeeded());
+        REQUIRE(host.events.empty());
+        const auto ready = scheduler.Signal(0x1000, 7, host.Bind());
+        REQUIRE(ready.error == Scheduler::Error::UnsupportedDescriptor);
+        REQUIRE(scheduler.HasFailed());
+        REQUIRE(host.events.empty());
+        REQUIRE(host.dispatches.empty());
+        REQUIRE(host.releases.empty());
+    }
 }
 
 TEST_CASE("Native QMD faults never turn skipped dispatch into a completion", "[ipc][video_core]") {

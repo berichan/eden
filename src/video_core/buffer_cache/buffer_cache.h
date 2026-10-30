@@ -543,6 +543,37 @@ void BufferCache<P>::UnbindComputeTextureBuffers() {
 }
 
 template <class P>
+void BufferCache<P>::SetNativeComputeUniformBuffers(
+    const std::array<Binding, NUM_COMPUTE_UNIFORM_BUFFERS>& bindings) {
+    channel_state->compute_uniform_buffers = bindings;
+}
+
+template <class P>
+bool BufferCache<P>::BindNativeComputeStorageBuffer(size_t ssbo_index, const Binding& binding,
+                                                    bool is_written) {
+    if (ssbo_index >= channel_state->compute_storage_buffers.size()) {
+        return false;
+    }
+    const bool already_enabled =
+        ((channel_state->enabled_compute_storage_buffers >> ssbo_index) & 1U) != 0;
+    if constexpr (requires { runtime.ShouldLimitDynamicStorageBuffers(); }) {
+        if (runtime.ShouldLimitDynamicStorageBuffers() && !already_enabled) {
+            if (channel_state->total_compute_storage_buffers >=
+                runtime.GetMaxDynamicStorageBuffers()) {
+                return false;
+            }
+            ++channel_state->total_compute_storage_buffers;
+        }
+    }
+    channel_state->enabled_compute_storage_buffers |= 1U << ssbo_index;
+    channel_state->written_compute_storage_buffers =
+        (channel_state->written_compute_storage_buffers & ~(1U << ssbo_index)) |
+        ((is_written ? 1U : 0U) << ssbo_index);
+    channel_state->compute_storage_buffers[ssbo_index] = binding;
+    return true;
+}
+
+template <class P>
 void BufferCache<P>::BindComputeTextureBuffer(size_t tbo_index, GPUVAddr gpu_addr, u32 size,
                                               PixelFormat format, bool is_written, bool is_image) {
     if (tbo_index >= channel_state->compute_texture_buffers.size()) [[unlikely]] {
@@ -1485,6 +1516,11 @@ template <class P>
 void BufferCache<P>::UpdateComputeUniformBuffers() {
     ForEachEnabledBit(channel_state->enabled_compute_uniform_buffer_mask, [&](u32 index) {
         Binding& binding = channel_state->compute_uniform_buffers[index];
+        if (kepler_compute->IsNativeMode()) {
+            // The caller holds its mapping lease; never resolve these frozen ranges again.
+            binding.buffer_id = FindBuffer(binding.device_addr, binding.size, false);
+            return;
+        }
         binding = NULL_BINDING;
         const auto& launch_desc = kepler_compute->launch_description;
         if (((launch_desc.const_buffer_enable_mask >> index) & 1) != 0) {

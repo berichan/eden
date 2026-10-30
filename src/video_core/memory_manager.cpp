@@ -74,6 +74,7 @@ MemoryManager::EntryType MemoryManager::GetEntry(size_t position, bool is_big_pa
 }
 
 void MemoryManager::SetEntry(size_t position, MemoryManager::EntryType entry, bool is_big_page) {
+    mapping_generation.fetch_add(1, std::memory_order_release);
     if (is_big_page) {
         position = position >> big_page_bits;
         const u64 entry_mask = big_entries[position / 32];
@@ -284,6 +285,7 @@ bool MemoryManager::MapSyncpointShim(GPUVAddr gpu_addr, Host1x::SyncpointManager
     syncpoint_shim = std::make_unique<Host1x::SyncpointShim>(syncpoints);
     syncpoint_shim_address = gpu_addr;
     syncpoint_shim_ready.store(true, std::memory_order_release);
+    mapping_generation.fetch_add(1, std::memory_order_release);
     return true;
 }
 
@@ -608,6 +610,56 @@ bool MemoryManager::WriteBlockChecked(GPUVAddr address, std::span<const u8> inpu
     }
     WriteBlock(address, input.data(), input.size());
     return true;
+}
+
+MemoryManager::MappingLease::MappingLease(MemoryManager& manager_)
+    : manager{&manager_}, lock{manager_.mapping_guard} {}
+
+MemoryManager::MappingLease MemoryManager::AcquireMappingLease() {
+    return MappingLease{*this};
+}
+
+u64 MemoryManager::MappingGeneration() const {
+    return mapping_generation.load(std::memory_order_acquire);
+}
+
+std::optional<DAddr> MemoryManager::MappingLease::ResolveContiguous(GPUVAddr address, size_t size,
+                                                                    bool write) const {
+    if (!lock.owns_lock() || size == 0 || !manager->IsValidAccessRange(address, size, write) ||
+        !manager->IsContinuousRange(address, size)) {
+        return std::nullopt;
+    }
+    return manager->GpuToCpuAddress(address);
+}
+
+size_t MemoryManager::MappingLease::ContiguousPrefix(GPUVAddr address, size_t max_size, bool write,
+                                                     std::stop_token stop_token) const {
+    if (!lock.owns_lock() || address >= manager->address_space_size) {
+        return 0;
+    }
+    const size_t limit = (std::min)(u64{max_size}, manager->address_space_size - address);
+    const u64 granule = (std::min)(manager->page_size, u64{1} << cpu_page_bits);
+    std::optional<DAddr> base;
+    size_t offset{};
+    while (offset < limit) {
+        if (stop_token.stop_requested()) {
+            return 0;
+        }
+        const GPUVAddr current = address + offset;
+        const size_t amount = (std::min)(u64{limit - offset}, granule - (current & (granule - 1)));
+        if (!manager->IsValidAccessRange(current, amount, write)) {
+            break;
+        }
+        const auto device = manager->GpuToCpuAddress(current);
+        if (!device || (base && *device != *base + offset)) {
+            break;
+        }
+        if (!base) {
+            base = device;
+        }
+        offset += amount;
+    }
+    return offset;
 }
 
 void MemoryManager::WriteBlockImpl(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size, [[maybe_unused]] VideoCommon::CacheType which, bool unsafe) {

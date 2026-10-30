@@ -149,39 +149,165 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
     }
 }
 
-bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
-                                Tegra::MemoryManager& gpu_memory, Scheduler& scheduler,
-                                BufferCache& buffer_cache, TextureCache& texture_cache) {
-    if (kepler_compute.IsNativeMode()) {
-        if ((info.constant_buffer_mask & ~0xffU) || !info.texture_buffer_descriptors.empty() ||
-            !info.image_buffer_descriptors.empty() || !info.texture_descriptors.empty() ||
-            !info.image_descriptors.empty()) {
+std::optional<ComputePipeline::NativeBindings> ComputePipeline::SnapshotNativeBindings(
+    Tegra::Engines::KeplerCompute& kepler_compute) const {
+    if (!kepler_compute.IsNativeMode() || (info.constant_buffer_mask & ~0xffU) ||
+        !info.texture_buffer_descriptors.empty() || !info.image_buffer_descriptors.empty() ||
+        !info.texture_descriptors.empty() || !info.image_descriptors.empty() ||
+        info.storage_buffers_descriptors.size() > VideoCommon::NUM_STORAGE_BUFFERS) {
+        return std::nullopt;
+    }
+    NativeBindings snapshot;
+    const auto& qmd = kepler_compute.launch_description;
+    std::vector<u8> visible_uniform;
+    for (size_t index = 0; index < snapshot.uniforms.size(); ++index) {
+        if (!(info.constant_buffer_mask & (1U << index))) {
+            continue;
+        }
+        if (!(qmd.const_buffer_enable_mask.Value() & (1U << index))) {
+            return std::nullopt;
+        }
+        const auto& cbuf = qmd.const_buffer_config[index];
+        auto& uniform = snapshot.uniforms[index];
+        uniform.address = cbuf.Address();
+        uniform.size = (std::min)(cbuf.size.Value(), uniform_buffer_sizes[index]);
+        if (uniform.size == 0 || uniform.size > 0x10000 ||
+            kepler_compute.GetNativeStopToken().stop_requested()) {
+            return std::nullopt;
+        }
+        // The unaligned uniform-buffer streaming path copies CPU backing directly.
+        // Download GPU-written bytes now, before either mapping or cache locks are held.
+        visible_uniform.resize(uniform.size);
+        if (!kepler_compute.ReadNativeConstantBuffer(static_cast<u32>(index), 0, visible_uniform)) {
+            return std::nullopt;
+        }
+    }
+    for (const auto& desc : info.storage_buffers_descriptors) {
+        if (desc.count != 1) {
+            return std::nullopt;
+        }
+        std::array<u8, 16> bytes{};
+        const bool has_tail =
+            kepler_compute.ReadNativeConstantBuffer(desc.cbuf_index, desc.cbuf_offset, bytes);
+        if (!has_tail && !kepler_compute.ReadNativeConstantBuffer(desc.cbuf_index, desc.cbuf_offset,
+                                                                  std::span{bytes}.first(8))) {
+            return std::nullopt;
+        }
+        NativeBindings::Storage storage{};
+        std::memcpy(&storage.address, bytes.data(), sizeof(storage.address));
+        if (has_tail) {
+            u64 hint{};
+            std::memcpy(&hint, bytes.data() + 8, sizeof(hint));
+            storage.size_hint = hint;
+        }
+        storage.written = desc.is_written;
+        snapshot.storage.push_back(storage);
+    }
+    return snapshot;
+}
+
+bool ComputePipeline::ResolveNativeBindings(NativeBindings& bindings,
+                                            const Tegra::MemoryManager::MappingLease& lease,
+                                            std::stop_token stop_token) const {
+    bindings.resolved = false;
+    for (auto& uniform : bindings.uniforms) {
+        if (stop_token.stop_requested()) {
             return false;
         }
-        for (const auto& desc : info.storage_buffers_descriptors) {
-            std::array<u8, 16> descriptor;
-            if (!kepler_compute.ReadNativeConstantBuffer(desc.cbuf_index, desc.cbuf_offset,
-                                                         descriptor)) {
-                return false;
-            }
-            u64 address{};
-            std::memcpy(&address, descriptor.data(), sizeof(address));
-            if (address != 0 &&
-                (!gpu_memory.IsReadableRange(address, 1) || !gpu_memory.GpuToCpuAddress(address))) {
-                return false;
-            }
+        if (uniform.size == 0) {
+            continue;
         }
+        const auto device_address = lease.ResolveContiguous(uniform.address, uniform.size, false);
+        if (!device_address || *device_address == 0) {
+            return false;
+        }
+        uniform.device_address = *device_address;
+    }
+    const u64 alignment = device.GetStorageBufferAlignment();
+    const u64 max_range = (std::min)(device.GetMaxStorageBufferRange(), u64{0xffffffff});
+    if (alignment == 0 || (alignment & (alignment - 1))) {
+        return false;
+    }
+    for (auto& storage : bindings.storage) {
+        if (stop_token.stop_requested()) {
+            return false;
+        }
+        storage.binding = {};
+        if (storage.address == 0) {
+            continue;
+        }
+        if (storage.address >= (u64{1} << 40)) {
+            return false;
+        }
+        const GPUVAddr aligned_address = storage.address & ~(alignment - 1);
+        const u64 prefix = storage.address - aligned_address;
+        if (prefix >= max_range) {
+            return false;
+        }
+        // Preserve the bounded legacy size hint for generic CBUF pointers. A
+        // neighboring qword is not universally a size-bearing descriptor ABI.
+        const u32 hint = storage.size_hint && (*storage.size_hint >> 32) == 0
+                             ? static_cast<u32>(*storage.size_hint)
+                             : 0;
+        const u64 limit = (std::min)(max_range - prefix, (std::max)(u64{8U << 20}, u64{hint}));
+        const u64 mapped =
+            lease.ContiguousPrefix(storage.address, limit, storage.written, stop_token);
+        const u64 selected_size =
+            hint != 0 && hint <= mapped ? hint : (std::min)(mapped, u64{8U << 20});
+        if (selected_size == 0) {
+            return false;
+        }
+        const u64 binding_size = prefix + selected_size;
+        const auto device_address =
+            lease.ResolveContiguous(aligned_address, binding_size, storage.written);
+        if (!device_address || *device_address == 0 || (*device_address % alignment) != 0) {
+            return false;
+        }
+        // Zero gpu_addr prevents the cache from re-resolving this leased physical range.
+        storage.binding = {.device_addr = *device_address, .size = static_cast<u32>(binding_size)};
+    }
+    bindings.resolved = true;
+    return true;
+}
+
+bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
+                                Tegra::MemoryManager& gpu_memory, Scheduler& scheduler,
+                                BufferCache& buffer_cache, TextureCache& texture_cache,
+                                const NativeBindings* native_bindings) {
+    if (kepler_compute.IsNativeMode() &&
+        (!native_bindings || !native_bindings->resolved ||
+         native_bindings->storage.size() != info.storage_buffers_descriptors.size())) {
+        return false;
+    }
+    if (native_bindings && !kepler_compute.IsNativeMode()) {
+        return false;
     }
     guest_descriptor_queue.Acquire(scheduler, num_descriptor_entries, uses_descriptor_buffer);
 
     buffer_cache.SetComputeUniformBufferState(info.constant_buffer_mask, &uniform_buffer_sizes);
     buffer_cache.UnbindComputeStorageBuffers();
-    size_t ssbo_index{};
-    for (const auto& desc : info.storage_buffers_descriptors) {
-        ASSERT(desc.count == 1);
-        buffer_cache.BindComputeStorageBuffer(ssbo_index, desc.cbuf_index, desc.cbuf_offset,
-                                              desc.is_written);
-        ++ssbo_index;
+    if (native_bindings) {
+        std::array<VideoCommon::Binding, 8> uniforms{};
+        for (size_t index = 0; index < uniforms.size(); ++index) {
+            const auto& uniform = native_bindings->uniforms[index];
+            uniforms[index] = {.device_addr = uniform.device_address, .size = uniform.size};
+        }
+        buffer_cache.SetNativeComputeUniformBuffers(uniforms);
+        for (size_t index = 0; index < native_bindings->storage.size(); ++index) {
+            const auto& storage = native_bindings->storage[index];
+            if (!buffer_cache.BindNativeComputeStorageBuffer(index, storage.binding,
+                                                             storage.written)) {
+                return false;
+            }
+        }
+    } else {
+        size_t ssbo_index{};
+        for (const auto& desc : info.storage_buffers_descriptors) {
+            ASSERT(desc.count == 1);
+            buffer_cache.BindComputeStorageBuffer(ssbo_index, desc.cbuf_index, desc.cbuf_offset,
+                                                  desc.is_written);
+            ++ssbo_index;
+        }
     }
 
     texture_cache.SynchronizeDescriptors(true);

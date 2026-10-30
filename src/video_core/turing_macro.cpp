@@ -98,6 +98,7 @@ public:
             inst = Decode(engine.code[pc]);
             ++result.instructions;
             next_pc = pc + 1;
+            branch_cancels_end = false;
             if (inst.alu[0].operation == Operation::State &&
                 inst.alu[1].operation == Operation::State) {
                 Fail(Error::InvalidInstruction);
@@ -118,7 +119,7 @@ public:
             if (result.error != Error::None || end_next || stop) {
                 break;
             }
-            end_next = inst.end_next;
+            end_next = inst.end_next && !branch_cancels_end;
             if (loop_count != 0 && pc == loop_end) {
                 --loop_count;
                 next_pc = loop_start + 1;
@@ -387,6 +388,9 @@ private:
             }
             const bool expected = (inst.immediate[slot] & 0x8000) != 0;
             if (Compare(alu.operation, x, y) == expected) {
+                // Native loop back edges use bit14 to suppress this instruction's
+                // fallthrough termination marker, not a previously armed delay-slot exit.
+                branch_cancels_end = (inst.immediate[slot] & 0x4000) != 0;
                 s32 offset = inst.immediate[slot] & 0x1fff;
                 if ((offset & 0x1000) != 0) {
                     offset -= 0x2000;
@@ -497,6 +501,7 @@ private:
     u32 loop_start{};
     u32 loop_end{};
     bool stop{};
+    bool branch_cancels_end{};
 };
 
 TuringMacroEngine::Result TuringMacroEngine::Execute(u32 start, const Host& host,

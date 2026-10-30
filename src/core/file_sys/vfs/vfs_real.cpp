@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdio>
 #include <iterator>
 #include <utility>
 #include "common/assert.h"
@@ -251,7 +252,12 @@ void RealVfsFilesystem::DropReference(std::unique_ptr<FileReference>&& reference
 }
 
 void RealVfsFilesystem::EvictSingleReferenceLocked() {
-    if (num_open_files < MaxOpenFiles || open_references.empty()) {
+    size_t limit = MaxOpenFiles;
+#ifdef _WIN32
+    // fopen streams share a lower CRT limit with logs and other filesystem instances.
+    limit = (std::min)(limit, static_cast<size_t>(_getmaxstdio()) / 2);
+#endif
+    if (num_open_files < limit || open_references.empty()) {
         return;
     }
 

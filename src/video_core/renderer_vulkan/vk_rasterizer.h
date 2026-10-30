@@ -92,6 +92,7 @@ public:
     void Clear(u32 layer_count) override;
     void DispatchCompute() override;
     bool SynchronizeNativeWork() override;
+    bool InvalidateNativeCaches(const Tegra::Control::NativeCacheInvalidation& action) override;
 
     bool DispatchNativeCompute() override;
     void ResetCounter(VideoCommon::QueryType type) override;

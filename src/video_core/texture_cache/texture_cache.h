@@ -363,6 +363,26 @@ void TextureCache<P>::SynchronizeDescriptors(bool compute) {
 }
 
 template <class P>
+bool TextureCache<P>::InvalidateDescriptorTables(bool headers, bool samplers) {
+    // Caller holds mutex. Keep image contents and immutable resource objects alive.
+    if (!channel_state) {
+        return false;
+    }
+    if (headers) {
+        channel_state->graphics_image_table.Invalidate();
+        channel_state->compute_image_table.Invalidate();
+    }
+    if (samplers) {
+        channel_state->graphics_sampler_table.Invalidate();
+        channel_state->compute_sampler_table.Invalidate();
+    }
+    if (headers || samplers) {
+        ++texture_bindings_serial;
+    }
+    return true;
+}
+
+template <class P>
 bool TextureCache<P>::RescaleRenderTargets() {
     auto& flags = maxwell3d->dirty.flags;
     u32 scale_rating = 0;

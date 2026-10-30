@@ -3,8 +3,11 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstring>
+#include <future>
 #include <sstream>
+#include <thread>
 #include <catch2/catch_test_macros.hpp>
 #include "common/scope_exit.h"
 #include "common/settings.h"
@@ -29,6 +32,7 @@
 #include "shader_recompiler/frontend/maxwell/translate_program.h"
 #include "shader_recompiler/host_translate_info.h"
 #include "video_core/control/native_command_stream.h"
+#include "video_core/control/native_compute.h"
 #include "video_core/control/native_gpu_context.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/gpu.h"
@@ -98,6 +102,177 @@ TEST_CASE("GPU sharable attributes survive memory block splitting and independen
     update(6, 3, KMemoryAttribute::GpuSharable, KMemoryAttribute::None);
     REQUIRE(blocks.FindBlock(KProcessAddress{0})->GetNumPages() == 16);
     REQUIRE(blocks.CheckState());
+}
+
+TEST_CASE("Native mapping leases validate backing and exclude concurrent unmap", "[core][ipc]") {
+    const auto layout = Settings::values.memory_layout_mode.GetValue();
+    const auto multicore = Settings::values.use_multi_core.GetValue();
+    Settings::values.memory_layout_mode = Settings::MemoryLayout::Memory_12Gb;
+    Settings::values.use_multi_core = false;
+    SCOPE_EXIT {
+        Settings::values.memory_layout_mode = layout;
+        Settings::values.use_multi_core = multicore;
+    };
+    Core::System system;
+    system.Initialize();
+    Kernel::KProcess process{system.Kernel()};
+    auto& table = process.GetPageTable().GetImpl();
+    table.Resize(42, 12);
+    process.GetMemory().SetCurrentPageTable(process);
+    constexpr u64 cpu = (1ULL << 41) + 0x1000;
+    constexpr u64 size = 3 * Kernel::PageSize;
+    process.GetMemory().MapMemoryRegion(table, cpu, size, Core::DramMemoryMap::Base + (10ULL << 30),
+                                        Common::MemoryPermission::ReadWrite, false);
+    SCOPE_EXIT {
+        process.GetMemory().UnmapRegion(table, cpu, size, false);
+    };
+    Tegra::GPU gpu{system, false, false};
+    Null::RasterizerNull rasterizer{gpu};
+    Tegra::MaxwellDeviceMemoryManager backing{system.DeviceMemory()};
+    backing.BindInterface(&rasterizer);
+    const auto asid = backing.RegisterProcess(&process.GetMemory());
+    SCOPE_EXIT {
+        backing.UnregisterProcess(asid);
+    };
+    const auto device = backing.Allocate(size);
+    REQUIRE(device != 0);
+    backing.Map(device, cpu, size, asid, true);
+    SCOPE_EXIT {
+        backing.Unmap(device, size);
+        backing.Free(device, size);
+    };
+    auto shared_manager =
+        std::make_shared<Tegra::MemoryManager>(system, backing, 32, 1ULL << 32, 16, 12);
+    auto& manager = *shared_manager;
+    manager.BindRasterizer(&rasterizer);
+    constexpr GPUVAddr base = 0x8000000;
+    REQUIRE(manager.Map(base, device, 2 * Kernel::PageSize, Tegra::PTEKind::PITCH, false) == base);
+    REQUIRE(manager.Map(base + 2 * Kernel::PageSize, device, Kernel::PageSize,
+                        Tegra::PTEKind::PITCH, false) == base + 2 * Kernel::PageSize);
+    constexpr GPUVAddr sparse = 0x9000000;
+    REQUIRE(manager.MapSparse(sparse, Kernel::PageSize, false) == sparse);
+    {
+        using Compute = Tegra::Control::NativeCompute;
+        auto context = std::make_shared<Tegra::Control::NativeGpuGraphicsContext>(
+            std::make_shared<Tegra::Control::AmpereGraphicsState>(), shared_manager);
+        u32 waits{};
+        Compute::Host host{};
+        host.qmd.context = &waits;
+        host.barrier = [](void* opaque) {
+            ++*static_cast<u32*>(opaque);
+            return true;
+        };
+        const auto prepare = [&](Compute& compute, u32 high) {
+            REQUIRE(compute.CallMethod(0x60, 8, true, host));
+            REQUIRE(compute.CallMethod(0x61, 1, true, host));
+            REQUIRE(compute.CallMethod(0x62, high, true, host));
+            REQUIRE(compute.CallMethod(0x63, static_cast<u32>(base), true, host));
+            REQUIRE(compute.CallMethod(0x64, 0, true, host));
+        };
+        Compute compute{context};
+        prepare(compute, 0);
+        REQUIRE(compute.CallMethod(0x6c, 0x1011, true, host));
+        REQUIRE(compute.HasPendingInlineUpload());
+        REQUIRE(compute.CallMethod(0x6d, 0x11223344, true, host));
+        REQUIRE(compute.HasPendingInlineUpload());
+        REQUIRE(waits == 0);
+        REQUIRE(compute.CallMethod(0x6d, 0x55667788, true, host));
+        REQUIRE_FALSE(compute.HasPendingInlineUpload());
+        REQUIRE(waits == 2);
+        REQUIRE(process.GetMemory().Read32(cpu) == 0x11223344);
+        REQUIRE(process.GetMemory().Read32(cpu + 4) == 0x55667788);
+        Compute incomplete{context};
+        prepare(incomplete, 0);
+        REQUIRE(incomplete.CallMethod(0x6c, 0x1041, true, host));
+        REQUIRE(incomplete.CallMethod(0x6d, 0, true, host));
+        REQUIRE_FALSE(incomplete.CallMethod(0xb0, 3, true, host));
+        REQUIRE(incomplete.HasPendingInlineUpload());
+        Compute wide{context};
+        prepare(wide, 0x100);
+        REQUIRE_FALSE(wide.CallMethod(0x6c, 0x1041, true, host));
+        REQUIRE(process.GetMemory().Read32(cpu) == 0x11223344);
+    }
+    const u64 generation = manager.MappingGeneration();
+    std::promise<void> started;
+    std::promise<void> finished;
+    auto completion = finished.get_future();
+    std::jthread unmapper;
+    {
+        auto lease = manager.AcquireMappingLease();
+        REQUIRE(lease.ResolveContiguous(base + 5, 2 * Kernel::PageSize - 5, false) == device + 5);
+        REQUIRE_FALSE(lease.ResolveContiguous(base, size, false));
+        REQUIRE(lease.ContiguousPrefix(base + 5, size, true) == 2 * Kernel::PageSize - 5);
+        REQUIRE_FALSE(lease.ResolveContiguous(sparse, 4, false));
+        REQUIRE(lease.ContiguousPrefix(sparse, 4, true) == 0);
+        REQUIRE_FALSE(lease.ResolveContiguous((1ULL << 32) - 4, 8, false));
+        auto moved = std::move(lease);
+        REQUIRE_FALSE(lease.ResolveContiguous(base, 4, false));
+        REQUIRE(lease.ContiguousPrefix(base, 4, false) == 0);
+        std::stop_source cancelled;
+        cancelled.request_stop();
+        REQUIRE(moved.ContiguousPrefix(base, 4, false, cancelled.get_token()) == 0);
+        unmapper = std::jthread([&] {
+            started.set_value();
+            manager.Unmap(base, size);
+            finished.set_value();
+        });
+        started.get_future().wait();
+        REQUIRE(completion.wait_for(std::chrono::milliseconds{20}) == std::future_status::timeout);
+        REQUIRE(manager.MappingGeneration() == generation);
+    }
+    unmapper.join();
+    REQUIRE(completion.wait_for(std::chrono::milliseconds{0}) == std::future_status::ready);
+    REQUIRE(manager.MappingGeneration() != generation);
+    {
+        // Reconstruct at the same address with the same map-count generation. TLS
+        // translations must distinguish manager lifetimes, not just owner pointers.
+        std::optional<Tegra::MaxwellDeviceMemoryManager> cached;
+        process.GetMemory().Write32(cpu + Kernel::PageSize, 0xa5b6c7d8);
+        for (u32 incarnation = 0; incarnation < 2; ++incarnation) {
+            auto& translations = cached.emplace(system.DeviceMemory());
+            translations.BindInterface(&rasterizer);
+            const auto owner = translations.RegisterProcess(&process.GetMemory());
+            const auto address = translations.Allocate(Kernel::PageSize);
+            REQUIRE(address != 0);
+            translations.Map(address, cpu + incarnation * Kernel::PageSize, Kernel::PageSize, owner,
+                             true);
+            u32 word{};
+            translations.ReadBlockUnsafe(address, &word, sizeof(word));
+            REQUIRE(word == (incarnation == 0 ? 0x11223344U : 0xa5b6c7d8U));
+            translations.Unmap(address, Kernel::PageSize);
+            translations.Free(address, Kernel::PageSize);
+            translations.UnregisterProcess(owner);
+            cached.reset();
+        }
+    }
+    {
+        const auto independent = backing.Allocate(Kernel::PageSize);
+        REQUIRE(independent != 0);
+        std::atomic<bool> mismatch{};
+        std::promise<void> ready;
+        std::jthread reader([&](std::stop_token stop_token) {
+            u32 word{};
+            backing.ReadBlockUnsafe(device, &word, sizeof(word));
+            ready.set_value();
+            while (!stop_token.stop_requested()) {
+                backing.ReadBlockUnsafe(device, &word, sizeof(word));
+                if (word != 0x11223344) {
+                    mismatch.store(true, std::memory_order_release);
+                }
+            }
+        });
+        ready.get_future().wait();
+        for (u32 iteration = 0; iteration < 256; ++iteration) {
+            backing.Map(independent, cpu + Kernel::PageSize, Kernel::PageSize, asid, true);
+            backing.Unmap(independent, Kernel::PageSize);
+        }
+        reader.request_stop();
+        reader.join();
+        backing.Free(independent, Kernel::PageSize);
+        REQUIRE_FALSE(mismatch.load(std::memory_order_acquire));
+    }
+    auto lease = manager.AcquireMappingLease();
+    REQUIRE_FALSE(lease.ResolveContiguous(base, 4, false));
 }
 
 TEST_CASE("Device translations preserve 42-bit CPU addresses and physical RAM above eight GiB",
