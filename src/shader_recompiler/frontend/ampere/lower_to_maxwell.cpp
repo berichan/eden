@@ -1339,10 +1339,12 @@ LoweredProgram LowerToMaxwell(std::span<const Instruction> code) {
             break;
         }
         case 0x804: { // R2P PR, register, immediate mask
-            if (insn.Bits(16, 8) || insn.words[1] > 0x7f || insn.words[2])
+            if (insn.Bits(16, 8) || insn.words[1] > 0x7f || (insn.words[2] & ~0x3000U))
                 return fail(index, "native register-to-predicate mode");
+            // SM80 R2P.B1/B2/B3 encode the source byte in bits 76:77.
+            // Maxwell uses the same byte selection at bits 41:42.
             emit(0x38f0000000000000ULL | predicate | (u64{insn.Bits(24, 8)} << 8) |
-                 (u64{insn.words[1]} << 20));
+                 (u64{insn.words[1]} << 20) | (u64{insn.Bits(76, 2)} << 41));
             break;
         }
         case 0xc02:   // MOV uniform register

@@ -1838,8 +1838,15 @@ TEST_CASE("Native forward branches retain paths beyond an early unconditional ex
     REQUIRE(truncated.instructions.empty());
 }
 
-TEST_CASE("Native register-to-predicate writes only masked predicate bits", "[native-shader]") {
-    const std::array<Native, 2> source{{{{0x05007804, 7, 0, 0x000fe200}}, VertexTransform.back()}};
+TEST_CASE("Native register-to-predicate byte selectors write only masked predicate bits",
+          "[native-shader]") {
+    const u32 byte = GENERATE(0U, 1U, 2U, 3U);
+    const u32 mask = GENERATE(0U, 1U, 7U, 0x55U, 0x7fU);
+    // Original SM80 encoding records identify word2 0x1000/0x2000/0x3000 as
+    // R2P Rn.B1/B2/B3. The captured R8,mask7,word2=0x2000 case is B2.
+    // https://github.com/cloudcores/CuAssembler/blob/e4d48bb966c4d32c17f23488af97566fcf7000ef/CuAsm/InsAsmRepos/DefaultInsAsmRepos.sm_80.txt
+    const std::array<Native, 2> source{
+        {{{0x08007804, mask, byte << 12, 0x000fe400}}, VertexTransform.back()}};
     const auto lowered = Shader::Ampere::LowerToMaxwell(source);
     REQUIRE(lowered);
     REQUIRE(Shader::Maxwell::Decode(lowered.instructions[0]) == Shader::Maxwell::Opcode::R2P_imm);
@@ -1848,52 +1855,82 @@ TEST_CASE("Native register-to-predicate writes only masked predicate bits", "[na
     EmptyEnvironment env;
     Shader::Maxwell::TranslatorVisitor visitor{env, block};
     visitor.R2P_imm(lowered.instructions[0]);
-    for (u32 value = 0; value < 128; ++value) {
-        std::array<bool, 7> predicates{true, false, true, false, true, false, true};
-        std::unordered_map<const IR::Inst*, u32> values;
-        const auto get = [&](const IR::Value& v) -> u32 {
-            if (!v.IsImmediate())
-                return values.at(v.Inst());
-            return v.Type() == IR::Type::U1 ? static_cast<u32>(v.U1()) : v.U32();
-        };
-        for (const auto& inst : block.Instructions()) {
-            const auto arg = [&](size_t i) { return get(inst.Arg(i)); };
-            switch (inst.GetOpcode()) {
-            case IR::Opcode::GetRegister:
-                REQUIRE(static_cast<u32>(inst.Arg(0).Reg()) == 5);
-                values[&inst] = value;
-                break;
-            case IR::Opcode::GetPred:
-                values[&inst] = predicates[static_cast<u32>(inst.Arg(0).Pred())];
-                break;
-            case IR::Opcode::SetPred:
-                predicates[static_cast<u32>(inst.Arg(0).Pred())] = arg(1) != 0;
-                break;
-            case IR::Opcode::BitFieldUExtract:
-                values[&inst] = (arg(0) >> arg(1)) & ((1U << arg(2)) - 1);
-                break;
-            case IR::Opcode::GetZeroFromOp:
-                values[&inst] = arg(0) == 0;
-                break;
-            case IR::Opcode::IEqual:
-                values[&inst] = arg(0) == arg(1);
-                break;
-            case IR::Opcode::LogicalNot:
-                values[&inst] = !arg(0);
-                break;
-            case IR::Opcode::SelectU1:
-                values[&inst] = arg(0) ? arg(1) : arg(2);
-                break;
-            default:
-                FAIL("Unexpected R2P IR " << IR::NameOf(inst.GetOpcode()));
+    for (u32 initial : {0U, 0x7fU, 0x55U, 0x2aU}) {
+        for (u32 value = 0; value < 128; ++value) {
+            // Distinct other bytes catch a selector mapped to the wrong source byte.
+            // Bit7 of the selected byte never becomes a writable predicate.
+            const u32 input =
+                (0xa55ac33cU & ~(0xffU << (byte * 8))) | ((value | 0x80U) << (byte * 8));
+            std::array<bool, 7> predicates{};
+            for (u32 bit = 0; bit < predicates.size(); ++bit)
+                predicates[bit] = (initial & (1U << bit)) != 0;
+            std::unordered_map<const IR::Inst*, u32> values;
+            const auto get = [&](const IR::Value& v) -> u32 {
+                if (!v.IsImmediate())
+                    return values.at(v.Inst());
+                return v.Type() == IR::Type::U1 ? static_cast<u32>(v.U1()) : v.U32();
+            };
+            for (const auto& inst : block.Instructions()) {
+                const auto arg = [&](size_t i) { return get(inst.Arg(i)); };
+                switch (inst.GetOpcode()) {
+                case IR::Opcode::GetRegister:
+                    REQUIRE(static_cast<u32>(inst.Arg(0).Reg()) == 8);
+                    values[&inst] = input;
+                    break;
+                case IR::Opcode::GetPred:
+                    values[&inst] = predicates[static_cast<u32>(inst.Arg(0).Pred())];
+                    break;
+                case IR::Opcode::SetPred:
+                    predicates[static_cast<u32>(inst.Arg(0).Pred())] = arg(1) != 0;
+                    break;
+                case IR::Opcode::BitFieldUExtract:
+                    values[&inst] = (arg(0) >> arg(1)) & ((1U << arg(2)) - 1);
+                    break;
+                case IR::Opcode::GetZeroFromOp:
+                    values[&inst] = arg(0) == 0;
+                    break;
+                case IR::Opcode::IEqual:
+                    values[&inst] = arg(0) == arg(1);
+                    break;
+                case IR::Opcode::LogicalNot:
+                    values[&inst] = !arg(0);
+                    break;
+                case IR::Opcode::SelectU1:
+                    values[&inst] = arg(0) ? arg(1) : arg(2);
+                    break;
+                default:
+                    FAIL("Unexpected R2P IR " << IR::NameOf(inst.GetOpcode()));
+                }
             }
+            for (u32 bit = 0; bit < 7; ++bit)
+                REQUIRE(predicates[bit] ==
+                        bool((mask & (1U << bit) ? value : initial) & (1U << bit)));
         }
-        for (u32 bit = 0; bit < 7; ++bit)
-            REQUIRE(predicates[bit] == (bit < 3 ? bool(value & (1U << bit)) : bool(bit % 2 == 0)));
     }
-    auto invalid = source;
-    invalid[0].words[2] = 1;
-    REQUIRE_FALSE(Shader::Ampere::LowerToMaxwell(invalid));
+}
+
+TEST_CASE("Native register-to-predicate retains predication and rejects other modifier bits",
+          "[native-shader]") {
+    std::array<Native, 2> source{{{{0x08007804, 7, 0x2000, 0x000fe400}}, VertexTransform.back()}};
+    source[0].words[0] = (source[0].words[0] & ~0xf000U) | 0x9000U;
+    const auto lowered = Shader::Ampere::LowerToMaxwell(source);
+    REQUIRE(lowered);
+    const auto predicate = Shader::Maxwell::Instruction{lowered.instructions[0]}.Pred();
+    REQUIRE(predicate.index == 1);
+    REQUIRE(predicate.negated);
+    for (u32 bit = 0; bit < 32; ++bit) {
+        if (bit == 12 || bit == 13)
+            continue;
+        auto invalid = source;
+        invalid[0].words[2] |= 1U << bit;
+        REQUIRE_FALSE(Shader::Ampere::LowerToMaxwell(invalid));
+    }
+    auto invalid_mask = source;
+    invalid_mask[0].words[1] = 0x80;
+    REQUIRE_FALSE(Shader::Ampere::LowerToMaxwell(invalid_mask));
+    auto invalid_destination = source;
+    invalid_destination[0].words[0] |= 1U << 16;
+    REQUIRE_FALSE(Shader::Ampere::LowerToMaxwell(invalid_destination));
 }
 
 TEST_CASE("Native 2D explicit LOD sampling preserves its paired coordinates", "[native-shader]") {
