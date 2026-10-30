@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <bit>
 #include <cmath>
 #include "shader_recompiler/frontend/ir/modifiers.h"
@@ -111,29 +112,57 @@ std::optional<NativeSamplerDescriptor> NativeSamplerDescriptor::Decode(
     return result;
 }
 
-bool CanSampleNativeBaseMip(const NativeTextureDescriptor& texture,
-                            const NativeSamplerDescriptor& sampler) {
+std::optional<NativeSampledMip> SelectNativeSampledMip(const NativeTextureDescriptor& texture,
+                                                       const NativeSamplerDescriptor& sampler) {
     if (!texture.IsRgba8Unorm2D() || !texture.srgb || !texture.normalized || texture.block_width ||
         texture.block_depth || texture.tile_width || texture.gob3d || texture.gob_depth_offset ||
         texture.view_min_mip || !sampler.srgb || (texture.words[7] & 0xfff000) ||
         (texture.words[6] & 0x387fffc0U) || sampler.depth_compare || sampler.force_unnormalized ||
-        sampler.reduction || sampler.anisotropy || sampler.lod_bias || sampler.min_lod ||
-        sampler.max_lod || sampler.integer_only_nearest_lod ||
-        sampler.mag_filter != sampler.min_filter || (sampler.words[1] & 0x7c000000U) ||
-        sampler.wrap != std::array<u32, 3>{2, 2, 2})
-        return false;
+        sampler.reduction || sampler.anisotropy || sampler.lod_bias ||
+        sampler.min_lod != sampler.max_lod || (sampler.min_lod & 255) ||
+        sampler.integer_only_nearest_lod || sampler.mag_filter != sampler.min_filter ||
+        (sampler.words[1] & 0x7c000000U) || sampler.wrap != std::array<u32, 3>{2, 2, 2})
+        return std::nullopt;
     // The SDK installs these registration/sampler presets. Preserve their raw
     // identity; they cannot establish a layout for an arbitrary uploaded image.
     for (u32 i = 0; i < texture.reserved.size(); ++i) {
         if (texture.reserved[i] && !(i == 2 && texture.reserved[i] == 0x40000))
-            return false;
+            return std::nullopt;
         if (sampler.reserved[i] && !(i == 0 && sampler.reserved[i] == 0x24000))
-            return false;
+            return std::nullopt;
     }
-    return true;
+    const u32 selected = sampler.min_lod >> 8;
+    constexpr u64 AddressLimit = u64{1} << 40;
+    if (selected > texture.view_max_mip || selected > texture.max_mip || selected > 15 ||
+        (selected && (sampler.mip_filter == 1 || texture.type == 7)) ||
+        texture.address >= AddressLimit || !texture.width || texture.width > 131072 ||
+        !texture.height || texture.height > 131072 || texture.block_height > 5)
+        return std::nullopt;
+    u64 offset{};
+    for (u32 level = 0; level <= selected; ++level) {
+        const u32 width = (std::max)(texture.width >> level, 1U);
+        const u32 height = (std::max)(texture.height >> level, 1U);
+        // Mesa NIL clamps tiling at every LOD before aligning that level. Use
+        // 64-bit sizes: native dimension extensions can exceed legacy u32 helpers.
+        u32 block_height = texture.block_height;
+        while (block_height && height <= (4U << block_height))
+            --block_height;
+        const u64 tile_height = u64{8} << block_height;
+        const u64 pitch = (u64{width} * 4 + 63) & ~u64{63};
+        const u64 aligned_height = (height + tile_height - 1) & ~(tile_height - 1);
+        const u64 size = pitch * aligned_height;
+        if (offset > AddressLimit - texture.address ||
+            size > AddressLimit - texture.address - offset)
+            return std::nullopt;
+        if (level == selected)
+            return NativeSampledMip{
+                texture.address + offset, size, width, height, block_height, level};
+        offset += size;
+    }
+    return std::nullopt;
 }
 
-bool IsNativeBaseMipSample(const Shader::IR::Inst& instruction) {
+bool IsNativeFixedMipSample(const Shader::IR::Inst& instruction) {
     const auto opcode = instruction.GetOpcode();
     if (opcode != Shader::IR::Opcode::ImageSampleImplicitLod &&
         opcode != Shader::IR::Opcode::ImageSampleExplicitLod)

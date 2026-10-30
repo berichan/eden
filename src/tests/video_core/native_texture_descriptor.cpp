@@ -25,14 +25,14 @@ TEST_CASE("Native narrowed views require ordinary normalized base-mip sampling s
     const auto sampler = NativeSamplerDescriptor::Decode(state);
     REQUIRE(texture);
     REQUIRE(sampler);
-    REQUIRE(CanSampleNativeBaseMip(*texture, *sampler));
+    REQUIRE(SelectNativeSampledMip(*texture, *sampler));
     for (const auto [word, bit] : std::array<std::pair<u32, u32>, 7>{
              {{1, 5}, {2, 17}, {3, 6}, {4, 22}, {5, 31}, {6, 6}, {7, 0}}}) {
         auto changed = image;
         changed[word] ^= 1U << bit;
         const auto decoded = NativeTextureDescriptor::Decode(changed);
         REQUIRE(decoded);
-        REQUIRE_FALSE(CanSampleNativeBaseMip(*decoded, *sampler));
+        REQUIRE_FALSE(SelectNativeSampledMip(*decoded, *sampler));
     }
     for (const auto [word, bit] : std::array<std::pair<u32, u32>, 8>{
              {{0, 9}, {0, 13}, {0, 20}, {1, 3}, {1, 10}, {1, 12}, {1, 25}, {2, 12}}}) {
@@ -40,7 +40,7 @@ TEST_CASE("Native narrowed views require ordinary normalized base-mip sampling s
         changed[word] ^= 1U << bit;
         const auto decoded = NativeSamplerDescriptor::Decode(changed);
         REQUIRE(decoded);
-        REQUIRE_FALSE(CanSampleNativeBaseMip(*texture, *decoded));
+        REQUIRE_FALSE(SelectNativeSampledMip(*texture, *decoded));
     }
 }
 
@@ -49,18 +49,70 @@ TEST_CASE("Native selected-mip samples reject offsets and level-observing operat
     using Op = Shader::IR::Opcode;
     for (Op opcode : {Op::ImageSampleImplicitLod, Op::ImageSampleExplicitLod}) {
         Shader::IR::Inst sample{opcode, 0x20000};
-        REQUIRE(IsNativeBaseMipSample(sample));
+        REQUIRE(IsNativeFixedMipSample(sample));
         sample.SetArg(3, Shader::IR::Value{u32{0}});
-        REQUIRE_FALSE(IsNativeBaseMipSample(sample));
+        REQUIRE_FALSE(IsNativeFixedMipSample(sample));
         sample.ClearArgs();
         sample.SetFlags(u32{0x120000});
-        REQUIRE_FALSE(IsNativeBaseMipSample(sample));
+        REQUIRE_FALSE(IsNativeFixedMipSample(sample));
     }
     for (Op opcode : {Op::ImageFetch, Op::ImageQueryDimensions, Op::ImageQueryLod, Op::ImageGather,
                       Op::ImageGradient}) {
         Shader::IR::Inst operation{opcode, 0x20000};
-        REQUIRE_FALSE(IsNativeBaseMipSample(operation));
+        REQUIRE_FALSE(IsNativeFixedMipSample(operation));
     }
+}
+
+TEST_CASE("Native fixed mip spans clamp tiling and retain 64-bit offsets", "[native-shader]") {
+    NativeDescriptorWords image{};
+    image[0] = 8;
+    for (u32 i = 0; i < 4; ++i)
+        image[0] |= (2U << (7 + 3 * i)) | ((i + 2) << (19 + 3 * i));
+    image[2] = 3U << 21;
+    image[3] = (4U << 3) | (9U << 28);
+    image[4] = 639U | (1U << 22) | (1U << 23);
+    image[5] = 359U | (1U << 31);
+    image[7] = 9U << 4;
+    auto texture = NativeTextureDescriptor::Decode(image);
+    REQUIRE(texture);
+    NativeDescriptorWords state{};
+    state[0] = 2U | (2U << 3) | (2U << 6) | (1U << 13);
+    state[1] = 2U | (2U << 4) | (2U << 6);
+    auto sampler = NativeSamplerDescriptor::Decode(state);
+    REQUIRE(sampler);
+    constexpr std::array<u64, 10> offsets{0,        0xf0000,  0x140000, 0x154000, 0x159000,
+                                          0x15a800, 0x15b000, 0x15b200, 0x15b400, 0x15b600};
+    constexpr std::array<u32, 10> block_heights{4, 4, 4, 3, 2, 1, 0, 0, 0, 0};
+    for (u32 level = 0; level < offsets.size(); ++level) {
+        sampler->min_lod = sampler->max_lod = level << 8;
+        const auto selected = SelectNativeSampledMip(*texture, *sampler);
+        REQUIRE(selected);
+        REQUIRE(selected->address == offsets[level]);
+        REQUIRE(selected->block_height == block_heights[level]);
+        REQUIRE(selected->level == level);
+        REQUIRE(selected->size_bytes ==
+                (level == 9 ? 0x15b800 - offsets[level] : offsets[level + 1] - offsets[level]));
+    }
+    sampler->min_lod = sampler->max_lod = 256;
+    sampler->mip_filter = 1;
+    REQUIRE_FALSE(SelectNativeSampledMip(*texture, *sampler));
+    sampler->mip_filter = 2;
+    sampler->min_lod = sampler->max_lod = 384;
+    REQUIRE_FALSE(SelectNativeSampledMip(*texture, *sampler));
+    sampler->min_lod = sampler->max_lod = 2560;
+    REQUIRE_FALSE(SelectNativeSampledMip(*texture, *sampler));
+    sampler->min_lod = sampler->max_lod = 0;
+    texture->address = (u64{1} << 40) - 512;
+    REQUIRE_FALSE(SelectNativeSampledMip(*texture, *sampler));
+    texture->address = 0;
+    texture->width = texture->height = 131072;
+    texture->max_mip = texture->view_max_mip = 15;
+    sampler->min_lod = sampler->max_lod = 256;
+    const auto wide = SelectNativeSampledMip(*texture, *sampler);
+    REQUIRE(wide);
+    REQUIRE(wide->address == (u64{1} << 36));
+    REQUIRE(wide->size_bytes == (u64{1} << 34));
+    REQUIRE(wide->width == 65536);
 }
 
 TEST_CASE("Native descriptor pools check only the requested inclusive slot",

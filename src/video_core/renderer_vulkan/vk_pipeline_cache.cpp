@@ -863,7 +863,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                         const auto opcode = instruction.GetOpcode();
                         if (opcode >= Shader::IR::Opcode::ImageSampleImplicitLod &&
                             opcode <= Shader::IR::Opcode::ImageGradient) {
-                            if (!Tegra::Control::IsNativeBaseMipSample(instruction))
+                            if (!Tegra::Control::IsNativeFixedMipSample(instruction))
                                 throw Shader::RuntimeError(
                                     "Unsupported native sampled-image operation");
                         }

@@ -1237,25 +1237,22 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
             const auto bindings = environment.NativeTextures();
             const auto binding = std::ranges::find(
                 bindings, handle, &VideoCommon::GraphicsEnvironment::NativeTextureBinding::handle);
-            if (binding == bindings.end() ||
-                !Tegra::Control::CanSampleNativeBaseMip(binding->texture, binding->sampler))
-                return reject("unsupported native base-mip sampling state");
-            const auto& texture = binding->texture;
+            if (binding == bindings.end())
+                return reject("uncaptured native sampled-image handle");
+            const auto mip =
+                Tegra::Control::SelectNativeSampledMip(binding->texture, binding->sampler);
+            if (!mip)
+                return reject("unsupported native fixed-mip sampling state");
             const auto& sampler = binding->sampler;
-            const u64 pitch = (u64{texture.width} * 4 + 63) & ~u64{63};
-            const u64 tile_height = u64{8} << texture.block_height;
-            const u64 height = (texture.height + tile_height - 1) & ~(tile_height - 1);
-            const u64 size = pitch * height;
-            if (!size || size > SnapshotLimit || texture.address >= (u64{1} << 40) ||
-                size > (u64{1} << 40) - texture.address ||
-                texture.width > limits.maxImageDimension2D ||
-                texture.height > limits.maxImageDimension2D)
+            const u64 size = mip->size_bytes;
+            if (!size || size > SnapshotLimit || mip->width > limits.maxImageDimension2D ||
+                mip->height > limits.maxImageDimension2D)
                 return reject("unsupported native sampled-image extent");
-            const auto backing = lease.ResolveContiguous(texture.address, size, false);
+            const auto backing = lease.ResolveContiguous(mip->address, size, false);
             if (!backing ||
                 (*backing < *output + target->size_bytes && *output < *backing + size) ||
-                (texture.address < target->address + target->size_bytes &&
-                 target->address < texture.address + size))
+                (mip->address < target->address + target->size_bytes &&
+                 target->address < mip->address + size))
                 return reject("native sampled-image backing or attachment alias");
             {
                 std::scoped_lock lock{buffer_cache.mutex};
@@ -1271,12 +1268,14 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
             VideoCommon::ImageInfo sampled;
             sampled.format = VideoCore::Surface::PixelFormat::A8B8G8R8_SRGB;
             sampled.type = VideoCommon::ImageType::e2D;
-            sampled.size = {texture.width, texture.height, 1};
-            sampled.block = {0, texture.block_height, 0};
+            sampled.size = {mip->width, mip->height, 1};
+            sampled.block = {0, mip->block_height, 0};
             sampled.layer_stride = sampled.maybe_unaligned_layer_stride = static_cast<u32>(size);
             sampled.layout = Tegra::Texture::BlockLinearLayout::TuringColor2D;
             if (VideoCommon::CalculateGuestSizeInBytes(sampled) != size)
                 return reject("native sampled-image footprint mismatch");
+            // This standalone image represents the selected guest mip, so its
+            // host LOD is zero even when the guest's fixed clamp selects LOD > 0.
             native_samplers.push_back(device.GetLogical().CreateSampler(VkSamplerCreateInfo{
                 .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
                 .pNext = nullptr,
@@ -1299,7 +1298,10 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
                 .unnormalizedCoordinates = VK_FALSE,
             }));
             sampled_requests.push_back(
-                {stage, i, texture.address, *backing, sampled, *native_samplers.back()});
+                {stage, i, mip->address, *backing, sampled, *native_samplers.back()});
+            LOG_DEBUG(HW_GPU,
+                      "Native sampled mip: level={}, address={:#x}, extent={}x{}, block_height={}",
+                      mip->level, mip->address, mip->width, mip->height, mip->block_height);
         }
     }
     {

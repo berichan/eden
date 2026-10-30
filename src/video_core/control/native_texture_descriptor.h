@@ -46,10 +46,16 @@ struct NativeSamplerDescriptor {
     static std::optional<NativeSamplerDescriptor> Decode(const NativeDescriptorWords& words);
 };
 
+struct NativeSampledMip {
+    GPUVAddr address;
+    u64 size_bytes;
+    u32 width, height, block_height, level;
+};
+
 // Only for ordinary sampled-image operations and an independently verified native
-// color image. This selects mip zero; it does not validate image backing/layout.
-bool CanSampleNativeBaseMip(const NativeTextureDescriptor& texture,
-                            const NativeSamplerDescriptor& sampler);
-bool IsNativeBaseMipSample(const Shader::IR::Inst& instruction);
+// color image. Computes a fixed integral LOD span, without validating its backing.
+std::optional<NativeSampledMip> SelectNativeSampledMip(const NativeTextureDescriptor& texture,
+                                                       const NativeSamplerDescriptor& sampler);
+bool IsNativeFixedMipSample(const Shader::IR::Inst& instruction);
 
 } // namespace Tegra::Control
