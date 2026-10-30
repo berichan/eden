@@ -32,6 +32,12 @@ bool IsStateMethod(u32 method) {
     case 0x1ed:
     case 0x365: // SET_SHADER_CACHE_CONTROL
     case 0x379: // SET_SM_TIMEOUT_INTERVAL
+    case 0x557: // SET_TEX_SAMPLER_POOL_A-C
+    case 0x558:
+    case 0x559:
+    case 0x55d: // SET_TEX_HEADER_POOL_A-C
+    case 0x55e:
+    case 0x55f:
     case 0x6c0: // SET_REPORT_SEMAPHORE_A-C
     case 0x6c1:
     case 0x6c2:
@@ -130,6 +136,17 @@ bool NativeCompute::WriteMethod(u32 method, u32 value, const Host& host) {
         if (value > 2) {
             return Fail(Error::UnsupportedMethod);
         }
+        break;
+    case 0x557: // SET_TEX_SAMPLER_POOL_A
+    case 0x55d: // SET_TEX_HEADER_POOL_A
+        // Hardware encodes 49 bits, but the current native address space supports 40.
+        if (value > 0xff)
+            return Fail(Error::UnsupportedMethod);
+        break;
+    case 0x559: // SET_TEX_SAMPLER_POOL_C, inclusive maximum index
+    case 0x55f: // SET_TEX_HEADER_POOL_C, inclusive maximum index
+        if (value > (method == 0x559 ? 0xfffffU : 0x3fffffU))
+            return Fail(Error::UnsupportedMethod);
         break;
     case 0x7b: { // SET_MME_SWITCH_STATE
         const u32 save = (value >> 4) & 0xff;

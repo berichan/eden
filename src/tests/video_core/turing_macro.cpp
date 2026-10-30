@@ -1080,6 +1080,33 @@ TEST_CASE("Native compute reports validate direct packets and reject macro-emitt
     REQUIRE(engine.GetNativeReportSemaphore() == std::array<u32, 3>{0x21, 0x1000, 0x12345678});
 }
 
+TEST_CASE("Native compute descriptor pool state retains addresses and rejects unsupported widths",
+          "[ipc][video_core]") {
+    Core::System system;
+    Core::DeviceMemory memory;
+    Tegra::MaxwellDeviceMemoryManager backing{memory};
+    auto space = std::make_shared<Tegra::MemoryManager>(system, backing, 32, 1ULL << 32, 16, 12);
+    auto context = std::make_shared<Tegra::Control::NativeGpuGraphicsContext>(
+        std::make_shared<Tegra::Control::AmpereGraphicsState>(), space);
+    using Compute = Tegra::Control::NativeCompute;
+    for (const auto [upper, maximum] :
+         std::array<std::pair<u32, u32>, 2>{{{0x557, 0xfffff}, {0x55d, 0x3fffff}}}) {
+        Compute state{context};
+        REQUIRE(state.CallMethod(upper, 0xff, true, {}));
+        REQUIRE(state.CallMethod(upper + 1, 0xfffffffc, true, {}));
+        REQUIRE(state.CallMethod(upper + 2, maximum, true, {}));
+        REQUIRE(state.ReadRegister(upper) == 0xff);
+        REQUIRE(state.ReadRegister(upper + 1) == 0xfffffffc);
+        REQUIRE(state.ReadRegister(upper + 2) == maximum);
+        REQUIRE_FALSE(state.CallMethod(upper, 0x100, true, {}));
+        REQUIRE(state.ReadRegister(upper) == 0xff);
+        Compute limit{context};
+        REQUIRE(limit.CallMethod(upper + 2, maximum, true, {}));
+        REQUIRE_FALSE(limit.CallMethod(upper + 2, maximum + 1, true, {}));
+        REQUIRE(limit.ReadRegister(upper + 2) == maximum);
+    }
+}
+
 TEST_CASE("Native compute methods fail unsupported actions without invoking legacy compute",
           "[ipc][video_core]") {
     Core::System system;
