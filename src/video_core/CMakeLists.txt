@@ -38,6 +38,8 @@ add_library(video_core STATIC
     control/native_cache.h
     control/native_color_clear.cpp
     control/native_color_clear.h
+    control/native_render_targets.cpp
+    control/native_render_targets.h
     control/native_constant_buffer.cpp
     control/native_constant_buffer.h
     control/native_report_semaphore.cpp

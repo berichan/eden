@@ -15,7 +15,10 @@
 
 #include "video_core/renderer_vulkan/pipeline_helper.h"
 
+#include "common/alignment.h"
 #include "common/bit_field.h"
+#include "common/settings.h"
+#include "video_core/gpu_logging/gpu_logging.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
 #include "video_core/renderer_vulkan/pipeline_statistics.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
@@ -27,8 +30,6 @@
 #include "video_core/shader_notify.h"
 #include "video_core/texture_cache/texture_cache.h"
 #include "video_core/vulkan_common/vulkan_device.h"
-#include "video_core/gpu_logging/gpu_logging.h"
-#include "common/settings.h"
 
 #if defined(_MSC_VER) && defined(NDEBUG)
 #define LAMBDA_FORCEINLINE [[msvc::forceinline]]
@@ -582,7 +583,11 @@ bool GraphicsPipeline::ConfigureNative(std::span<const NativeUniformBuffer> buff
             if (buffer.stage != stage || buffer.bank != descriptor.index || buffer.bytes.empty() ||
                 buffer.bytes.size() >
                     device.GetPhysical().GetProperties().limits.maxUniformBufferRange ||
-                buffer.bytes.size() < info.constant_buffer_used_sizes[descriptor.index])
+                !info.native_constant_buffer_sizes[descriptor.index] ||
+                buffer.bytes.size() !=
+                    (std::min)(info.native_constant_buffer_sizes[descriptor.index],
+                               Common::AlignUp(info.constant_buffer_used_sizes[descriptor.index],
+                                               16U)))
                 return false;
         }
         for (u32 i = 0; i < info.texture_descriptors.size(); ++i) {

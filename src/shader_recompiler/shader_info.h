@@ -323,6 +323,9 @@ struct Info {
 
     u32 constant_buffer_mask{};
     std::array<u32, MAX_CBUFS> constant_buffer_used_sizes{};
+    // Native graphics loads are guarded against these frozen binding sizes.
+    // Zero denotes a stage/bank without the native bounds adapter.
+    std::array<u32, MAX_CBUFS> native_constant_buffer_sizes{};
     u32 nvn_buffer_base{};
     std::bitset<16> nvn_buffer_used{};
 

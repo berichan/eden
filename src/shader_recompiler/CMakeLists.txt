@@ -31,6 +31,8 @@ add_library(shader_recompiler STATIC
     backend/spirv/spirv_emit_context.h
     environment.h
     exception.h
+    frontend/ampere/constant_buffer_bounds.cpp
+    frontend/ampere/constant_buffer_bounds.h
     frontend/ampere/graphics_header.cpp
     frontend/ampere/graphics_header.h
     frontend/ampere/lower_to_maxwell.cpp

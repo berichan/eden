@@ -273,6 +273,21 @@ public:
                                                               bool existing_only = false,
                                                               bool allow_pitch_padding = false);
 
+    struct NativeColorAttachment {
+        ImageInfo info;
+        GPUVAddr address;
+        DAddr backing;
+    };
+    struct NativeColorTargets {
+        Framebuffer* framebuffer;
+        std::array<ImageId, NUM_RT> image_ids{};
+        u32 count;
+    };
+    // Same lease/lock contract. Inputs describe only proven selected windows,
+    // never overlapping padding of a larger guest volume allocation.
+    std::optional<NativeColorTargets> PrepareNativeColorTargets(
+        std::span<const NativeColorAttachment> attachments);
+
     std::recursive_mutex mutex;
 
 private:

@@ -21,6 +21,7 @@
 #include "core/core.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/environment.h"
+#include "shader_recompiler/frontend/ampere/constant_buffer_bounds.h"
 #include "shader_recompiler/frontend/ir/modifiers.h"
 #include "shader_recompiler/frontend/ir/opcodes.h"
 #include "shader_recompiler/frontend/maxwell/control_flow.h"
@@ -70,6 +71,18 @@ constexpr u32 CACHE_VERSION = 18;
 constexpr size_t VULKAN_CACHE_FLUSH_PIPELINES = 128;
 constexpr size_t VULKAN_CACHE_FLUSH_MIN_SECONDS = 30;
 constexpr std::array<char, 8> VULKAN_CACHE_MAGIC_NUMBER{'y', 'u', 'z', 'u', 'v', 'k', 'c', 'h'};
+
+void PrepareNativeConstantBuffers(Shader::IR::Program& program,
+                                  VideoCommon::GraphicsEnvironment& environment) {
+    std::array<u32, Shader::Info::MAX_CBUFS> sizes{};
+    for (const auto& descriptor : program.info.constant_buffer_descriptors) {
+        if (descriptor.count != 1 || descriptor.index >= sizes.size())
+            throw Shader::RuntimeError("Unsupported native uniform descriptor bounds");
+        sizes[descriptor.index] = environment.ReadNativeCbufSize(descriptor.index);
+    }
+    Shader::Ampere::GuardConstantBufferLoads(program, sizes);
+    program.info.native_constant_buffer_sizes = sizes;
+}
 
 template <typename Container>
 auto MakeSpan(Container& container) {
@@ -855,6 +868,9 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         }
 
         if (native) {
+            // The native entry point supplies owned GraphicsEnvironments only.
+            PrepareNativeConstantBuffers(programs[index],
+                                         static_cast<VideoCommon::GraphicsEnvironment&>(env));
             const auto& info = programs[index].info;
             if (!info.texture_descriptors.empty()) {
                 u32 reported{};
@@ -903,8 +919,8 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                 if (index == 1 && info.loads.Generic(attribute) &&
                     !key.state.attributes[attribute].enabled)
                     throw Shader::RuntimeError("Native shader reads undeclared vertex input");
-            for (u32 target = 1; target < info.stores_frag_color.size(); ++target)
-                if (info.stores_frag_color[target])
+            for (u32 target = 0; target < info.stores_frag_color.size(); ++target)
+                if (info.stores_frag_color[target] && !key.state.color_formats[target])
                     throw Shader::RuntimeError("Unsupported native graphics color output");
             for (u32 attribute = 0; attribute < info.loads.mask.size(); ++attribute) {
                 const bool generic = attribute >= 32 && attribute < 160;
@@ -1019,7 +1035,9 @@ GraphicsPipeline* PipelineCache::NativeGraphicsPipeline(
         for (auto* environment : environments) {
             Shader::Maxwell::Flow::CFG cfg{*environment, main_pools.flow_block,
                                            environment->StartAddress()};
-            (void)TranslateProgram(main_pools.inst, main_pools.block, *environment, cfg, host_info);
+            auto program =
+                TranslateProgram(main_pools.inst, main_pools.block, *environment, cfg, host_info);
+            PrepareNativeConstantBuffers(program, *environment);
             environment->FinalizeNativeResources();
         }
     } catch (const Shader::Exception& error) {

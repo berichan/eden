@@ -279,6 +279,46 @@ TEST_CASE("Native graphics capture separates source headers, code and constant s
                 VideoCore::Surface::PixelFormat::ASTC_2D_4X4_SRGB);
         REQUIRE_FALSE(astc.IsTexturePixelFormatInteger(Handle));
     }
+    // Runtime bounds affect guarded IR specialization even with unchanged shader
+    // code and constant values. A live engine update cannot change the capture.
+    auto& bounded_binding = engine.state.shader_stages[4].const_buffers[4];
+    bounded_binding = {base + 0x400, 64, true};
+    Environment bounded{engine, memory, Program::Pixel,
+                        Environment::NativeProgram{header_address, {}}};
+    REQUIRE(bounded.ReadNativeCbufSize(4) == 64);
+    bounded.FinalizeNativeResources();
+    const auto bounded_hash = bounded.CalculateHash();
+    bounded_binding.size = 128;
+    REQUIRE(bounded.ReadNativeCbufSize(4) == 64);
+    REQUIRE_THROWS_AS(bounded.ReadNativeCbufSize(0), Shader::RuntimeError);
+    {
+        Environment larger{engine, memory, Program::Pixel,
+                           Environment::NativeProgram{header_address, {}}};
+        REQUIRE(larger.ReadNativeCbufSize(4) == 128);
+        larger.FinalizeNativeResources();
+        REQUIRE(larger.CalculateHash() != bounded_hash);
+    }
+    for (u32 invalid_size : {0U, 63U, 65537U}) {
+        bounded_binding.size = invalid_size;
+        Environment unsupported{engine, memory, Program::Pixel,
+                                Environment::NativeProgram{header_address, {}}};
+        REQUIRE_THROWS_AS(unsupported.ReadNativeCbufSize(4), Shader::RuntimeError);
+    }
+    bounded_binding.size = 64;
+    bounded_binding.address += 4;
+    {
+        Environment unaligned{engine, memory, Program::Pixel,
+                              Environment::NativeProgram{header_address, {}}};
+        REQUIRE_THROWS_AS(unaligned.ReadNativeCbufSize(4), Shader::RuntimeError);
+        REQUIRE_THROWS_AS(unaligned.ReadNativeCbufSize(18), Shader::RuntimeError);
+    }
+    bounded_binding.address -= 4;
+    bounded_binding.enabled = false;
+    {
+        Environment disabled{engine, memory, Program::Pixel,
+                             Environment::NativeProgram{header_address, {}}};
+        REQUIRE_THROWS_AS(disabled.ReadNativeCbufSize(4), Shader::RuntimeError);
+    }
     memory.Unmap(base + Kernel::PageSize, Kernel::PageSize);
     REQUIRE(captured.ReadInstruction(80) != 0);
     REQUIRE_THROWS_AS(captured.ReadCbufValue(0, 0), Shader::RuntimeError);

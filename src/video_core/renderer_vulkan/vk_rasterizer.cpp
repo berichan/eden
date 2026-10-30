@@ -16,6 +16,7 @@
 
 #include "video_core/renderer_vulkan/renderer_vulkan.h"
 
+#include "common/alignment.h"
 #include "common/assert.h"
 #include "common/cityhash.h"
 #include "common/logging.h"
@@ -26,6 +27,7 @@
 #include "video_core/control/native_cache.h"
 #include "video_core/control/native_color_clear.h"
 #include "video_core/control/native_indexed_draw.h"
+#include "video_core/control/native_render_targets.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/gpu_logging/gpu_logging.h"
@@ -916,18 +918,20 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
                   read(0x35f));
         return false;
     }
-    if ((read(0x487) & 0xf000000f) != 1 || ((read(0x487) >> 4) & 7) != 0 || read(0x800) & 1 ||
-        read(0x810) != 0x11 || read(0x850) != 0x51 || (read(0x820) & 1) || (read(0x830) & 1) ||
-        (read(0x840) & 1))
-        return reject("unsupported target mapping or shader-stage combination");
-    Clear::Registers target_regs{};
-    target_regs.argument = 0x3c;
-    for (u32 i = 0; i < target_regs.target.size(); ++i)
-        target_regs.target[i] = read(0x200 + i);
-    target_regs.srgb_write = read(0x56e);
-    const auto target = Clear::Decode(target_regs);
-    if (!target || (target->format == Clear::Format::RGBA8Srgb && read(0x56e) != 1))
+    if (read(0x800) & 1 || read(0x810) != 0x11 || read(0x850) != 0x51 || (read(0x820) & 1) ||
+        (read(0x830) & 1) || (read(0x840) & 1))
+        return reject("unsupported native shader-stage combination");
+    Tegra::Control::NativeRenderTargets::Registers target_registers{};
+    for (u32 index = 0; index < target_registers.size(); ++index)
+        for (u32 word = 0; word < target_registers[index].size(); ++word)
+            target_registers[index][word] = read(0x200 + index * 0x10 + word);
+    const auto targets =
+        Tegra::Control::NativeRenderTargets::Decode(read(0x487), read(0x56e), target_registers);
+    if (!targets)
         return reject("unsupported native color target or sRGB write mode");
+    if (targets->count > 1 && read(0x4d7))
+        return reject("unsupported native shared ROP control");
+    const auto* target = &targets->targets[0].color;
     if (read(0x980) > 1 || (target->format == Clear::Format::B10G11R11Float && read(0x980)))
         return reject("unsupported native floating-point color clamp");
     const auto format = target->format == Clear::Format::RGBA8Srgb
@@ -948,7 +952,8 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
     if (!surface_format.attachable || surface_format.format != host_format ||
         view_format.format != host_format ||
         !device.IsFormatSupported(host_format, required, FormatType::Optimal) ||
-        target->width > limits.maxImageDimension2D || target->height > limits.maxImageDimension2D)
+        target->width > limits.maxImageDimension2D || target->height > limits.maxImageDimension2D ||
+        targets->count > limits.maxColorAttachments)
         return reject("native target format or dimensions unavailable on host");
 
     const auto& regs = maxwell3d->regs;
@@ -1013,31 +1018,68 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
             }
         }
     };
-    const auto output = lease.ResolveContiguous(target->address, target->size_bytes, true);
-    if (!output)
-        return reject("unbacked native color target");
+    std::array<DAddr, 8> outputs{};
+    u64 output_bytes{};
+    for (u32 index = 0; index < targets->count; ++index) {
+        const auto& attachment = targets->targets[index];
+        if (attachment.color.size_bytes > SnapshotLimit - output_bytes)
+            return reject("native target set exceeds snapshot capacity");
+        output_bytes += attachment.color.size_bytes;
+        // This view touches only its selected window; padded Z strides may
+        // overlap siblings or extend beyond their allocation and are never read.
+        const auto backing =
+            lease.ResolveContiguous(attachment.color.address, attachment.color.size_bytes, true);
+        if (!backing)
+            return reject("unbacked native color target");
+        if (attachment.single_gob_volume &&
+            (gpu_memory->GetPageKind(attachment.color.address) != Tegra::PTEKind::GENERIC_16BX2 ||
+             gpu_memory->GetMemoryLayoutSize(attachment.color.address,
+                                             attachment.color.size_bytes) <
+                 attachment.color.size_bytes))
+            return reject("unsupported native color-slice memory kind");
+        outputs[index] = *backing;
+        for (u32 previous = 0; previous < index; ++previous)
+            if (outputs[index] < outputs[previous] + targets->targets[previous].color.size_bytes &&
+                outputs[previous] < outputs[index] + attachment.color.size_bytes)
+                return reject("native color targets alias physical backing");
+    }
+    const auto overlaps_output = [&](DAddr address, u64 size) {
+        for (u32 index = 0; index < targets->count; ++index)
+            if (address < outputs[index] + targets->targets[index].color.size_bytes &&
+                outputs[index] < address + size)
+                return true;
+        return false;
+    };
     {
         std::scoped_lock lock{buffer_cache.mutex};
-        if (buffer_cache.IsRegionGpuModified(*output, target->size_bytes))
-            return reject("native target overlaps pending buffer writes");
+        for (u32 index = 0; index < targets->count; ++index)
+            if (buffer_cache.IsRegionGpuModified(outputs[index],
+                                                 targets->targets[index].color.size_bytes))
+                return reject("native target overlaps pending buffer writes");
     }
     // Keep pixels private; bound actual guest-visible readback diagnostics to
     // the first few completed draws and report only their hashes.
-    std::vector<u8> readback;
-    std::optional<u64> before_hash;
-    if (native_draw_readbacks < 32 && target->size_bytes <= SnapshotLimit) {
-        readback.resize(target->size_bytes);
-        if (!lease.ReadBlockChecked(target->address, readback))
-            return reject("native target initial snapshot");
-        before_hash =
-            Common::CityHash64(reinterpret_cast<const char*>(readback.data()), readback.size());
+    std::array<std::vector<u8>, 8> readbacks;
+    std::array<u64, 8> before_hashes{};
+    const bool record_readbacks =
+        native_draw_readbacks < 32 || (targets->count > 1 && native_mrt_readbacks < 2);
+    if (record_readbacks) {
+        for (u32 index = 0; index < targets->count; ++index) {
+            const auto& color = targets->targets[index].color;
+            auto& readback = readbacks[index];
+            readback.resize(color.size_bytes);
+            if (!lease.ReadBlockChecked(color.address, readback))
+                return reject("native target initial snapshot");
+            before_hashes[index] =
+                Common::CityHash64(reinterpret_cast<const char*>(readback.data()), readback.size());
+        }
     }
     u64 snapshot_bytes{};
     const auto snapshot = [&](GPUVAddr address, size_t size, std::vector<u8>& bytes) {
         if (!size || size > SnapshotLimit - snapshot_bytes || stop_token.stop_requested())
             return false;
         const auto backing = lease.ResolveContiguous(address, size, false);
-        if (!backing || (*backing < *output + target->size_bytes && *output < *backing + size))
+        if (!backing || overlaps_output(*backing, size))
             return false;
         {
             std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
@@ -1089,7 +1131,8 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
     key.state.ndc_minus_one_to_one.Assign(depth_clip->negative_one_to_one);
     key.state.driver_id = device.GetDriverID();
     key.state.driver_version = device.GetDriverVersion();
-    key.state.color_formats[0] = static_cast<u8>(read(0x204));
+    for (u32 index = 0; index < targets->count; ++index)
+        key.state.color_formats[index] = static_cast<u8>(target_registers[index][4]);
     key.state.viewport_swizzles.fill(0x6420);
     key.state.dynamic_state.rasterize_enable.Assign(read(0xdf));
     key.state.dynamic_state.depth_clamp_disabled.Assign(1);
@@ -1104,23 +1147,25 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
     key.state.dynamic_state.cull_enable.Assign(read(0x646));
     key.state.dynamic_state.cull_face.Assign(
         FixedPipelineState::PackCullFace(static_cast<Maxwell::CullFace>(cull)));
-    const u32 color_mask = read(0x680);
-    if (color_mask & ~0x1111U)
-        return reject("invalid native color write mask");
-    if (read(0x4b9) > 1)
+    if (read(0x4b9) > 1 || read(0x3e4) > 1)
         return reject("invalid native per-target blend enable");
-    const u32 blend_base = read(0x4b9) ? 0x780 : 0x4cf;
-    const auto blend = FixedPipelineState::DecodeNativeBlend(
-        {read(0x4d8), read(blend_base), read(blend_base + 1), read(blend_base + 2),
-         read(blend_base + 3), read(blend_base + 4), read(blend_base + 5),
-         read(blend_base + (read(0x4b9) ? 6 : 7)), color_mask});
-    if (!blend)
-        return reject("unsupported native blend operation or factors");
-    if (blend->enable &&
-        !device.IsFormatSupported(host_format, VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT,
-                                  FormatType::Optimal))
-        return reject("native target blending unavailable on host");
-    key.state.attachments[0] = *blend;
+    for (u32 index = 0; index < targets->count; ++index) {
+        const u32 color_mask = read(0x680 + (read(0x3e4) ? 0 : index));
+        if (color_mask & ~0x1111U)
+            return reject("invalid native color write mask");
+        const u32 blend_base = read(0x4b9) ? 0x780 + index * 8 : 0x4cf;
+        const auto blend = FixedPipelineState::DecodeNativeBlend(
+            {read(0x4d8 + index), read(blend_base), read(blend_base + 1), read(blend_base + 2),
+             read(blend_base + 3), read(blend_base + 4), read(blend_base + 5),
+             read(blend_base + (read(0x4b9) ? 6 : 7)), color_mask});
+        if (!blend)
+            return reject("unsupported native blend operation or factors");
+        if (blend->enable &&
+            !device.IsFormatSupported(host_format, VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT,
+                                      FormatType::Optimal))
+            return reject("native target blending unavailable on host");
+        key.state.attachments[index] = *blend;
+    }
     const std::array blend_constants{regs.blend_color.r, regs.blend_color.g, regs.blend_color.b,
                                      regs.blend_color.a};
     if (!std::ranges::all_of(blend_constants, [](float value) { return std::isfinite(value); }))
@@ -1225,11 +1270,21 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
                 return reject("unsupported native uniform descriptors");
             const auto& binding =
                 maxwell3d->state.shader_stages[stage].const_buffers[descriptor.index];
-            const u32 size = shader.constant_buffer_used_sizes[descriptor.index];
-            if (!binding.enabled || !size || size > binding.size ||
+            const u32 declared_size = shader.constant_buffer_used_sizes[descriptor.index];
+            const u32 bound_size = shader.native_constant_buffer_sizes[descriptor.index];
+            // Back the complete 16-byte packet used by hosts without scalar
+            // UBO layouts, while reading only inside the actual guest binding.
+            const u32 size = (std::min)(Common::AlignUp(declared_size, 16U), bound_size);
+            if (!binding.enabled || !size || binding.size != bound_size ||
                 size > limits.maxUniformBufferRange ||
-                !snapshot(binding.address, size, constants[stage][descriptor.index]))
+                !snapshot(binding.address, size, constants[stage][descriptor.index])) {
+                LOG_DEBUG(HW_GPU,
+                          "Native uniform capture rejected: stage={}, bank={}, address={:#x}, "
+                          "enabled={}, bound_bytes={:#x}, shader_bytes={:#x}, host_limit={:#x}",
+                          stage, descriptor.index, binding.address, binding.enabled, binding.size,
+                          declared_size, limits.maxUniformBufferRange);
                 return reject("native uniform backing, bounds or coherence");
+            }
             uniforms.push_back({stage, descriptor.index, constants[stage][descriptor.index]});
         }
         for (u32 i = 0; i < shader.texture_descriptors.size(); ++i) {
@@ -1260,10 +1315,7 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
                 mip->height > limits.maxImageDimension2D)
                 return reject("unsupported native sampled-image extent");
             const auto backing = lease.ResolveContiguous(mip->address, size, false);
-            if (!backing ||
-                (*backing < *output + target->size_bytes && *output < *backing + size) ||
-                (mip->address < target->address + target->size_bytes &&
-                 target->address < mip->address + size))
+            if (!backing || overlaps_output(*backing, size))
                 return reject("native sampled-image backing or attachment alias");
             {
                 std::scoped_lock lock{buffer_cache.mutex};
@@ -1367,18 +1419,25 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
     }
     {
         std::scoped_lock lock{buffer_cache.mutex};
-        if (buffer_cache.IsRegionGpuModified(*output, target->size_bytes))
-            return reject("native target overlaps pending buffer writes");
+        for (u32 index = 0; index < targets->count; ++index)
+            if (buffer_cache.IsRegionGpuModified(outputs[index],
+                                                 targets->targets[index].color.size_bytes))
+                return reject("native target overlaps pending buffer writes");
     }
-    VideoCommon::ImageInfo image;
-    image.format = format;
-    image.type = VideoCommon::ImageType::e2D;
-    image.size = {target->width, target->height, 1};
-    image.block = {0, target->block_height, 0};
-    image.layer_stride = image.maybe_unaligned_layer_stride = target->size_bytes;
-    image.layout = Tegra::Texture::BlockLinearLayout::TuringColor2D;
-    if (VideoCommon::CalculateGuestSizeInBytes(image) != target->size_bytes)
-        return reject("native target footprint mismatch");
+    std::array<TextureCache::NativeColorAttachment, 8> attachments;
+    for (u32 index = 0; index < targets->count; ++index) {
+        const auto& color = targets->targets[index].color;
+        VideoCommon::ImageInfo image;
+        image.format = format;
+        image.type = VideoCommon::ImageType::e2D;
+        image.size = {color.width, color.height, 1};
+        image.block = {0, color.block_height, 0};
+        image.layer_stride = image.maybe_unaligned_layer_stride = color.size_bytes;
+        image.layout = Tegra::Texture::BlockLinearLayout::TuringColor2D;
+        if (VideoCommon::CalculateGuestSizeInBytes(image) != color.size_bytes)
+            return reject("native target footprint mismatch");
+        attachments[index] = {image, color.address, outputs[index]};
+    }
     const auto record = [&] {
         std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
         std::vector<GraphicsPipeline::NativeSampledImage> sampled_images;
@@ -1496,7 +1555,7 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
             sampled_images.push_back({sampled.stage, sampled.index, view, sampled.sampler});
         }
         const auto framebuffer =
-            texture_cache.PrepareNativeClearTarget(image, target->address, *output);
+            texture_cache.PrepareNativeColorTargets(std::span{attachments}.first(targets->count));
         if (!sampled_images.empty()) {
             scheduler.RequestOutsideRenderPassOperationContext();
             scheduler.Record([](vk::CommandBuffer command) {
@@ -1513,7 +1572,7 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
             });
         }
         if (!framebuffer || stop_token.stop_requested() ||
-            framebuffer->framebuffer->NumColorBuffers() != 1 ||
+            framebuffer->framebuffer->NumColorBuffers() != targets->count ||
             framebuffer->framebuffer->RenderArea().width != target->width ||
             framebuffer->framebuffer->RenderArea().height != target->height ||
             !pipeline->ConfigureNative(uniforms, sampled_images, framebuffer->framebuffer,
@@ -1572,7 +1631,8 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
                 command.BindIndexBuffer(index_buffer, index_offset, host_index_format);
                 command.DrawIndexed(count, 1, 0, 0, 0);
             });
-        texture_cache.MarkModification(framebuffer->image_id);
+        for (u32 attachment_index = 0; attachment_index < framebuffer->count; ++attachment_index)
+            texture_cache.MarkModification(framebuffer->image_ids[attachment_index]);
         return true;
     };
     const bool recorded = record();
@@ -1583,27 +1643,37 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
     }
     {
         std::scoped_lock lock{texture_cache.mutex};
-        texture_cache.DownloadMemory(*output, target->size_bytes);
+        for (u32 index = 0; index < targets->count; ++index)
+            texture_cache.DownloadMemory(outputs[index], targets->targets[index].color.size_bytes);
     }
     {
         std::scoped_lock lock{buffer_cache.mutex};
-        buffer_cache.WriteMemory(*output, target->size_bytes);
+        for (u32 index = 0; index < targets->count; ++index)
+            buffer_cache.WriteMemory(outputs[index], targets->targets[index].color.size_bytes);
     }
     if (stop_token.stop_requested())
         return false;
-    if (before_hash) {
-        if (!lease.ReadBlockChecked(target->address, readback))
-            return reject("native target final readback");
-        const u64 after_hash =
-            Common::CityHash64(reinterpret_cast<const char*>(readback.data()), readback.size());
-        LOG_DEBUG(HW_GPU, "Native draw readback: before={:#x}, after={:#x}, changed={}",
-                  *before_hash, after_hash, *before_hash != after_hash);
+    if (record_readbacks) {
+        for (u32 index = 0; index < targets->count; ++index) {
+            auto& readback = readbacks[index];
+            if (!lease.ReadBlockChecked(targets->targets[index].color.address, readback))
+                return reject("native target final readback");
+            const u64 after_hash =
+                Common::CityHash64(reinterpret_cast<const char*>(readback.data()), readback.size());
+            LOG_DEBUG(HW_GPU,
+                      "Native draw readback: target={}, before={:#x}, after={:#x}, changed={}",
+                      index, before_hashes[index], after_hash, before_hashes[index] != after_hash);
+        }
         ++native_draw_readbacks;
+        if (targets->count > 1)
+            ++native_mrt_readbacks;
     }
     work_drained = true;
-    LOG_DEBUG(HW_GPU,
-              "Native indexed draw completed: count={}, minimum={}, maximum={}, extent={}x{}",
-              request.count, bounds->minimum, bounds->maximum, target->width, target->height);
+    LOG_DEBUG(
+        HW_GPU,
+        "Native indexed draw completed: count={}, minimum={}, maximum={}, extent={}x{}, targets={}",
+        request.count, bounds->minimum, bounds->maximum, target->width, target->height,
+        targets->count);
     return true;
 }
 

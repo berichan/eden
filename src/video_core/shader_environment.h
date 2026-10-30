@@ -160,6 +160,8 @@ public:
     // Call after native IR preparation, before pipeline lookup. Late compilation
     // reads must be contained in this frozen dependency set.
     void FinalizeNativeResources();
+    // Records a frozen size dependency; the caller still validates guest backing.
+    u32 ReadNativeCbufSize(u32 bank);
     std::span<const NativeTextureBinding> NativeTextures() const {
         return native_textures;
     }
@@ -170,6 +172,8 @@ private:
     size_t stage_index{};
     std::array<Tegra::Engines::ConstBufferInfo, Tegra::Engines::Maxwell3D::Regs::MaxConstBuffers>
         native_constant_buffers{};
+    std::array<std::optional<u32>, Tegra::Engines::Maxwell3D::Regs::MaxConstBuffers>
+        native_cbuf_size_dependencies{};
     u64 native_mapping_generation{};
     const Tegra::MemoryManager::MappingLease* native_capture_mapping{};
     std::vector<u8> native_driver_constants;

@@ -38,7 +38,9 @@ add_executable(tests
     video_core/native_atomic_sequence.cpp
     video_core/native_cache.cpp
     video_core/native_color_clear.cpp
+    video_core/native_render_targets.cpp
     video_core/native_constant_buffer.cpp
+    video_core/native_constant_buffer_bounds.cpp
     video_core/native_report_semaphore.cpp
     video_core/native_semaphore_acquire.cpp
     video_core/native_semaphore_release.cpp

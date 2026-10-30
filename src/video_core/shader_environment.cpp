@@ -720,6 +720,27 @@ const GraphicsEnvironment::NativeTextureBinding& GraphicsEnvironment::CaptureNat
     return native_textures.back();
 }
 
+u32 GraphicsEnvironment::ReadNativeCbufSize(u32 bank) {
+    if (!native_source_size || bank >= native_constant_buffers.size())
+        throw Shader::RuntimeError("Invalid native constant-buffer size query");
+    auto& dependency = native_cbuf_size_dependencies[bank];
+    if (dependency)
+        return *dependency;
+    if (native_resources_finalized)
+        throw Shader::RuntimeError("Uncaptured native constant-buffer size dependency");
+    const auto& binding = native_constant_buffers[bank];
+    // Mesa NVK's bound LDC path provides aligned-range robustness. Keep this
+    // adapter to the same 64-byte alignment and 64-KiB maximum; partial native
+    // ranges and unbound-buffer semantics are not inferred from host robustness.
+    constexpr u64 AddressLimit = u64{1} << 40;
+    if (!binding.enabled || !binding.size || binding.size > 65536 || (binding.size & 63) ||
+        (binding.address & 63) || binding.address >= AddressLimit ||
+        binding.size > AddressLimit - binding.address)
+        throw Shader::RuntimeError("Unsupported native constant-buffer binding bounds");
+    dependency = binding.size;
+    return *dependency;
+}
+
 void GraphicsEnvironment::FinalizeNativeResources() {
     if (!native_source_size)
         throw Shader::RuntimeError("Native resource preparation requires a native program");
@@ -732,6 +753,14 @@ void GraphicsEnvironment::FinalizeNativeResources() {
         const std::array<u64, 2> dependency{key, value};
         hash = Common::CityHash64WithSeed(reinterpret_cast<const char*>(dependency.data()),
                                           sizeof(dependency), hash);
+    }
+    for (u32 bank = 0; bank < native_cbuf_size_dependencies.size(); ++bank) {
+        if (native_cbuf_size_dependencies[bank]) {
+            const std::array<u64, 2> dependency{(u64{1} << 63) | bank,
+                                                *native_cbuf_size_dependencies[bank]};
+            hash = Common::CityHash64WithSeed(reinterpret_cast<const char*>(dependency.data()),
+                                              sizeof(dependency), hash);
+        }
     }
     std::ranges::sort(native_textures, {}, &NativeTextureBinding::handle);
     for (const auto& binding : native_textures) {

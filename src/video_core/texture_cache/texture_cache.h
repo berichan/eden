@@ -1290,6 +1290,46 @@ TextureCache<P>::PrepareNativeClearTarget(const ImageInfo& info, GPUVAddr addres
 }
 
 template <class P>
+std::optional<typename TextureCache<P>::NativeColorTargets>
+TextureCache<P>::PrepareNativeColorTargets(std::span<const NativeColorAttachment> attachments) {
+    if (attachments.empty() || attachments.size() > NUM_RT)
+        return std::nullopt;
+    const auto& first = attachments.front().info;
+    for (u32 index = 0; index < attachments.size(); ++index) {
+        const auto& target = attachments[index];
+        if (target.info.size != first.size || target.info.format != first.format)
+            return std::nullopt;
+        const u64 size = CalculateGuestSizeInBytes(target.info);
+        for (u32 previous = 0; previous < index; ++previous) {
+            const auto& other = attachments[previous];
+            const u64 other_size = CalculateGuestSizeInBytes(other.info);
+            if ((target.backing < other.backing + other_size &&
+                 other.backing < target.backing + size) ||
+                (target.address < other.address + other_size &&
+                 other.address < target.address + size))
+                return std::nullopt;
+        }
+    }
+    NativeColorTargets result{};
+    result.count = static_cast<u32>(attachments.size());
+    RenderTargets key{.size = {first.size.width, first.size.height}};
+    for (u32 index = 0; index < attachments.size(); ++index) {
+        const auto& target = attachments[index];
+        const auto prepared = PrepareNativeClearTarget(target.info, target.address, target.backing);
+        if (!prepared)
+            return std::nullopt;
+        result.image_ids[index] = prepared->image_id;
+        key.color_buffer_ids[index] = prepared->view_id;
+        key.draw_buffers[index] = static_cast<u8>(index);
+    }
+    const auto id = GetFramebufferId(key);
+    if (!id)
+        return std::nullopt;
+    result.framebuffer = &slot_framebuffers[id];
+    return result;
+}
+
+template <class P>
 ImageId TextureCache<P>::FindImage(const ImageInfo& info, GPUVAddr gpu_addr,
                                    RelaxedOptions options) {
     std::optional<DAddr> cpu_addr = gpu_memory->GpuToCpuAddress(gpu_addr);
