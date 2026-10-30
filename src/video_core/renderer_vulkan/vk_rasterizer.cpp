@@ -1057,23 +1057,6 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
                                                  targets->targets[index].color.size_bytes))
                 return reject("native target overlaps pending buffer writes");
     }
-    // Keep pixels private; bound actual guest-visible readback diagnostics to
-    // the first few completed draws and report only their hashes.
-    std::array<std::vector<u8>, 8> readbacks;
-    std::array<u64, 8> before_hashes{};
-    const bool record_readbacks =
-        native_draw_readbacks < 32 || (targets->count > 1 && native_mrt_readbacks < 2);
-    if (record_readbacks) {
-        for (u32 index = 0; index < targets->count; ++index) {
-            const auto& color = targets->targets[index].color;
-            auto& readback = readbacks[index];
-            readback.resize(color.size_bytes);
-            if (!lease.ReadBlockChecked(color.address, readback))
-                return reject("native target initial snapshot");
-            before_hashes[index] =
-                Common::CityHash64(reinterpret_cast<const char*>(readback.data()), readback.size());
-        }
-    }
     u64 snapshot_bytes{};
     const auto snapshot = [&](GPUVAddr address, size_t size, std::vector<u8>& bytes) {
         if (!size || size > SnapshotLimit - snapshot_bytes || stop_token.stop_requested())
@@ -1295,7 +1278,8 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
             const auto& descriptor = shader.texture_descriptors[i];
             if (descriptor.count != 1 || descriptor.shift_left || descriptor.has_secondary ||
                 descriptor.is_depth || descriptor.is_multisample || descriptor.is_integer ||
-                descriptor.type != Shader::TextureType::Color2D)
+                (descriptor.type != Shader::TextureType::Color2D &&
+                 descriptor.type != Shader::TextureType::Color3D))
                 return reject("unsupported native sampled-image descriptor");
             auto& environment = stage == 0 ? vertex : fragment;
             const u32 handle =
@@ -1309,14 +1293,23 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
                 Tegra::Control::SelectNativeSampledMip(binding->texture, binding->sampler);
             if (!mip)
                 return reject("unsupported native fixed-mip sampling state");
+            const bool volume = binding->texture.IsB10G11R11Float3D();
+            if (descriptor.type !=
+                (volume ? Shader::TextureType::Color3D : Shader::TextureType::Color2D))
+                return reject("native sampled-image dimensionality mismatch");
             const auto& sampler = binding->sampler;
             const u64 size = mip->size_bytes;
-            if (!size || size > SnapshotLimit || mip->width > limits.maxImageDimension2D ||
-                mip->height > limits.maxImageDimension2D)
+            const u32 extent_limit =
+                volume ? limits.maxImageDimension3D : limits.maxImageDimension2D;
+            if (!size || size > SnapshotLimit || mip->width > extent_limit ||
+                mip->height > extent_limit || mip->depth > extent_limit)
                 return reject("unsupported native sampled-image extent");
             const auto backing = lease.ResolveContiguous(mip->address, size, false);
             if (!backing || overlaps_output(*backing, size))
                 return reject("native sampled-image backing or attachment alias");
+            if (volume && (gpu_memory->GetPageKind(mip->address) != Tegra::PTEKind::GENERIC_16BX2 ||
+                           gpu_memory->GetMemoryLayoutSize(mip->address, size) < size))
+                return reject("unsupported native color-volume memory kind");
             {
                 std::scoped_lock lock{buffer_cache.mutex};
                 if (buffer_cache.IsRegionGpuModified(*backing, size))
@@ -1325,7 +1318,7 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
             VkFormatFeatureFlags features = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
             if (sampler.mag_filter == 2 || sampler.min_filter == 2)
                 features |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
-            const bool packed_float = binding->texture.IsB10G11R11Float2D();
+            const bool packed_float = binding->texture.IsB10G11R11Float2D() || volume;
             const bool astc = binding->texture.IsAstc4x4Unorm2D();
             const VkFormat sampled_format =
                 packed_float ? VK_FORMAT_B10G11R11_UFLOAT_PACK32 : VK_FORMAT_A8B8G8R8_SRGB_PACK32;
@@ -1351,9 +1344,9 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
             sampled.format = packed_float ? VideoCore::Surface::PixelFormat::B10G11R11_FLOAT
                              : astc       ? VideoCore::Surface::PixelFormat::ASTC_2D_4X4_SRGB
                                           : VideoCore::Surface::PixelFormat::A8B8G8R8_SRGB;
-            sampled.type = VideoCommon::ImageType::e2D;
-            sampled.size = {mip->width, mip->height, 1};
-            sampled.block = {0, mip->block_height, 0};
+            sampled.type = volume ? VideoCommon::ImageType::e3D : VideoCommon::ImageType::e2D;
+            sampled.size = {mip->width, mip->height, mip->depth};
+            sampled.block = {0, mip->block_height, mip->block_depth};
             sampled.layer_stride = sampled.maybe_unaligned_layer_stride = static_cast<u32>(size);
             sampled.layout = Tegra::Texture::BlockLinearLayout::TuringColor2D;
             if (VideoCommon::CalculateGuestSizeInBytes(sampled) != size)
@@ -1413,8 +1406,10 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
             sampled_requests.push_back({stage, i, mip->address, *backing, sampled, sampled_format,
                                         *native_samplers.back(), std::move(uploaded_pixels)});
             LOG_DEBUG(HW_GPU,
-                      "Native sampled mip: level={}, address={:#x}, extent={}x{}, block_height={}",
-                      mip->level, mip->address, mip->width, mip->height, mip->block_height);
+                      "Native sampled mip: level={}, address={:#x}, extent={}x{}x{}, "
+                      "block_height={}, block_depth={}",
+                      mip->level, mip->address, mip->width, mip->height, mip->depth,
+                      mip->block_height, mip->block_depth);
         }
     }
     {
@@ -1423,6 +1418,27 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
             if (buffer_cache.IsRegionGpuModified(outputs[index],
                                                  targets->targets[index].color.size_bytes))
                 return reject("native target overlaps pending buffer writes");
+    }
+    // Keep pixels private. Include the first volume samples after earlier
+    // initialization draws have exhausted the ordinary readback budget.
+    const bool has_volume = std::ranges::any_of(sampled_requests, [](const auto& sampled) {
+        return sampled.info.type == VideoCommon::ImageType::e3D;
+    });
+    const bool record_readbacks = native_draw_readbacks < 32 ||
+                                  (targets->count > 1 && native_mrt_readbacks < 2) ||
+                                  (has_volume && native_volume_readbacks < 2);
+    std::array<std::vector<u8>, 8> readbacks;
+    std::array<u64, 8> before_hashes{};
+    if (record_readbacks) {
+        for (u32 index = 0; index < targets->count; ++index) {
+            const auto& color = targets->targets[index].color;
+            auto& readback = readbacks[index];
+            readback.resize(color.size_bytes);
+            if (!lease.ReadBlockChecked(color.address, readback))
+                return reject("native target initial snapshot");
+            before_hashes[index] =
+                Common::CityHash64(reinterpret_cast<const char*>(readback.data()), readback.size());
+        }
     }
     std::array<TextureCache::NativeColorAttachment, 8> attachments;
     for (u32 index = 0; index < targets->count; ++index) {
@@ -1444,6 +1460,62 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
         for (const auto& sampled : sampled_requests) {
             if (stop_token.stop_requested())
                 return false;
+            if (sampled.info.type == VideoCommon::ImageType::e3D) {
+                const u64 size = VideoCommon::CalculateGuestSizeInBytes(sampled.info);
+                if (size > SnapshotLimit - native_sample_copy_bytes)
+                    return false;
+                native_sample_copy_bytes += size;
+                // Assemble a private logical volume from independently known
+                // one-GOB slices. Do not register an overlapping guest volume.
+                native_sample_images.push_back(
+                    std::make_unique<Image>(texture_cache_runtime, sampled.info, 0, 0));
+                auto& volume_image = *native_sample_images.back();
+                texture_cache_runtime.TransitionImageLayout(volume_image);
+                auto slice = sampled.info;
+                slice.type = VideoCommon::ImageType::e2D;
+                slice.size.depth = 1;
+                slice.block.depth = 0;
+                slice.layer_stride = slice.maybe_unaligned_layer_stride = 512;
+                if (VideoCommon::CalculateGuestSizeInBytes(slice) != 512)
+                    return false;
+                for (u32 z = 0; z < sampled.info.size.depth; ++z) {
+                    if (stop_token.stop_requested())
+                        return false;
+                    const u64 offset = u64{z} * 512;
+                    const auto source = texture_cache.PrepareNativeClearTarget(
+                        slice, sampled.address + offset, sampled.backing + offset, true, true);
+                    if (!source || buffer_cache.IsRegionGpuModified(sampled.backing + offset, 512))
+                        return false;
+                    const VideoCommon::ImageCopy copy{
+                        .src_subresource = {},
+                        .dst_subresource = {},
+                        .src_offset = {},
+                        .dst_offset = {0, 0, static_cast<s32>(z)},
+                        .extent = slice.size,
+                    };
+                    texture_cache_runtime.CopyImage(volume_image, *source->image,
+                                                    std::span{&copy, 1});
+                }
+                native_sample_views.push_back(
+                    device.GetLogical().CreateImageView(VkImageViewCreateInfo{
+                        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                        .pNext = nullptr,
+                        .flags = 0,
+                        .image = volume_image.Handle(),
+                        .viewType = VK_IMAGE_VIEW_TYPE_3D,
+                        .format = sampled.host_format,
+                        .components = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                                       VK_COMPONENT_SWIZZLE_IDENTITY,
+                                       VK_COMPONENT_SWIZZLE_IDENTITY},
+                        .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+                    }));
+                sampled_images.push_back(
+                    {sampled.stage, sampled.index, *native_sample_views.back(), sampled.sampler});
+                LOG_DEBUG(HW_GPU, "Native sampled color volume: address={:#x}, extent={}x{}x{}",
+                          sampled.address, sampled.info.size.width, sampled.info.size.height,
+                          sampled.info.size.depth);
+                continue;
+            }
             if (!sampled.uploaded_pixels.empty()) {
                 // Keep the decoded asset private to this draw. It must not be
                 // registered as an overlapping RGBA interpretation of guest ASTC.
@@ -1667,6 +1739,8 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
         ++native_draw_readbacks;
         if (targets->count > 1)
             ++native_mrt_readbacks;
+        if (has_volume)
+            ++native_volume_readbacks;
     }
     work_drained = true;
     LOG_DEBUG(

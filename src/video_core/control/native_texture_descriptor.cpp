@@ -80,6 +80,12 @@ bool NativeTextureDescriptor::IsB10G11R11Float2D() const {
            swizzle == std::array<u32, 4>{2, 3, 4, 7};
 }
 
+bool NativeTextureDescriptor::IsB10G11R11Float3D() const {
+    return format == 0x21 && type == 2 && samples == 0 && !packed && !depth_texture && !srgb &&
+           component_types == std::array<u32, 4>{7, 7, 7, 7} &&
+           swizzle == std::array<u32, 4>{2, 3, 4, 7};
+}
+
 bool NativeTextureDescriptor::IsAstc4x4Unorm2D() const {
     return format == 0x40 && (type == 1 || type == 7) && depth == 1 && samples == 0 && !packed &&
            !depth_texture && component_types == std::array<u32, 4>{2, 2, 2, 2} &&
@@ -127,10 +133,12 @@ std::optional<NativeSamplerDescriptor> NativeSamplerDescriptor::Decode(
 std::optional<NativeSampledMip> SelectNativeSampledMip(const NativeTextureDescriptor& texture,
                                                        const NativeSamplerDescriptor& sampler) {
     const bool astc = texture.IsAstc4x4Unorm2D();
-    if (!(((texture.IsRgba8Unorm2D() || astc) && texture.srgb) || texture.IsB10G11R11Float2D()) ||
-        !texture.normalized || texture.block_width || texture.block_depth || texture.tile_width ||
-        texture.gob3d || texture.gob_depth_offset || texture.view_min_mip || !sampler.srgb ||
-        (texture.words[7] & 0xfff000) || (texture.words[6] & 0x387fffc0U) ||
+    const bool volume = texture.IsB10G11R11Float3D();
+    if (!(((texture.IsRgba8Unorm2D() || astc) && texture.srgb) || texture.IsB10G11R11Float2D() ||
+          volume) ||
+        !texture.normalized || texture.block_width || (!volume && texture.block_depth) ||
+        texture.tile_width || texture.gob3d || texture.gob_depth_offset || texture.view_min_mip ||
+        !sampler.srgb || (texture.words[7] & 0xfff000) || (texture.words[6] & 0x387fffc0U) ||
         sampler.depth_compare || sampler.force_unnormalized || sampler.reduction ||
         sampler.anisotropy || sampler.lod_bias || sampler.integer_only_nearest_lod ||
         sampler.mag_filter != sampler.min_filter || (sampler.words[1] & 0x7c000000U) ||
@@ -161,6 +169,20 @@ std::optional<NativeSampledMip> SelectNativeSampledMip(const NativeTextureDescri
     // continue to resolve independently established selected-mip cache images.
     if (astc && !single_mip)
         return std::nullopt;
+    if (volume) {
+        // One XY GOB and one complete Z tile. Execution must independently
+        // establish every canonical slice; this metadata is not a 3D cache
+        // registration or permission to access overlapping padded volumes.
+        if (!single_mip || texture.width > 16 || texture.height > 8 || texture.block_height ||
+            texture.block_depth > 5 || texture.depth != (1U << texture.block_depth))
+            return std::nullopt;
+        const u64 size = u64{512} << texture.block_depth;
+        if (size > AddressLimit - texture.address)
+            return std::nullopt;
+        return NativeSampledMip{
+            texture.address,    size, texture.width, texture.height, 0, 0, texture.depth,
+            texture.block_depth};
+    }
     u64 offset{};
     for (u32 level = 0; level <= selected; ++level) {
         const u32 width = (std::max)(texture.width >> level, 1U);
@@ -193,8 +215,9 @@ bool IsNativeFixedMipSample(const Shader::IR::Inst& instruction) {
         opcode != Shader::IR::Opcode::ImageSampleExplicitLod)
         return false;
     const auto flags = instruction.Flags<Shader::IR::TextureInstInfo>();
-    return flags.type == Shader::TextureType::Color2D && !(flags.raw & ~0x0047ffffU) &&
-           instruction.Arg(3).IsEmpty();
+    return (flags.type == Shader::TextureType::Color2D ||
+            flags.type == Shader::TextureType::Color3D) &&
+           !(flags.raw & ~0x0047ffffU) && instruction.Arg(3).IsEmpty();
 }
 
 bool NativeColorPitchMatches(u32 logical_width, u32 storage_width) {

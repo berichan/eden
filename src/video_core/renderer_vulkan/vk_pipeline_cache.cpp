@@ -902,8 +902,10 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                               descriptor.is_integer);
                 }
                 for (const auto& descriptor : info.texture_descriptors)
-                    if (descriptor.type != Shader::TextureType::Color2D || descriptor.count != 1 ||
-                        descriptor.shift_left || descriptor.has_secondary || descriptor.is_depth ||
+                    if ((descriptor.type != Shader::TextureType::Color2D &&
+                         descriptor.type != Shader::TextureType::Color3D) ||
+                        descriptor.count != 1 || descriptor.shift_left ||
+                        descriptor.has_secondary || descriptor.is_depth ||
                         descriptor.is_multisample || descriptor.is_integer)
                         throw Shader::RuntimeError("Unsupported native sampled-image binding");
             }

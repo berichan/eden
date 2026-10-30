@@ -78,6 +78,8 @@ TEST_CASE("Native packed float color sampling preserves format and missing alpha
     REQUIRE(mip->width == 16);
     REQUIRE(mip->height == 8);
     REQUIRE(mip->size_bytes == 512);
+    REQUIRE(mip->depth == 1);
+    REQUIRE(mip->block_depth == 0);
     for (const auto [word, bit] : std::array<std::pair<u32, u32>, 7>{
              {{0, 7}, {0, 30}, {0, 31}, {3, 27}, {4, 22}, {4, 24}, {5, 16}}}) {
         auto changed = image;
@@ -107,6 +109,184 @@ TEST_CASE("Native color views accept padding only within the same byte pitch", "
     REQUIRE_FALSE(NativeColorPitchMatches(40, 32));
     REQUIRE_FALSE(NativeColorPitchMatches(17, 16));
     REQUIRE_FALSE(NativeColorPitchMatches(0, 16));
+}
+
+TEST_CASE("Native packed float volume metadata preserves the captured complete Z tile",
+          "[native-shader]") {
+    constexpr NativeDescriptorWords image{0x78d7ffa1, 0x632bb000, 0x00600022, 0x000700c0,
+                                          0xe9000007, 0x80070007, 0x03000000, 0};
+    constexpr NativeDescriptorWords state{0x26092, 0x3e2, 0x00f00000, 0, 0, 0, 0, 0x3f800000};
+    const auto texture = NativeTextureDescriptor::Decode(image);
+    const auto sampler = NativeSamplerDescriptor::Decode(state);
+    REQUIRE(texture);
+    REQUIRE(sampler);
+    REQUIRE(texture->words == image);
+    REQUIRE(texture->IsB10G11R11Float3D());
+    REQUIRE_FALSE(texture->IsB10G11R11Float2D());
+    REQUIRE_FALSE(texture->IsRgba8Unorm2D());
+    REQUIRE(texture->format == 0x21);
+    REQUIRE(texture->type == 2);
+    REQUIRE(texture->component_types == std::array<u32, 4>{7, 7, 7, 7});
+    REQUIRE(texture->swizzle == std::array<u32, 4>{2, 3, 4, 7});
+    REQUIRE(texture->address == 0x22632bb000ULL);
+    REQUIRE(texture->width == 8);
+    REQUIRE(texture->height == 8);
+    REQUIRE(texture->depth == 8);
+    REQUIRE(texture->block_height == 0);
+    REQUIRE(texture->block_depth == 3);
+    const auto mip = SelectNativeSampledMip(*texture, *sampler);
+    REQUIRE(mip);
+    REQUIRE(mip->address == texture->address);
+    REQUIRE(mip->size_bytes == 4096);
+    REQUIRE(mip->width == 8);
+    REQUIRE(mip->height == 8);
+    REQUIRE(mip->depth == 8);
+    REQUIRE(mip->block_height == 0);
+    REQUIRE(mip->block_depth == 3);
+    REQUIRE(mip->level == 0);
+    const NativeSampledMip legacy_aggregate{0x1000, 512, 16, 8, 0, 0};
+    REQUIRE(legacy_aggregate.depth == 1);
+    REQUIRE(legacy_aggregate.block_depth == 0);
+}
+
+TEST_CASE("Native volume sampling accepts only a complete bounded single XY GOB Z tile",
+          "[native-shader]") {
+    constexpr NativeDescriptorWords image{0x78d7ffa1, 0x632bb000, 0x00600022, 0x000700c0,
+                                          0xe9000007, 0x80070007, 0x03000000, 0};
+    constexpr NativeDescriptorWords state{0x26092, 0x3e2, 0x00f00000, 0, 0, 0, 0, 0x3f800000};
+    const auto original = NativeTextureDescriptor::Decode(image);
+    const auto sampler = NativeSamplerDescriptor::Decode(state);
+    REQUIRE(original);
+    REQUIRE(sampler);
+    constexpr u64 AddressLimit = u64{1} << 40;
+    for (u32 block_depth = 0; block_depth <= 5; ++block_depth) {
+        for (u32 width : {1U, 8U, 16U}) {
+            for (u32 height : {1U, 8U}) {
+                auto texture = *original;
+                texture.width = width;
+                texture.height = height;
+                texture.block_depth = block_depth;
+                texture.depth = 1U << block_depth;
+                texture.address = AddressLimit - (u64{512} << block_depth);
+                const auto mip = SelectNativeSampledMip(texture, *sampler);
+                REQUIRE(mip);
+                REQUIRE(mip->address == texture.address);
+                REQUIRE(mip->size_bytes == (u64{512} << block_depth));
+                REQUIRE(mip->depth == (1U << block_depth));
+                REQUIRE(mip->width == width);
+                REQUIRE(mip->height == height);
+                REQUIRE(mip->block_height == 0);
+                REQUIRE(mip->block_depth == block_depth);
+                ++texture.address;
+                REQUIRE_FALSE(SelectNativeSampledMip(texture, *sampler));
+            }
+        }
+    }
+    for (u32 variant = 0; variant < 19; ++variant) {
+        CAPTURE(variant);
+        auto texture = *original;
+        switch (variant) {
+        case 0:
+            texture.width = 0;
+            break;
+        case 1:
+            texture.width = 17;
+            break;
+        case 2:
+            texture.height = 0;
+            break;
+        case 3:
+            texture.height = 9;
+            break;
+        case 4:
+            texture.depth = 0;
+            break;
+        case 5:
+            texture.depth = 7;
+            break;
+        case 6:
+            texture.depth = 9;
+            break;
+        case 7:
+            texture.block_height = 1;
+            break;
+        case 8:
+            texture.block_width = 1;
+            break;
+        case 9:
+            texture.block_depth = 6;
+            texture.depth = 64;
+            break;
+        case 10:
+            texture.tile_width = 1;
+            break;
+        case 11:
+            texture.gob3d = true;
+            break;
+        case 12:
+            texture.gob_depth_offset = 1;
+            break;
+        case 13:
+            texture.normalized = false;
+            break;
+        case 14:
+            texture.max_mip = texture.view_max_mip = 1;
+            break;
+        case 15:
+            texture.max_mip = 1;
+            break;
+        case 16:
+            texture.view_min_mip = 1;
+            break;
+        case 17:
+            texture.address = AddressLimit;
+            break;
+        default:
+            texture.reserved[2] = 0x20000;
+            break;
+        }
+        REQUIRE_FALSE(SelectNativeSampledMip(texture, *sampler));
+    }
+}
+
+TEST_CASE("Native volume sampling keeps strict float channels and shared sampler guards",
+          "[native-shader]") {
+    constexpr NativeDescriptorWords image{0x78d7ffa1, 0x632bb000, 0x00600022, 0x000700c0,
+                                          0xe9000007, 0x80070007, 0x03000000, 0};
+    constexpr NativeDescriptorWords state{0x26092, 0x3e2, 0x00f00000, 0, 0, 0, 0, 0x3f800000};
+    const auto texture = NativeTextureDescriptor::Decode(image);
+    const auto sampler = NativeSamplerDescriptor::Decode(state);
+    REQUIRE(texture);
+    REQUIRE(sampler);
+    for (const auto [word, bit] : std::array<std::pair<u32, u32>, 8>{
+             {{0, 0}, {0, 7}, {0, 30}, {0, 31}, {3, 27}, {4, 22}, {4, 24}, {7, 8}}}) {
+        auto changed = image;
+        changed[word] ^= 1U << bit;
+        const auto decoded = NativeTextureDescriptor::Decode(changed);
+        REQUIRE(decoded);
+        REQUIRE_FALSE(decoded->IsB10G11R11Float3D());
+        REQUIRE_FALSE(SelectNativeSampledMip(*decoded, *sampler));
+    }
+    for (const auto [word, bit] : std::array<std::pair<u32, u32>, 11>{{{0, 0},
+                                                                       {0, 9},
+                                                                       {0, 13},
+                                                                       {0, 20},
+                                                                       {1, 4},
+                                                                       {1, 3},
+                                                                       {1, 10},
+                                                                       {1, 12},
+                                                                       {1, 25},
+                                                                       {1, 26},
+                                                                       {3, 0}}}) {
+        auto changed = state;
+        changed[word] ^= 1U << bit;
+        const auto decoded = NativeSamplerDescriptor::Decode(changed);
+        REQUIRE(decoded);
+        REQUIRE_FALSE(SelectNativeSampledMip(*texture, *decoded));
+    }
+    auto fractional = *sampler;
+    fractional.min_lod = 128;
+    REQUIRE(SelectNativeSampledMip(*texture, fractional));
 }
 
 TEST_CASE("Native narrowed views require ordinary normalized base-mip sampling state",
@@ -149,18 +329,32 @@ TEST_CASE("Native narrowed views require ordinary normalized base-mip sampling s
 TEST_CASE("Native selected-mip samples reject offsets and level-observing operations",
           "[native-shader]") {
     using Op = Shader::IR::Opcode;
-    for (Op opcode : {Op::ImageSampleImplicitLod, Op::ImageSampleExplicitLod}) {
-        Shader::IR::Inst sample{opcode, 0x20000};
-        REQUIRE(IsNativeFixedMipSample(sample));
-        sample.SetArg(3, Shader::IR::Value{u32{0}});
-        REQUIRE_FALSE(IsNativeFixedMipSample(sample));
-        sample.ClearArgs();
-        sample.SetFlags(u32{0x120000});
-        REQUIRE_FALSE(IsNativeFixedMipSample(sample));
+    for (u32 type : {2U, 4U}) {
+        for (Op opcode : {Op::ImageSampleImplicitLod, Op::ImageSampleExplicitLod}) {
+            Shader::IR::Inst sample{opcode, type << 16};
+            REQUIRE(IsNativeFixedMipSample(sample));
+            sample.SetFlags((type << 16) | 0x400000U);
+            REQUIRE(IsNativeFixedMipSample(sample));
+            sample.SetArg(3, Shader::IR::Value{u32{0}});
+            REQUIRE_FALSE(IsNativeFixedMipSample(sample));
+            sample.ClearArgs();
+            for (u32 flag :
+                 {1U << 19, 1U << 20, 1U << 21, 1U << 23, 1U << 25, 1U << 27, 1U << 30, 1U << 31}) {
+                sample.SetFlags((type << 16) | flag);
+                REQUIRE_FALSE(IsNativeFixedMipSample(sample));
+            }
+        }
     }
-    for (Op opcode : {Op::ImageFetch, Op::ImageQueryDimensions, Op::ImageQueryLod, Op::ImageGather,
-                      Op::ImageGradient}) {
-        Shader::IR::Inst operation{opcode, 0x20000};
+    for (Op opcode :
+         {Op::ImageFetch, Op::ImageQueryDimensions, Op::ImageQueryLod, Op::ImageGather,
+          Op::ImageGradient, Op::ImageSampleDrefImplicitLod, Op::ImageSampleDrefExplicitLod}) {
+        for (u32 type : {2U, 4U}) {
+            Shader::IR::Inst operation{opcode, type << 16};
+            REQUIRE_FALSE(IsNativeFixedMipSample(operation));
+        }
+    }
+    for (u32 type : {0U, 1U, 3U, 5U, 6U, 7U}) {
+        Shader::IR::Inst operation{Op::ImageSampleExplicitLod, type << 16};
         REQUIRE_FALSE(IsNativeFixedMipSample(operation));
     }
 }

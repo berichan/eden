@@ -627,6 +627,8 @@ std::optional<Shader::ReplaceConstant> GraphicsEnvironment::GetReplaceConstBuffe
 Shader::TextureType GraphicsEnvironment::ReadTextureType(u32 handle) {
     if (native_source_size) {
         const auto& texture = CaptureNativeTexture(handle).texture;
+        if (texture.IsB10G11R11Float3D())
+            return Shader::TextureType::Color3D;
         return texture.normalized ? Shader::TextureType::Color2D : Shader::TextureType::Color2DRect;
     }
     const auto& regs{maxwell3d->regs};
@@ -641,7 +643,7 @@ Shader::TextureType GraphicsEnvironment::ReadTextureType(u32 handle) {
 Shader::TexturePixelFormat GraphicsEnvironment::ReadTexturePixelFormat(u32 handle) {
     if (native_source_size) {
         const auto& texture = CaptureNativeTexture(handle).texture;
-        if (texture.IsB10G11R11Float2D())
+        if (texture.IsB10G11R11Float2D() || texture.IsB10G11R11Float3D())
             return static_cast<Shader::TexturePixelFormat>(
                 VideoCore::Surface::PixelFormat::B10G11R11_FLOAT);
         if (texture.IsAstc4x4Unorm2D())
@@ -699,7 +701,7 @@ const GraphicsEnvironment::NativeTextureBinding& GraphicsEnvironment::CaptureNat
     const auto sampler = NativeSamplerDescriptor::Decode(sampler_words);
     if (!texture || !sampler ||
         !(texture->IsRgba8Unorm2D() || texture->IsB10G11R11Float2D() ||
-          texture->IsAstc4x4Unorm2D())) {
+          texture->IsAstc4x4Unorm2D() || texture->IsB10G11R11Float3D())) {
         LOG_DEBUG(HW_GPU,
                   "Native texture metadata rejected: handle={:#x}, "
                   "tic={:#x}/{:#x}/{:#x}/{:#x}/{:#x}/{:#x}/{:#x}/{:#x}, "

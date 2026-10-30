@@ -279,6 +279,21 @@ TEST_CASE("Native graphics capture separates source headers, code and constant s
                 VideoCore::Surface::PixelFormat::ASTC_2D_4X4_SRGB);
         REQUIRE_FALSE(astc.IsTexturePixelFormatInteger(Handle));
     }
+    texture[0] = 0x78d7ffa1;
+    texture[3] = 3U << 6;
+    texture[4] = 7U | (2U << 23);
+    texture[5] = 7U | (7U << 16) | (1U << 31);
+    texture[6] = texture[7] = 0;
+    update_descriptors();
+    {
+        Environment volume{engine, memory, Program::Pixel,
+                           Environment::NativeProgram{header_address, {}}};
+        REQUIRE(volume.ReadTextureType(Handle) == Shader::TextureType::Color3D);
+        REQUIRE(static_cast<VideoCore::Surface::PixelFormat>(volume.ReadTexturePixelFormat(
+                    Handle)) == VideoCore::Surface::PixelFormat::B10G11R11_FLOAT);
+        REQUIRE_FALSE(volume.IsTexturePixelFormatInteger(Handle));
+        REQUIRE(volume.NativeTextures()[0].texture.depth == 8);
+    }
     // Runtime bounds affect guarded IR specialization even with unchanged shader
     // code and constant values. A live engine update cannot change the capture.
     auto& bounded_binding = engine.state.shader_stages[4].const_buffers[4];

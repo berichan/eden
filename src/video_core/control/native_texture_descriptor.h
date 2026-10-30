@@ -33,6 +33,7 @@ struct NativeTextureDescriptor {
     static std::optional<NativeTextureDescriptor> Decode(const NativeDescriptorWords& words);
     bool IsRgba8Unorm2D() const;
     bool IsB10G11R11Float2D() const;
+    bool IsB10G11R11Float3D() const;
     bool IsAstc4x4Unorm2D() const;
 };
 
@@ -52,6 +53,7 @@ struct NativeSampledMip {
     GPUVAddr address;
     u64 size_bytes;
     u32 width, height, block_height, level;
+    u32 depth{1}, block_depth{};
 };
 
 // Only for ordinary sampled-image operations. Computes a fixed integral LOD span;

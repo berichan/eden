@@ -159,6 +159,7 @@ private:
     };
     u32 native_draw_readbacks{};
     u32 native_mrt_readbacks{};
+    u32 native_volume_readbacks{};
     static constexpr size_t MAX_TEXTURES = 192;
     static constexpr size_t MAX_IMAGES = 48;
     static constexpr size_t MAX_IMAGE_VIEWS = MAX_TEXTURES + MAX_IMAGES;
