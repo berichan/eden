@@ -74,6 +74,12 @@ bool NativeTextureDescriptor::IsRgba8Unorm2D() const {
            swizzle == std::array<u32, 4>{2, 3, 4, 5};
 }
 
+bool NativeTextureDescriptor::IsB10G11R11Float2D() const {
+    return format == 0x21 && (type == 1 || type == 7) && depth == 1 && samples == 0 && !packed &&
+           !depth_texture && !srgb && component_types == std::array<u32, 4>{7, 7, 7, 7} &&
+           swizzle == std::array<u32, 4>{2, 3, 4, 7};
+}
+
 std::optional<NativeSamplerDescriptor> NativeSamplerDescriptor::Decode(
     const NativeDescriptorWords& words) {
     // C797's three-bit MAG_FILTER and two-bit cube enum differ from legacy TSCEntry.
@@ -114,14 +120,14 @@ std::optional<NativeSamplerDescriptor> NativeSamplerDescriptor::Decode(
 
 std::optional<NativeSampledMip> SelectNativeSampledMip(const NativeTextureDescriptor& texture,
                                                        const NativeSamplerDescriptor& sampler) {
-    if (!texture.IsRgba8Unorm2D() || !texture.srgb || !texture.normalized || texture.block_width ||
-        texture.block_depth || texture.tile_width || texture.gob3d || texture.gob_depth_offset ||
-        texture.view_min_mip || !sampler.srgb || (texture.words[7] & 0xfff000) ||
-        (texture.words[6] & 0x387fffc0U) || sampler.depth_compare || sampler.force_unnormalized ||
-        sampler.reduction || sampler.anisotropy || sampler.lod_bias ||
-        sampler.min_lod != sampler.max_lod || (sampler.min_lod & 255) ||
-        sampler.integer_only_nearest_lod || sampler.mag_filter != sampler.min_filter ||
-        (sampler.words[1] & 0x7c000000U) || sampler.wrap != std::array<u32, 3>{2, 2, 2})
+    if (!((texture.IsRgba8Unorm2D() && texture.srgb) || texture.IsB10G11R11Float2D()) ||
+        !texture.normalized || texture.block_width || texture.block_depth || texture.tile_width ||
+        texture.gob3d || texture.gob_depth_offset || texture.view_min_mip || !sampler.srgb ||
+        (texture.words[7] & 0xfff000) || (texture.words[6] & 0x387fffc0U) ||
+        sampler.depth_compare || sampler.force_unnormalized || sampler.reduction ||
+        sampler.anisotropy || sampler.lod_bias || sampler.integer_only_nearest_lod ||
+        sampler.mag_filter != sampler.min_filter || (sampler.words[1] & 0x7c000000U) ||
+        sampler.wrap != std::array<u32, 3>{2, 2, 2})
         return std::nullopt;
     // The SDK installs these registration/sampler presets. Preserve their raw
     // identity; they cannot establish a layout for an arbitrary uploaded image.
@@ -131,7 +137,13 @@ std::optional<NativeSampledMip> SelectNativeSampledMip(const NativeTextureDescri
         if (sampler.reserved[i] && !(i == 0 && sampler.reserved[i] == 0x24000))
             return std::nullopt;
     }
-    const u32 selected = sampler.min_lod >> 8;
+    // Ordinary samples cannot access another level when the header exposes only
+    // mip zero, even with a ranged or fractional sampler clamp. Equal min/mag
+    // filters above also preserve filtering after narrowing to the host base LOD.
+    const bool single_mip = texture.view_max_mip == 0 && texture.max_mip == 0;
+    if (!single_mip && (sampler.min_lod != sampler.max_lod || (sampler.min_lod & 255)))
+        return std::nullopt;
+    const u32 selected = single_mip ? 0 : sampler.min_lod >> 8;
     constexpr u64 AddressLimit = u64{1} << 40;
     if (selected > texture.view_max_mip || selected > texture.max_mip || selected > 15 ||
         (selected && (sampler.mip_filter == 1 || texture.type == 7)) ||

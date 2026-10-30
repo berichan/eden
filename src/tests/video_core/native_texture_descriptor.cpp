@@ -7,6 +7,53 @@
 
 using namespace Tegra::Control;
 
+TEST_CASE("Native packed float color sampling preserves format and missing alpha",
+          "[native-shader]") {
+    NativeDescriptorWords image{};
+    image[0] = 0x21;
+    for (u32 i = 0; i < 4; ++i)
+        image[0] |= (7U << (7 + 3 * i)) | ((i == 3 ? 7U : i + 2) << (19 + 3 * i));
+    image[2] = 3U << 21;
+    image[4] = 15U | (1U << 23);
+    image[5] = 7U | (1U << 31);
+    const auto texture = NativeTextureDescriptor::Decode(image);
+    REQUIRE(texture);
+    REQUIRE(texture->IsB10G11R11Float2D());
+    REQUIRE_FALSE(texture->IsRgba8Unorm2D());
+    REQUIRE_FALSE(texture->srgb);
+    REQUIRE(texture->swizzle == std::array<u32, 4>{2, 3, 4, 7});
+    NativeDescriptorWords state{};
+    state[0] = 2U | (2U << 3) | (2U << 6) | (1U << 13);
+    state[1] = 2U | (2U << 4) | (3U << 6);
+    state[2] = 15U << 20;
+    const auto sampler = NativeSamplerDescriptor::Decode(state);
+    REQUIRE(sampler);
+    const auto mip = SelectNativeSampledMip(*texture, *sampler);
+    REQUIRE(mip);
+    REQUIRE(mip->level == 0);
+    REQUIRE(mip->width == 16);
+    REQUIRE(mip->height == 8);
+    REQUIRE(mip->size_bytes == 512);
+    for (const auto [word, bit] : std::array<std::pair<u32, u32>, 7>{
+             {{0, 7}, {0, 30}, {0, 31}, {3, 27}, {4, 22}, {4, 24}, {5, 16}}}) {
+        auto changed = image;
+        changed[word] ^= 1U << bit;
+        const auto decoded = NativeTextureDescriptor::Decode(changed);
+        REQUIRE(decoded);
+        REQUIRE_FALSE(decoded->IsB10G11R11Float2D());
+        REQUIRE_FALSE(SelectNativeSampledMip(*decoded, *sampler));
+    }
+    auto fractional = *sampler;
+    fractional.min_lod = 128;
+    REQUIRE(SelectNativeSampledMip(*texture, fractional));
+    auto unequal_filters = *sampler;
+    unequal_filters.mag_filter = 1;
+    REQUIRE_FALSE(SelectNativeSampledMip(*texture, unequal_filters));
+    auto multi_level = *texture;
+    multi_level.max_mip = multi_level.view_max_mip = 1;
+    REQUIRE_FALSE(SelectNativeSampledMip(multi_level, *sampler));
+}
+
 TEST_CASE("Native color views accept padding only within the same byte pitch", "[native-shader]") {
     REQUIRE(NativeColorPitchMatches(40, 48));
     REQUIRE(NativeColorPitchMatches(20, 32));

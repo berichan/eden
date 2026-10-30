@@ -610,6 +610,9 @@ Shader::TextureType GraphicsEnvironment::ReadTextureType(u32 handle) {
 Shader::TexturePixelFormat GraphicsEnvironment::ReadTexturePixelFormat(u32 handle) {
     if (native_source_size) {
         const auto& texture = CaptureNativeTexture(handle).texture;
+        if (texture.IsB10G11R11Float2D())
+            return static_cast<Shader::TexturePixelFormat>(
+                VideoCore::Surface::PixelFormat::B10G11R11_FLOAT);
         return static_cast<Shader::TexturePixelFormat>(
             texture.srgb ? VideoCore::Surface::PixelFormat::A8B8G8R8_SRGB
                          : VideoCore::Surface::PixelFormat::A8B8G8R8_UNORM);
@@ -655,12 +658,21 @@ const GraphicsEnvironment::NativeTextureBinding& GraphicsEnvironment::CaptureNat
             throw Shader::RuntimeError("Unmapped or invalid native descriptor pool entry");
         return words;
     };
-    const auto texture = NativeTextureDescriptor::Decode(
-        capture(NativeDescriptorPool::Texture, 0x55d, handle & 0xfffff));
-    const auto sampler = NativeSamplerDescriptor::Decode(
-        capture(NativeDescriptorPool::Sampler, 0x557, handle >> 20));
-    if (!texture || !sampler || !texture->IsRgba8Unorm2D())
+    const auto texture_words = capture(NativeDescriptorPool::Texture, 0x55d, handle & 0xfffff);
+    const auto sampler_words = capture(NativeDescriptorPool::Sampler, 0x557, handle >> 20);
+    const auto texture = NativeTextureDescriptor::Decode(texture_words);
+    const auto sampler = NativeSamplerDescriptor::Decode(sampler_words);
+    if (!texture || !sampler || !(texture->IsRgba8Unorm2D() || texture->IsB10G11R11Float2D())) {
+        LOG_DEBUG(HW_GPU,
+                  "Native texture metadata rejected: handle={:#x}, "
+                  "tic={:#x}/{:#x}/{:#x}/{:#x}/{:#x}/{:#x}/{:#x}/{:#x}, "
+                  "tsc={:#x}/{:#x}/{:#x}/{:#x}/{:#x}/{:#x}/{:#x}/{:#x}",
+                  handle, texture_words[0], texture_words[1], texture_words[2], texture_words[3],
+                  texture_words[4], texture_words[5], texture_words[6], texture_words[7],
+                  sampler_words[0], sampler_words[1], sampler_words[2], sampler_words[3],
+                  sampler_words[4], sampler_words[5], sampler_words[6], sampler_words[7]);
         throw Shader::RuntimeError("Unsupported native texture or sampler metadata");
+    }
     LOG_DEBUG(HW_GPU,
               "Native texture metadata: stage={}, handle={:#x}, address={:#x}, extent={}x{}, "
               "mips={}..{}, reserved_word2={:#x}, sampler_lod={}..{}",

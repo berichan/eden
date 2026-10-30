@@ -20,6 +20,7 @@
 #include "video_core/memory_manager.h"
 #include "video_core/renderer_null/null_rasterizer.h"
 #include "video_core/shader_environment.h"
+#include "video_core/surface.h"
 
 TEST_CASE("Native graphics capture separates source headers, code and constant snapshots",
           "[native-shader]") {
@@ -246,6 +247,24 @@ TEST_CASE("Native graphics capture separates source headers, code and constant s
                              Environment::NativeProgram{header_address, {}, &lease}};
         REQUIRE(external.ReadTextureType(Handle) == Shader::TextureType::Color2D);
         REQUIRE(external.NativeTextures()[0].texture.reserved[2] == (1U << 18));
+    }
+    // The same shader must specialize the native packed float format separately
+    // and retain its alpha-one swizzle instead of reinterpreting it as RGBA8.
+    const u64 rgba_hash = specialize();
+    texture[0] = 0x21;
+    for (u32 i = 0; i < 4; ++i)
+        texture[0] |= (7U << (7 + 3 * i)) | ((i == 3 ? 7U : i + 2) << (19 + 3 * i));
+    update_descriptors();
+    {
+        Environment floating{engine, memory, Program::Pixel,
+                             Environment::NativeProgram{header_address, {}}};
+        REQUIRE(floating.ReadTextureType(Handle) == Shader::TextureType::Color2D);
+        REQUIRE(static_cast<VideoCore::Surface::PixelFormat>(floating.ReadTexturePixelFormat(
+                    Handle)) == VideoCore::Surface::PixelFormat::B10G11R11_FLOAT);
+        REQUIRE_FALSE(floating.IsTexturePixelFormatInteger(Handle));
+        REQUIRE(floating.NativeTextures()[0].texture.swizzle[3] == 7);
+        floating.FinalizeNativeResources();
+        REQUIRE(floating.CalculateHash() != rgba_hash);
     }
     memory.Unmap(base + Kernel::PageSize, Kernel::PageSize);
     REQUIRE(captured.ReadInstruction(80) != 0);

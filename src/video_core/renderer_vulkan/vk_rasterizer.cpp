@@ -992,7 +992,7 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
                            {x2 > x0 ? x2 - x0 : 0, y2 > y0 ? y2 - y0 : 0}};
 
     auto lease = gpu_memory->AcquireMappingLease();
-    // Failure drains must precede destruction of samplers referenced by a prefix.
+    // Failure drains must precede destruction of owned sampled resources.
     std::vector<std::unique_ptr<Image>> native_sample_images;
     std::vector<vk::ImageView> native_sample_views;
     std::vector<vk::Sampler> native_samplers;
@@ -1205,6 +1205,7 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
         GPUVAddr address;
         DAddr backing;
         VideoCommon::ImageInfo info;
+        VkFormat host_format;
         VkSampler sampler;
     };
     std::vector<SampledRequest> sampled_requests;
@@ -1265,11 +1266,14 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
             VkFormatFeatureFlags features = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
             if (sampler.mag_filter == 2 || sampler.min_filter == 2)
                 features |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
-            if (!device.IsFormatSupported(VK_FORMAT_A8B8G8R8_SRGB_PACK32, features,
-                                          FormatType::Optimal))
+            const bool packed_float = binding->texture.IsB10G11R11Float2D();
+            const VkFormat sampled_format =
+                packed_float ? VK_FORMAT_B10G11R11_UFLOAT_PACK32 : VK_FORMAT_A8B8G8R8_SRGB_PACK32;
+            if (!device.IsFormatSupported(sampled_format, features, FormatType::Optimal))
                 return reject("native sampled-image filtering unavailable on host");
             VideoCommon::ImageInfo sampled;
-            sampled.format = VideoCore::Surface::PixelFormat::A8B8G8R8_SRGB;
+            sampled.format = packed_float ? VideoCore::Surface::PixelFormat::B10G11R11_FLOAT
+                                          : VideoCore::Surface::PixelFormat::A8B8G8R8_SRGB;
             sampled.type = VideoCommon::ImageType::e2D;
             sampled.size = {mip->width, mip->height, 1};
             sampled.block = {0, mip->block_height, 0};
@@ -1300,8 +1304,8 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
                 .borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,
                 .unnormalizedCoordinates = VK_FALSE,
             }));
-            sampled_requests.push_back(
-                {stage, i, mip->address, *backing, sampled, *native_samplers.back()});
+            sampled_requests.push_back({stage, i, mip->address, *backing, sampled, sampled_format,
+                                        *native_samplers.back()});
             LOG_DEBUG(HW_GPU,
                       "Native sampled mip: level={}, address={:#x}, extent={}x{}, block_height={}",
                       mip->level, mip->address, mip->width, mip->height, mip->block_height);
@@ -1365,7 +1369,7 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
                         .flags = 0,
                         .image = copy_image.Handle(),
                         .viewType = VK_IMAGE_VIEW_TYPE_2D,
-                        .format = VK_FORMAT_A8B8G8R8_SRGB_PACK32,
+                        .format = sampled.host_format,
                         .components = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
                                        VK_COMPONENT_SWIZZLE_IDENTITY,
                                        VK_COMPONENT_SWIZZLE_IDENTITY},
@@ -1503,7 +1507,8 @@ bool RasterizerVulkan::InvalidateNativeCaches(
     }
     // Native code/CBUF bytes are freshly checked before every dispatch. SSBOs stay
     // GPU-resident and the dispatch barrier orders prior writes; never discard their
-    // GPU-modified contents as if this were a CPU overwrite. Native sampling remains unsupported.
+    // GPU-modified contents as if this were a CPU overwrite. Native descriptors
+    // are captured separately; invalidate the legacy descriptor tables here.
     if (action.texture_headers || action.samplers) {
         std::scoped_lock lock{texture_cache.mutex};
         return texture_cache.InvalidateDescriptorTables(action.texture_headers, action.samplers);

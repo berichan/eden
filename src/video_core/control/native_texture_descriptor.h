@@ -32,6 +32,7 @@ struct NativeTextureDescriptor {
 
     static std::optional<NativeTextureDescriptor> Decode(const NativeDescriptorWords& words);
     bool IsRgba8Unorm2D() const;
+    bool IsB10G11R11Float2D() const;
 };
 
 struct NativeSamplerDescriptor {
