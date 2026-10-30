@@ -7,6 +7,59 @@
 
 using namespace Tegra::Control;
 
+TEST_CASE("Native BC4 grayscale base mip preserves compressed bounds and repeat sampling",
+          "[native-shader]") {
+    constexpr NativeDescriptorWords image{0x74924927, 0x6942a000, 0x00600011, 0x00070010,
+                                          0xe880007f, 0x8000007f, 0x03000000, 0};
+    constexpr NativeDescriptorWords state{0x26080,    0x3a2,      0xfff00000, 0x0ffff000,
+                                          0x3f800000, 0x3f800000, 0x3f800000, 0x3f800000};
+    const auto texture = NativeTextureDescriptor::Decode(image);
+    const auto sampler = NativeSamplerDescriptor::Decode(state);
+    REQUIRE(texture);
+    REQUIRE(sampler);
+    REQUIRE(texture->IsBc4UnormRrr1_2D());
+    REQUIRE(texture->swizzle == std::array<u32, 4>{2, 2, 2, 7});
+    REQUIRE(sampler->wrap == std::array<u32, 3>{0, 0, 2});
+    REQUIRE(sampler->max_lod == 15 * 256);
+    const auto mip = SelectNativeSampledMip(*texture, *sampler);
+    REQUIRE(mip);
+    REQUIRE(mip->address == 0x116942a000ULL);
+    REQUIRE(mip->width == 128);
+    REQUIRE(mip->height == 128);
+    REQUIRE(mip->block_height == 2);
+    REQUIRE(mip->size_bytes == 8192);
+    for (u32 axis = 0; axis < 3; ++axis) {
+        for (u32 wrap = 0; wrap < 8; ++wrap) {
+            auto changed = *sampler;
+            changed.wrap[axis] = wrap;
+            REQUIRE(SelectNativeSampledMip(*texture, changed).has_value() ==
+                    (wrap == 0 || wrap == 2));
+        }
+    }
+    for (const auto [word, bit] : std::array<std::pair<u32, u32>, 9>{
+             {{0, 0}, {0, 7}, {0, 22}, {0, 28}, {0, 31}, {3, 27}, {4, 22}, {4, 24}, {5, 16}}}) {
+        auto changed = image;
+        changed[word] ^= 1U << bit;
+        const auto decoded = NativeTextureDescriptor::Decode(changed);
+        REQUIRE(decoded);
+        REQUIRE_FALSE(decoded->IsBc4UnormRrr1_2D());
+        REQUIRE_FALSE(SelectNativeSampledMip(*decoded, *sampler));
+    }
+    auto changed = *texture;
+    changed.max_mip = changed.view_max_mip = 1;
+    REQUIRE_FALSE(SelectNativeSampledMip(changed, *sampler));
+    changed = *texture;
+    changed.width = 3;
+    changed.height = 5;
+    const auto clipped = SelectNativeSampledMip(changed, *sampler);
+    REQUIRE(clipped);
+    REQUIRE(clipped->size_bytes == 512);
+    REQUIRE(clipped->block_height == 0);
+    changed = *texture;
+    changed.address = (u64{1} << 40) - 4096;
+    REQUIRE_FALSE(SelectNativeSampledMip(changed, *sampler));
+}
+
 TEST_CASE("Native ASTC base mip footprints use compressed block rows", "[native-shader]") {
     NativeDescriptorWords image{};
     image[0] = 0x40;

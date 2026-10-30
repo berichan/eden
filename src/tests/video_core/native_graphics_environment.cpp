@@ -300,6 +300,32 @@ TEST_CASE("Native graphics capture separates source headers, code and constant s
                 VideoCore::Surface::PixelFormat::ASTC_2D_4X4_SRGB);
         REQUIRE_FALSE(astc.IsTexturePixelFormatInteger(Handle));
     }
+    texture[0] = 0x74924927;
+    texture[4] &= ~(1U << 22);
+    update_descriptors();
+    {
+        Environment grayscale{engine, memory, Program::Pixel,
+                              Environment::NativeProgram{header_address, {}}};
+        REQUIRE(grayscale.ReadTextureType(Handle) == Shader::TextureType::Color2D);
+        REQUIRE(static_cast<VideoCore::Surface::PixelFormat>(grayscale.ReadTexturePixelFormat(
+                    Handle)) == VideoCore::Surface::PixelFormat::BC4_UNORM);
+        REQUIRE_FALSE(grayscale.IsTexturePixelFormatInteger(Handle));
+        REQUIRE(grayscale.NativeTextures()[0].texture.swizzle == std::array<u32, 4>{2, 2, 2, 7});
+        grayscale.FinalizeNativeResources();
+        const auto bc4_hash = grayscale.CalculateHash();
+        REQUIRE(bc4_hash != rgba_hash);
+        // Wrap state is part of the frozen dependency, including changes made
+        // after capture but before a subsequent pipeline lookup.
+        sampler[0] ^= 2;
+        update_descriptors();
+        REQUIRE(grayscale.CalculateHash() == bc4_hash);
+        Environment repeated{engine, memory, Program::Pixel,
+                             Environment::NativeProgram{header_address, {}}};
+        REQUIRE(repeated.ReadTextureType(Handle) == Shader::TextureType::Color2D);
+        repeated.FinalizeNativeResources();
+        REQUIRE(repeated.CalculateHash() != bc4_hash);
+        sampler[0] ^= 2;
+    }
     texture[0] = 0x78d7ffa1;
     texture[3] = 3U << 6;
     texture[4] = 7U | (2U << 23);

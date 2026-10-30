@@ -48,6 +48,7 @@
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
 #include "video_core/shader_cache.h"
 #include "video_core/shader_environment.h"
+#include "video_core/texture_cache/decode_bc.h"
 #include "video_core/texture_cache/texture_cache_base.h"
 #include "video_core/textures/astc.h"
 #include "video_core/textures/decoders.h"
@@ -1359,20 +1360,22 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
                 features |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
             const bool packed_float = binding->texture.IsB10G11R11Float2D() || volume;
             const bool astc = binding->texture.IsAstc4x4Unorm2D();
+            const bool bc4 = binding->texture.IsBc4UnormRrr1_2D();
             const VkFormat sampled_format = packed_float ? VK_FORMAT_B10G11R11_UFLOAT_PACK32
+                                            : bc4        ? VK_FORMAT_R8_UNORM
                                             : binding->texture.srgb
                                                 ? VK_FORMAT_A8B8G8R8_SRGB_PACK32
                                                 : VK_FORMAT_A8B8G8R8_UNORM_PACK32;
-            if (astc) {
+            if (astc || bc4) {
+                const auto decoded_format = bc4 ? VideoCore::Surface::PixelFormat::R8_UNORM
+                                                : VideoCore::Surface::PixelFormat::A8B8G8R8_SRGB;
                 const auto host_surface =
-                    MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, false,
-                                               VideoCore::Surface::PixelFormat::A8B8G8R8_SRGB);
+                    MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, false, decoded_format);
                 const auto host_view =
-                    MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, true,
-                                               VideoCore::Surface::PixelFormat::A8B8G8R8_SRGB);
+                    MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, true, decoded_format);
                 if (!host_surface.attachable || host_surface.format != sampled_format ||
                     host_view.format != sampled_format)
-                    return reject("native decoded ASTC host format unavailable");
+                    return reject("native decoded compressed host format unavailable");
                 features |= VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
                             VK_FORMAT_FEATURE_TRANSFER_DST_BIT |
                             VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
@@ -1384,6 +1387,7 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
             VideoCommon::ImageInfo sampled;
             sampled.format = packed_float ? VideoCore::Surface::PixelFormat::B10G11R11_FLOAT
                              : astc       ? VideoCore::Surface::PixelFormat::ASTC_2D_4X4_SRGB
+                             : bc4        ? VideoCore::Surface::PixelFormat::BC4_UNORM
                              : binding->texture.srgb
                                  ? VideoCore::Surface::PixelFormat::A8B8G8R8_SRGB
                                  : VideoCore::Surface::PixelFormat::A8B8G8R8_UNORM;
@@ -1395,31 +1399,44 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
             if (VideoCommon::CalculateGuestSizeInBytes(sampled) != size)
                 return reject("native sampled-image footprint mismatch");
             std::vector<u8> uploaded_pixels;
-            if (astc) {
+            if (astc || bc4) {
                 // Native C797 color blocklinear images use Turing's sector
                 // order. Require the complete generic mapping,
                 // not just an opaque descriptor preset or the first page kind.
                 if (gpu_memory->GetPageKind(mip->address) != Tegra::PTEKind::GENERIC_16BX2 ||
                     gpu_memory->GetMemoryLayoutSize(mip->address, size) < size)
-                    return reject("unsupported native ASTC memory kind");
+                    return reject("unsupported native compressed memory kind");
                 std::vector<u8> tiled;
                 if (!snapshot(mip->address, size, tiled))
-                    return reject("native ASTC backing or coherence");
+                    return reject("native compressed backing or coherence");
                 const u64 columns = (u64{mip->width} + 3) / 4;
                 const u64 rows = (u64{mip->height} + 3) / 4;
-                const u64 linear_size = columns * rows * 16;
-                const u64 decoded_size = u64{mip->width} * mip->height * 4;
+                const u32 bytes_per_block = bc4 ? 8 : 16;
+                const u64 linear_size = columns * rows * bytes_per_block;
+                const u64 decoded_size = u64{mip->width} * mip->height * (bc4 ? 1 : 4);
                 if (linear_size > SnapshotLimit - snapshot_bytes ||
                     decoded_size > SnapshotLimit - snapshot_bytes - linear_size)
-                    return reject("native ASTC decode exceeds snapshot capacity");
+                    return reject("native compressed decode exceeds snapshot capacity");
                 snapshot_bytes += linear_size + decoded_size;
                 std::vector<u8> linear(static_cast<size_t>(linear_size));
-                Tegra::Texture::UnswizzleTexture(linear, tiled, 16, static_cast<u32>(columns),
-                                                 static_cast<u32>(rows), 1, mip->block_height, 0, 1,
+                Tegra::Texture::UnswizzleTexture(linear, tiled, bytes_per_block,
+                                                 static_cast<u32>(columns), static_cast<u32>(rows),
+                                                 1, mip->block_height, 0, 1,
                                                  Tegra::Texture::BlockLinearLayout::TuringColor2D);
                 uploaded_pixels.resize(static_cast<size_t>(decoded_size));
-                Tegra::Texture::ASTC::Decompress(linear, mip->width, mip->height, 1, 4, 4,
-                                                 uploaded_pixels);
+                if (bc4) {
+                    // The decoder emits R8. Its block-row stride uses a full
+                    // four-pixel block except when the entire image is narrower.
+                    VideoCommon::BufferImageCopy copy{
+                        .buffer_row_length = static_cast<u32>(columns) * (std::min)(mip->width, 4U),
+                        .image_subresource = {},
+                        .image_extent = sampled.size,
+                    };
+                    VideoCommon::DecompressBCn(linear, uploaded_pixels, copy, sampled.format);
+                } else {
+                    Tegra::Texture::ASTC::Decompress(linear, mip->width, mip->height, 1, 4, 4,
+                                                     uploaded_pixels);
+                }
                 if (stop_token.stop_requested())
                     return false;
             }
@@ -1433,9 +1450,12 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
                 .minFilter = sampler.min_filter == 1 ? VK_FILTER_NEAREST : VK_FILTER_LINEAR,
                 .mipmapMode = sampler.mip_filter == 3 ? VK_SAMPLER_MIPMAP_MODE_LINEAR
                                                       : VK_SAMPLER_MIPMAP_MODE_NEAREST,
-                .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-                .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-                .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                .addressModeU = sampler.wrap[0] == 0 ? VK_SAMPLER_ADDRESS_MODE_REPEAT
+                                                     : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                .addressModeV = sampler.wrap[1] == 0 ? VK_SAMPLER_ADDRESS_MODE_REPEAT
+                                                     : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                .addressModeW = sampler.wrap[2] == 0 ? VK_SAMPLER_ADDRESS_MODE_REPEAT
+                                                     : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
                 .mipLodBias = 0.f,
                 .anisotropyEnable = VK_FALSE,
                 .maxAnisotropy = 1.f,
@@ -1562,14 +1582,16 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
             }
             if (!sampled.uploaded_pixels.empty()) {
                 // Keep the decoded asset private to this draw. It must not be
-                // registered as an overlapping RGBA interpretation of guest ASTC.
+                // registered as an overlapping interpretation of guest blocks.
                 if (buffer_cache.IsRegionGpuModified(
                         sampled.backing, VideoCommon::CalculateGuestSizeInBytes(sampled.info)) ||
                     texture_cache.IsRegionGpuModified(
                         sampled.backing, VideoCommon::CalculateGuestSizeInBytes(sampled.info)))
                     return false;
                 auto host_info = sampled.info;
-                host_info.format = VideoCore::Surface::PixelFormat::A8B8G8R8_SRGB;
+                const bool bc4 = sampled.info.format == VideoCore::Surface::PixelFormat::BC4_UNORM;
+                host_info.format = bc4 ? VideoCore::Surface::PixelFormat::R8_UNORM
+                                       : VideoCore::Surface::PixelFormat::A8B8G8R8_SRGB;
                 const u64 host_size = VideoCommon::CalculateGuestSizeInBytes(host_info);
                 if (host_size > SnapshotLimit - native_sample_copy_bytes)
                     return false;
@@ -1603,16 +1625,23 @@ bool RasterizerVulkan::DrawNativeIndexed(const Tegra::Control::NativeIndexedDraw
                         .image = uploaded.Handle(),
                         .viewType = VK_IMAGE_VIEW_TYPE_2D,
                         .format = sampled.host_format,
-                        .components = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-                                       VK_COMPONENT_SWIZZLE_IDENTITY,
-                                       VK_COMPONENT_SWIZZLE_IDENTITY},
+                        .components =
+                            bc4 ? VkComponentMapping{VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R,
+                                                     VK_COMPONENT_SWIZZLE_R,
+                                                     VK_COMPONENT_SWIZZLE_ONE}
+                                : VkComponentMapping{VK_COMPONENT_SWIZZLE_IDENTITY,
+                                                     VK_COMPONENT_SWIZZLE_IDENTITY,
+                                                     VK_COMPONENT_SWIZZLE_IDENTITY,
+                                                     VK_COMPONENT_SWIZZLE_IDENTITY},
                         .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
                     }));
                 sampled_images.push_back(
                     {sampled.stage, sampled.index, *native_sample_views.back(), sampled.sampler});
-                LOG_DEBUG(HW_GPU, "Native ASTC upload: address={:#x}, extent={}x{}, bytes={}",
-                          sampled.address, sampled.info.size.width, sampled.info.size.height,
-                          sampled.uploaded_pixels.size());
+                LOG_DEBUG(
+                    HW_GPU,
+                    "Native compressed upload: format={}, address={:#x}, extent={}x{}, bytes={}",
+                    sampled.info.format, sampled.address, sampled.info.size.width,
+                    sampled.info.size.height, sampled.uploaded_pixels.size());
                 continue;
             }
             // The descriptor's opaque registration preset cannot identify a

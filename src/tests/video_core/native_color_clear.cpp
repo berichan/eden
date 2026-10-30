@@ -14,6 +14,7 @@
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/memory_manager.h"
 #include "video_core/renderer_null/null_rasterizer.h"
+#include "video_core/texture_cache/decode_bc.h"
 #include "video_core/texture_cache/util.h"
 #include "video_core/textures/astc.h"
 #include "video_core/textures/decoders.h"
@@ -50,6 +51,51 @@ VideoCommon::ImageInfo NativeTargetInfo(VideoCore::Surface::PixelFormat format) 
     return info;
 }
 } // namespace
+
+TEST_CASE("Native BC4 sectors retain endpoints, interpolants and clipped edge blocks",
+          "[native-shader]") {
+    for (const auto [width, height, bh] :
+         std::array<std::array<u32, 3>, 4>{{{1, 1, 0}, {3, 5, 0}, {13, 9, 0}, {36, 132, 2}}}) {
+        const u32 columns = (width + 3) / 4, rows = (height + 3) / 4;
+        const u32 pitch_gobs = (columns * 8 + 63) / 64;
+        const u32 tile_rows = 8U << bh;
+        std::vector<u8> tiled(pitch_gobs * 64 * ((rows + tile_rows - 1) & ~(tile_rows - 1)), 0xa5);
+        for (u32 row = 0; row < rows; ++row) {
+            for (u32 column = 0; column < columns; ++column) {
+                const bool ascending = (row + column) & 1;
+                u64 block = ascending ? 14U | (210U << 8) : 210U | (14U << 8);
+                for (u32 index = 0; index < 16; ++index)
+                    block |= u64{index % 8} << (16 + 3 * index);
+                for (u32 byte = 0; byte < 8; ++byte)
+                    tiled[NativeOffset(column * 8 + byte, row, pitch_gobs, bh)] =
+                        static_cast<u8>(block >> (8 * byte));
+            }
+        }
+        std::vector<u8> linear(columns * rows * 8), guarded(width * height + 32, 0xcd);
+        Tegra::Texture::UnswizzleTexture(linear, tiled, 8, columns, rows, 1, bh, 0, 1,
+                                         Layout::TuringColor2D);
+        VideoCommon::BufferImageCopy copy{
+            .buffer_row_length = columns * (std::min)(width, 4U),
+            .image_subresource = {},
+            .image_extent = {width, height, 1},
+        };
+        auto pixels = std::span{guarded}.subspan(16, width * height);
+        VideoCommon::DecompressBCn(linear, pixels, copy,
+                                   VideoCore::Surface::PixelFormat::BC4_UNORM);
+        constexpr std::array<u8, 8> descending{210, 14, 182, 154, 126, 98, 70, 42};
+        constexpr std::array<u8, 8> ascending{14, 210, 53, 92, 131, 170, 0, 255};
+        for (u32 y = 0; y < height; ++y) {
+            for (u32 x = 0; x < width; ++x) {
+                const auto& table = ((x / 4 + y / 4) & 1) ? ascending : descending;
+                REQUIRE(pixels[y * width + x] == table[((y % 4) * 4 + x % 4) % 8]);
+            }
+        }
+        for (u32 i = 0; i < 16; ++i) {
+            REQUIRE(guarded[i] == 0xcd);
+            REQUIRE(guarded[guarded.size() - 1 - i] == 0xcd);
+        }
+    }
+}
 
 TEST_CASE("Native ASTC color sectors decode clipped edge blocks", "[native-shader]") {
     constexpr u32 width = 13, height = 9;

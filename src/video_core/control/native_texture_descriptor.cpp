@@ -92,6 +92,12 @@ bool NativeTextureDescriptor::IsAstc4x4Unorm2D() const {
            swizzle == std::array<u32, 4>{2, 3, 4, 5};
 }
 
+bool NativeTextureDescriptor::IsBc4UnormRrr1_2D() const {
+    return format == 0x27 && (type == 1 || type == 7) && depth == 1 && samples == 0 && !packed &&
+           !depth_texture && !srgb && component_types == std::array<u32, 4>{2, 2, 2, 2} &&
+           swizzle == std::array<u32, 4>{2, 2, 2, 7};
+}
+
 std::optional<NativeSamplerDescriptor> NativeSamplerDescriptor::Decode(
     const NativeDescriptorWords& words) {
     // C797's three-bit MAG_FILTER and two-bit cube enum differ from legacy TSCEntry.
@@ -133,16 +139,18 @@ std::optional<NativeSamplerDescriptor> NativeSamplerDescriptor::Decode(
 std::optional<NativeSampledMip> SelectNativeSampledMip(const NativeTextureDescriptor& texture,
                                                        const NativeSamplerDescriptor& sampler) {
     const bool astc = texture.IsAstc4x4Unorm2D();
+    const bool bc4 = texture.IsBc4UnormRrr1_2D();
+    const bool compressed = astc || bc4;
     const bool volume = texture.IsB10G11R11Float3D();
     if (!(texture.IsRgba8Unorm2D() || (astc && texture.srgb) || texture.IsB10G11R11Float2D() ||
-          volume) ||
+          volume || bc4) ||
         !texture.normalized || texture.block_width || (!volume && texture.block_depth) ||
         texture.tile_width || texture.gob3d || texture.gob_depth_offset || texture.view_min_mip ||
         !sampler.srgb || (texture.words[7] & 0xfff000) || (texture.words[6] & 0x387fffc0U) ||
         sampler.depth_compare || sampler.force_unnormalized || sampler.reduction ||
         sampler.anisotropy || sampler.lod_bias || sampler.integer_only_nearest_lod ||
         sampler.mag_filter != sampler.min_filter || (sampler.words[1] & 0x7c000000U) ||
-        sampler.wrap != std::array<u32, 3>{2, 2, 2})
+        std::ranges::any_of(sampler.wrap, [](u32 mode) { return mode != 0 && mode != 2; }))
         return std::nullopt;
     // The SDK installs these registration/sampler presets. Preserve their raw
     // identity; they cannot establish a layout for an arbitrary uploaded image.
@@ -165,9 +173,9 @@ std::optional<NativeSampledMip> SelectNativeSampledMip(const NativeTextureDescri
         texture.address >= AddressLimit || !texture.width || texture.width > 131072 ||
         !texture.height || texture.height > 131072 || texture.block_height > 5)
         return std::nullopt;
-    // Uploaded ASTC support currently covers a single base level. Color targets
+    // Uploaded compressed images currently cover a single base level. Color targets
     // continue to resolve independently established selected-mip cache images.
-    if (astc && !single_mip)
+    if (compressed && !single_mip)
         return std::nullopt;
     if (volume) {
         // One XY GOB and one complete Z tile. Execution must independently
@@ -190,12 +198,12 @@ std::optional<NativeSampledMip> SelectNativeSampledMip(const NativeTextureDescri
         // Mesa NIL clamps tiling at every LOD before aligning that level. Use
         // 64-bit sizes: native dimension extensions can exceed legacy u32 helpers.
         u32 block_height = texture.block_height;
-        const u64 block_width = astc ? (u64{width} + 3) / 4 : width;
-        const u64 block_rows = astc ? (u64{height} + 3) / 4 : height;
+        const u64 block_width = compressed ? (u64{width} + 3) / 4 : width;
+        const u64 block_rows = compressed ? (u64{height} + 3) / 4 : height;
         while (block_height && block_rows <= (4U << block_height))
             --block_height;
         const u64 tile_height = u64{8} << block_height;
-        const u64 pitch = (block_width * (astc ? 16 : 4) + 63) & ~u64{63};
+        const u64 pitch = (block_width * (astc ? 16 : bc4 ? 8 : 4) + 63) & ~u64{63};
         const u64 aligned_height = (block_rows + tile_height - 1) & ~(tile_height - 1);
         const u64 size = pitch * aligned_height;
         if (offset > AddressLimit - texture.address ||
