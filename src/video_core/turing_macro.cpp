@@ -73,7 +73,9 @@ bool TuringMacroEngine::WriteData(u32 index, u32 value) {
 class TuringMacroEngine::Invocation {
 public:
     Invocation(TuringMacroEngine& engine_, const Host& host_, u32 start, u64 limit_)
-        : engine{engine_}, host{host_}, limit{limit_}, pc{start} {}
+        : engine{engine_}, host{host_}, limit{limit_}, pc{start} {
+        result.entry_point = start;
+    }
 
     Result Run() {
         bool end_next{};
@@ -173,6 +175,8 @@ private:
     u32 Register(u8 reg, u32 slot) {
         if (reg < Zero) {
             if ((defined & (1U << reg)) == 0) {
+                if (result.error == Error::None)
+                    result.undefined_register = reg;
                 Fail(Error::UndefinedRegister);
             }
             return registers[reg];

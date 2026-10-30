@@ -100,6 +100,8 @@ public:
     struct Result {
         Error error{Error::None};
         u32 program_counter{};
+        u32 entry_point{};
+        u32 undefined_register{Zero};
         u64 instructions{};
         u64 parameters{};
         u64 methods{};

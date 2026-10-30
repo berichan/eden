@@ -634,9 +634,10 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
                 const auto& execution = native_macro_processor->GetExecutionResult();
                 LOG_ERROR(HW_GPU,
                           "Native graphics macro failed: method={:#x}, error={}, "
-                          "execution_error={}, pc={:#x}",
+                          "execution_error={}, entry={:#x}, pc={:#x}, undefined_register={}",
                           method, static_cast<u32>(native_macro_processor->GetError()),
-                          static_cast<u32>(execution.error), execution.program_counter);
+                          static_cast<u32>(execution.error), execution.entry_point,
+                          execution.program_counter, execution.undefined_register);
             }
             if (status == Control::NativeMacroProcessor::Status::Accepted && method >= 0x45 &&
                 method <= 0x48) {
