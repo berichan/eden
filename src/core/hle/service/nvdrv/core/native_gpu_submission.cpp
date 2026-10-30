@@ -13,6 +13,7 @@
 #include "core/hle/service/nvdrv/core/native_gpu_error_notifier.h"
 #include "core/hle/service/nvdrv/core/native_gpu_submission.h"
 #include "video_core/control/channel_state.h"
+#include "video_core/control/native_atomic_sequence.h"
 #include "video_core/control/native_gpu_context.h"
 #include "video_core/gpu.h"
 #include "video_core/memory_manager.h"
@@ -26,13 +27,19 @@ struct NativeGpuChannel::Backend {
     std::shared_ptr<Tegra::Control::ChannelState> channel;
     std::array<u32, 8> classes{};
     std::array<u32, 0x40> puller{};
+    Tegra::Control::NativeAtomicSequence atomic_sequence;
 
-    bool Pending(const Tegra::Control::NativeGpuGraphicsContext& context) const {
+    bool PendingEngineWork(const Tegra::Control::NativeGpuGraphicsContext& context) const {
         return context.HasPendingQmd() || context.HasQmdFailure() ||
+               channel->payload->maxwell_3d.HasPendingNativeInstrumentation() ||
                channel->payload->maxwell_3d.HasPendingNativeMacro() ||
                channel->payload->maxwell_3d.HasNativeMacroFailure() ||
                channel->payload->kepler_compute.HasPendingNativeMacro() ||
                channel->payload->kepler_compute.HasNativeMethodFailure();
+    }
+
+    bool Pending(const Tegra::Control::NativeGpuGraphicsContext& context) const {
+        return atomic_sequence.IsActive() || PendingEngineWork(context);
     }
 
     bool Call(Core::System& system, const Tegra::Control::NativeGpuGraphicsContext& context,
@@ -40,6 +47,15 @@ struct NativeGpuChannel::Backend {
         auto& gpu = system.GPU();
         auto& rasterizer = *gpu.Renderer().ReadRasterizer();
         auto& payload = *channel->payload;
+        if (stop_token.stop_requested() || !atomic_sequence.AllowsSubchannel(subchannel)) {
+            return false;
+        }
+        // This restricted scope supports state/ordering commands, not launches or
+        // macros whose output could publish a release before the scope is closed.
+        if ((atomic_sequence.IsActive() || payload.maxwell_3d.HasPendingNativeInstrumentation()) &&
+            (method >= 0xe00 || (classes[subchannel] == 0xc7c0 && method == 0xb0))) {
+            return false;
+        }
         if (method == 0) {
             if ((value & ~0x1fffffU) || Pending(context)) {
                 return false;
@@ -105,6 +121,16 @@ struct NativeGpuChannel::Backend {
             }
             puller[method] = value;
             return true;
+        }
+        if ((classes[subchannel] == 0xc797 || classes[subchannel] == 0xc7c0) &&
+            (method == 0x52 || method == 0x53)) {
+            // The GPU worker cannot bind another channel during this job. Keep scopes
+            // inside that execution boundary; Pending rejects open-scope completion/releases.
+            if (PendingEngineWork(context)) {
+                return false;
+            }
+            return method == 0x52 ? atomic_sequence.Begin(subchannel, value)
+                                  : atomic_sequence.End(subchannel, value);
         }
         switch (classes[subchannel]) {
         case 0xc797:

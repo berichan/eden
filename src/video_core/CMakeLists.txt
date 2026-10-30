@@ -32,6 +32,10 @@ add_library(video_core STATIC
     control/channel_state.h
     control/channel_state_cache.cpp
     control/channel_state_cache.h
+    control/native_atomic_sequence.cpp
+    control/native_atomic_sequence.h
+    control/native_constant_buffer.cpp
+    control/native_constant_buffer.h
     control/native_gpu_context.cpp
     control/native_gpu_context.h
     control/native_graphics_config.cpp

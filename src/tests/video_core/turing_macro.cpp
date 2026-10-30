@@ -616,6 +616,54 @@ TEST_CASE("Native graphics configuration survives channel binding in the same gr
     REQUIRE(state->graphics_config.PolygonOffsetNanIsZero());
 }
 
+TEST_CASE("Native instrumentation initialization retains only its complete metadata pair",
+          "[ipc][video_core]") {
+    Core::System system;
+    Core::DeviceMemory memory;
+    Tegra::MaxwellDeviceMemoryManager backing{memory};
+    Tegra::MemoryManager space{system, backing, 32, 1ULL << 32, 16, 12};
+    auto state = std::make_shared<Tegra::Control::AmpereGraphicsState>();
+    Tegra::Engines::Maxwell3D engine{space};
+    engine.SetNativeMacroState(state);
+    REQUIRE_FALSE(engine.HasPendingNativeInstrumentation());
+    REQUIRE(engine.CallNativeMethod(system, 0x54, 0x49000000, true, {}));
+    REQUIRE(engine.HasPendingNativeInstrumentation());
+    REQUIRE(engine.GetRegisterValue(0x54) == 0x49000000);
+    REQUIRE(engine.CallNativeMethod(system, 0x55, 0x49000001, true, {}));
+    REQUIRE_FALSE(engine.HasPendingNativeInstrumentation());
+    REQUIRE(engine.GetRegisterValue(0x55) == 0x49000001);
+    REQUIRE_FALSE(engine.CallNativeMethod(system, 0x55, 0x49000001, true, {}));
+    REQUIRE(engine.HasNativeMacroFailure());
+    Tegra::Engines::Maxwell3D nested{space};
+    nested.SetNativeMacroState(state);
+    REQUIRE(nested.CallNativeMethod(system, 0x54, 0x49000000, true, {}));
+    REQUIRE_FALSE(nested.CallNativeMethod(system, 0x54, 0x49000000, true, {}));
+    REQUIRE(nested.HasPendingNativeInstrumentation());
+    Tegra::Engines::Maxwell3D wrong_data{space};
+    wrong_data.SetNativeMacroState(state);
+    REQUIRE(wrong_data.CallNativeMethod(system, 0x54, 0x49000000, true, {}));
+    REQUIRE_FALSE(wrong_data.CallNativeMethod(system, 0x55, 0, true, {}));
+    REQUIRE(wrong_data.HasPendingNativeInstrumentation());
+}
+
+TEST_CASE("Native constant-buffer failure preserves the upload cursor", "[ipc][video_core]") {
+    Core::System system;
+    Core::DeviceMemory memory;
+    Tegra::MaxwellDeviceMemoryManager backing{memory};
+    Tegra::MemoryManager space{system, backing, 32, 1ULL << 32, 16, 12};
+    for (u32 port = 0x8e4; port <= 0x8f3; ++port) {
+        Tegra::Engines::Maxwell3D engine{space};
+        engine.SetNativeMacroState(std::make_shared<Tegra::Control::AmpereGraphicsState>());
+        REQUIRE(engine.CallNativeMethod(system, 0x8e0, 32, true, {}));
+        REQUIRE(engine.CallNativeMethod(system, 0x8e1, 0, true, {}));
+        REQUIRE(engine.CallNativeMethod(system, 0x8e2, 0, true, {}));
+        REQUIRE(engine.CallNativeMethod(system, 0x8e3, 4, true, {}));
+        REQUIRE_FALSE(engine.CallNativeMethod(system, port, 0x12345678, true, {}));
+        REQUIRE(engine.GetRegisterValue(0x8e3) == 4);
+        REQUIRE(engine.HasNativeMacroFailure());
+    }
+}
+
 TEST_CASE("Native graphics macro input cannot bypass pending invocation or action guards",
           "[ipc][video_core]") {
     Core::System system;

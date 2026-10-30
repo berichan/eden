@@ -72,6 +72,7 @@ public:
     void SetNativeMacroState(std::shared_ptr<Control::AmpereGraphicsState> native_state);
     bool HasNativeMacroFailure() const;
     bool HasPendingNativeMacro() const;
+    bool HasPendingNativeInstrumentation() const;
     // GPU-worker access only, like the native context settings themselves.
     const Control::NativeGraphicsConfig& GetNativeGraphicsConfig() const;
     bool CallNativeMethod(Core::System& system, u32 method, u32 value, bool last,
@@ -3285,6 +3286,7 @@ private:
     MacroEngine macro_engine;
     std::unique_ptr<Control::NativeMacroProcessor> native_macro_processor;
     bool native_action_failed{};
+    bool native_instrumentation_pending{};
     std::shared_ptr<Control::AmpereGraphicsState> native_graphics_state;
     std::stop_token native_stop_token;
 

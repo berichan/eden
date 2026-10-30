@@ -12,6 +12,7 @@
 #include "common/settings.h"
 #include "core/core.h"
 #include "core/core_timing.h"
+#include "video_core/control/native_constant_buffer.h"
 #include "video_core/control/native_gpu_context.h"
 #include "video_core/control/native_macro_processor.h"
 #include "video_core/dirty_flags.h"
@@ -69,6 +70,7 @@ void Maxwell3D::SetNativeMacroState(std::shared_ptr<Control::AmpereGraphicsState
     macro_segments.clear();
     current_macro_dirty = false;
     native_action_failed = false;
+    native_instrumentation_pending = false;
     native_graphics_state = native_state;
     native_macro_processor =
         native_state ? std::make_unique<Control::NativeMacroProcessor>(std::move(native_state))
@@ -90,6 +92,10 @@ bool Maxwell3D::HasNativeMacroFailure() const {
 
 bool Maxwell3D::HasPendingNativeMacro() const {
     return native_macro_processor && native_macro_processor->HasPendingInvocation();
+}
+
+bool Maxwell3D::HasPendingNativeInstrumentation() const {
+    return native_instrumentation_pending;
 }
 
 const Control::NativeGraphicsConfig& Maxwell3D::GetNativeGraphicsConfig() const {
@@ -575,7 +581,7 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
             &context,
             [](void* context, u32 method, u32& value) {
                 value = static_cast<HostContext*>(context)->engine.GetRegisterValue(method);
-                return true;
+                return method != 0x8e3 || value <= 0xffff;
             },
             [](void* context, u32 method, u32 value) {
                 auto& self = *static_cast<HostContext*>(context);
@@ -583,14 +589,25 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
                     return self.engine.NativeWaitForIdle();
                 }
                 if (NativeVersionRegister(method) || IsNativeVersionSet(method) ||
-                    method == 0x8c4) {
+                    method == 0x8c4 || method == 0x54 || method == 0x55 ||
+                    (method >= 0x8e4 && method <= 0x8f3)) {
                     self.engine.CallMethod(self.system, method, value, true);
                     return !self.engine.HasNativeMacroFailure();
                 }
                 // Native draw/action adapters must opt in before MME can execute those methods.
                 if (!self.engine.IsNativeStateMethod(method)) {
-                    LOG_ERROR(HW_GPU, "Unsupported native graphics macro output method={:#x}",
-                              method);
+                    if (method == 0x6c) {
+                        LOG_ERROR(
+                            HW_GPU,
+                            "Unsupported native inline DMA: flags={:#x}, bytes={:#x}, "
+                            "lines={:#x}, upper={:#x}, lower={:#x}, pitch={:#x}",
+                            value, self.engine.GetRegisterValue(0x60),
+                            self.engine.GetRegisterValue(0x61), self.engine.GetRegisterValue(0x62),
+                            self.engine.GetRegisterValue(0x63), self.engine.GetRegisterValue(0x64));
+                    }
+                    LOG_ERROR(HW_GPU,
+                              "Unsupported native graphics macro output method={:#x}, value={:#x}",
+                              method, value);
                     return false;
                 }
                 self.engine.CallMethod(self.system, method, value, true);
@@ -624,6 +641,50 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
         }
         if (method == 0x44) {
             native_action_failed = !NativeWaitForIdle();
+            return;
+        }
+        if (method == 0x54 || method == 0x55) {
+            // Retain only the initialization metadata pair used by deko3d and the
+            // native stream. Profiling and hardware method forwarding are unsupported.
+            const bool header = method == 0x54;
+            if (native_instrumentation_pending == header ||
+                method_argument != (header ? 0x49000000U : 0x49000001U)) {
+                native_action_failed = true;
+                return;
+            }
+            native_instrumentation_pending = header;
+            ProcessDirtyRegisters(method, method_argument);
+            return;
+        }
+        if (method >= 0x8e4 && method <= 0x8f3) {
+            using Buffer = Control::NativeConstantBuffer;
+            Buffer::Selection selection{GetRegisterValue(0x8e0), GetRegisterValue(0x8e1),
+                                        GetRegisterValue(0x8e2), GetRegisterValue(0x8e3)};
+            const Buffer::Host upload_host{
+                this,
+                [](void* context, GPUVAddr address, size_t size) {
+                    return static_cast<Maxwell3D*>(context)->memory_manager.IsWritableRange(address,
+                                                                                            size);
+                },
+                [](void* context) { return static_cast<Maxwell3D*>(context)->NativeWaitForIdle(); },
+                [](void* context, GPUVAddr address, std::span<const u32> words) {
+                    return static_cast<Maxwell3D*>(context)->memory_manager.WriteBlockChecked(
+                        address, {reinterpret_cast<const u8*>(words.data()), words.size_bytes()});
+                },
+                [](void* context) {
+                    return static_cast<Maxwell3D*>(context)->native_stop_token.stop_requested();
+                },
+            };
+            const auto error =
+                Buffer::Upload(selection, std::span{&method_argument, 1}, upload_host);
+            if (error != Buffer::Error::None) {
+                LOG_ERROR(HW_GPU, "Native constant-buffer upload failed: method={:#x}, error={}",
+                          method, static_cast<u32>(error));
+                native_action_failed = true;
+                return;
+            }
+            ProcessDirtyRegisters(method, method_argument);
+            ProcessDirtyRegisters(0x8e3, selection.offset);
             return;
         }
         if (method == 0x8c4) {
