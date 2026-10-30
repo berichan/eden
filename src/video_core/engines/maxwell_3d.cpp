@@ -1116,6 +1116,12 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
                           "operation={:#x}, error={}",
                           GetRegisterValue(0x6c0), GetRegisterValue(0x6c1), GetRegisterValue(0x6c2),
                           method_argument, static_cast<u32>(result));
+            } else {
+                LOG_DEBUG(HW_GPU,
+                          "Native report release completed: upper={:#x}, lower={:#x}, "
+                          "payload={:#x}, operation={:#x}",
+                          GetRegisterValue(0x6c0), GetRegisterValue(0x6c1), GetRegisterValue(0x6c2),
+                          method_argument);
             }
             return;
         }

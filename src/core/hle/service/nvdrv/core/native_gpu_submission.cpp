@@ -183,6 +183,8 @@ bool NativeGpuChannel::Backend::CallWithGpu(Core::System& system, Tegra::GPU& gp
                     const Tegra::Control::NativeGpuGraphicsContext& graphics;
                     VideoCore::RasterizerInterface& rasterizer;
                     std::stop_token token;
+                    u32 observed{};
+                    bool read{};
                 } acquire_context{context, rasterizer, stop_token};
                 const Acquire::Host
                     host{
@@ -197,13 +199,14 @@ bool NativeGpuChannel::Backend::CallWithGpu(Core::System& system, Tegra::GPU& gp
                                 ->rasterizer.SynchronizeNativeWork();
                         },
                         [](void* opaque, GPUVAddr address, u32& output) {
+                            auto& self = *static_cast<AcquireContext*>(opaque);
                             u32_le data{};
-                            if (!static_cast<AcquireContext*>(opaque)
-                                     ->graphics.GetAddressSpace()
-                                     ->ReadBlockChecked(
-                                         address, {reinterpret_cast<u8*>(&data), sizeof(data)}))
+                            if (!self.graphics.GetAddressSpace()->ReadBlockChecked(
+                                    address, {reinterpret_cast<u8*>(&data), sizeof(data)}))
                                 return false;
                             output = data;
+                            self.observed = output;
+                            self.read = true;
                             return true;
                         },
                         [](void* opaque) {
@@ -212,10 +215,12 @@ bool NativeGpuChannel::Backend::CallWithGpu(Core::System& system, Tegra::GPU& gp
                     };
                 const auto status = Acquire::Check(puller[4], puller[5], puller[6], value, host);
                 if (status != Acquire::Error::None) {
-                    LOG_ERROR(HW_GPU,
-                              "Native semaphore acquire cannot continue: upper={:#x}, "
-                              "lower={:#x}, payload={:#x}, error={}",
-                              puller[4], puller[5], puller[6], static_cast<u32>(status));
+                    LOG_ERROR(
+                        HW_GPU,
+                        "Native semaphore acquire cannot continue: upper={:#x}, "
+                        "lower={:#x}, payload={:#x}, current={:#x}, read={}, channel={}, error={}",
+                        puller[4], puller[5], puller[6], acquire_context.observed,
+                        acquire_context.read, channel->bind_id, static_cast<u32>(status));
                 }
                 return status == Acquire::Error::None;
             }
@@ -233,6 +238,10 @@ bool NativeGpuChannel::Backend::CallWithGpu(Core::System& system, Tegra::GPU& gp
                     address, {reinterpret_cast<const u8*>(&data), sizeof(data)}, stop_token)) {
                 return false;
             }
+            LOG_DEBUG(HW_GPU,
+                      "Native semaphore release completed: address={:#x}, payload={:#x}, "
+                      "operation={:#x}, channel={}",
+                      address, data, value, channel->bind_id);
             break;
         }
         case 0xd: { // C76F MEM_OP_D: serialize supported cache/memory barriers.
@@ -558,6 +567,11 @@ void NativeGpuSubmission::Execute(Core::System& system, std::stop_token stop_tok
             [](void* opaque) { return static_cast<Host*>(opaque)->token.stop_requested(); },
         };
         Stream stream;
+        LOG_DEBUG(HW_GPU,
+                  "Native GPU job started: channel={}, backend={}, sequence={}, syncpoint={}, "
+                  "target={}, entries={}",
+                  channel->GetChannelIndex(), backend.channel->bind_id, sequence, fence.id,
+                  fence.value, entries.size());
         executed = stream.Execute(entries, bindings);
         if (executed.Succeeded() && backend.PendingFrontend(*graphics)) {
             executed.error = Stream::Error::MethodFailed;

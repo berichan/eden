@@ -79,8 +79,13 @@ bool KeplerCompute::CallNativeMethod(u32 method, u32 value, bool last, std::stop
                  return false;
              }
              const u32 payload = static_cast<u32>(release.payload);
-             return self.memory_manager.WriteBackedBlockChecked(
-                 release.address, {reinterpret_cast<const u8*>(&payload), sizeof(payload)}, token);
+             if (!self.memory_manager.WriteBackedBlockChecked(
+                     release.address, {reinterpret_cast<const u8*>(&payload), sizeof(payload)},
+                     token))
+                 return false;
+             LOG_DEBUG(HW_GPU, "Native QMD release completed: address={:#x}, payload={:#x}",
+                       release.address, payload);
+             return true;
          },
          [](void* context) {
              return static_cast<HostContext*>(context)->stop_token.stop_requested();
@@ -104,9 +109,14 @@ bool KeplerCompute::CallNativeMethod(u32 method, u32 value, bool last, std::stop
          },
          [](void* opaque, GPUVAddr address, u32 payload) {
              auto& self = *static_cast<HostContext*>(opaque);
-             return self.owner.memory_manager.WriteBackedBlockChecked(
-                 address, {reinterpret_cast<const u8*>(&payload), sizeof(payload)},
-                 self.stop_token);
+             if (!self.owner.memory_manager.WriteBackedBlockChecked(
+                     address, {reinterpret_cast<const u8*>(&payload), sizeof(payload)},
+                     self.stop_token))
+                 return false;
+             LOG_DEBUG(HW_GPU,
+                       "Native compute report release completed: address={:#x}, payload={:#x}",
+                       address, payload);
+             return true;
          },
          [](void* opaque) {
              return static_cast<HostContext*>(opaque)->stop_token.stop_requested();
