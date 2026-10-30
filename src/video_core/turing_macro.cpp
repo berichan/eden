@@ -54,6 +54,13 @@ bool TuringMacroEngine::UploadInstruction(u32 word) {
     return true;
 }
 
+bool TuringMacroEngine::ReadInstruction(u32 index, EncodedInstruction& words) const {
+    if (index >= InstructionCount || written[index] != 7)
+        return false;
+    words = code[index];
+    return true;
+}
+
 bool TuringMacroEngine::ReadData(u32 index, u32& value) const {
     if (index >= data.size()) {
         return false;

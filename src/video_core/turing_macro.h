@@ -123,6 +123,7 @@ public:
     static Instruction Decode(const EncodedInstruction& words);
     bool SetInstructionPointer(u32 instruction);
     bool UploadInstruction(u32 word);
+    bool ReadInstruction(u32 index, EncodedInstruction& words) const;
     bool ReadData(u32 index, u32& value) const;
     bool WriteData(u32 index, u32 value);
     Result Execute(u32 start, const Host& host, u64 instruction_limit);

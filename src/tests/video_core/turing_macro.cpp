@@ -166,6 +166,24 @@ TEST_CASE("Turing MME decodes reversed instruction words and bounds its uploaded
     REQUIRE(engine.Execute(7, {}, 10).Succeeded());
 }
 
+TEST_CASE("Turing MME instruction reads require a complete bounded upload", "[video_core][ipc]") {
+    Engine engine;
+    Engine::EncodedInstruction words{0xcccccccc, 0xdddddddd, 0xeeeeeeee};
+    const auto original = words;
+    REQUIRE_FALSE(engine.ReadInstruction(0, words));
+    REQUIRE(words == original);
+    REQUIRE(engine.SetInstructionPointer(5));
+    for (u32 count = 0; count < 3; ++count) {
+        REQUIRE_FALSE(engine.ReadInstruction(5, words));
+        REQUIRE(words == original);
+        REQUIRE(engine.UploadInstruction(count + 1));
+    }
+    REQUIRE(engine.ReadInstruction(5, words));
+    REQUIRE(words == Engine::EncodedInstruction{1, 2, 3});
+    REQUIRE_FALSE(engine.ReadInstruction(Engine::InstructionCount, words));
+    REQUIRE(words == Engine::EncodedInstruction{1, 2, 3});
+}
+
 TEST_CASE("Turing MME executes dual ALUs with forwarding and signed arithmetic",
           "[video_core][ipc]") {
     struct Case {

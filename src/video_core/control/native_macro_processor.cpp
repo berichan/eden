@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "common/assert.h"
+#include "common/logging.h"
 #include "common/scope_exit.h"
 #include "video_core/control/native_gpu_context.h"
 #include "video_core/control/native_macro_processor.h"
@@ -120,6 +121,29 @@ NativeMacroProcessor::Status NativeMacroProcessor::CallMethod(u32 method, u32 va
         },
     };
     execution_result = state->macro_engine.Execute(start, bindings, instruction_limit);
+    if (!execution_result.Succeeded()) {
+        // A binding can refer to a different upload than an earlier capture. Keep
+        // fault diagnostics bounded to the failing instruction and its predecessors.
+        const auto fault = execution_result.program_counter;
+        const auto first = fault > 3 ? fault - 3 : 0;
+        for (u32 pc = first; pc <= fault && pc < TuringMacroEngine::InstructionCount; ++pc) {
+            TuringMacroEngine::EncodedInstruction words;
+            if (!state->macro_engine.ReadInstruction(pc, words))
+                continue;
+            const auto inst = TuringMacroEngine::Decode(words);
+            LOG_DEBUG(
+                HW_GPU,
+                "Native macro fault instruction: pc={:#x}, end={}, predicate={}/{}, "
+                "alu0={}/{}/{}/{}/{:#x}, alu1={}/{}/{}/{}/{:#x}, output0={}/{}, output1={}/{}",
+                pc, inst.end_next, inst.predicate_mode, inst.predicate,
+                static_cast<u32>(inst.alu[0].operation), inst.alu[0].destination,
+                inst.alu[0].source_a, inst.alu[0].source_b, inst.immediate[0],
+                static_cast<u32>(inst.alu[1].operation), inst.alu[1].destination,
+                inst.alu[1].source_a, inst.alu[1].source_b, inst.immediate[1],
+                inst.output[0].method, inst.output[0].emit, inst.output[1].method,
+                inst.output[1].emit);
+        }
+    }
     return execution_result.Succeeded() ? Status::Accepted : fail(Error::ExecutionFailed);
 }
 
