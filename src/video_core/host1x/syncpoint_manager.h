@@ -80,6 +80,10 @@ public:
 
     void IncrementHost(u32 syncpoint_id);
 
+    // Commit a bounded native FIFO completion after real work has drained. Both
+    // counters become visible before any guest or host notification is invoked.
+    bool PublishNativeCompletion(u32 syncpoint_id, u32 target, u32 increments);
+
     void WaitGuest(u32 syncpoint_id, u32 expected_value);
 
     void WaitHost(u32 syncpoint_id, u32 expected_value);

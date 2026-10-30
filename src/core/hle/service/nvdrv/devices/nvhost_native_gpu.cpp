@@ -124,6 +124,11 @@ NvResult nvhost_native_gpu::Ioctl1(DeviceFD fd, Ioctl command, std::span<const u
         std::array<u32_le, 2> params;
         std::memcpy(params.data(), input.data(), sizeof(params));
         const auto result = channels.AllocateObjectContext(fd, owner, params[0], params[1]);
+        if (result != NvResult::Success) {
+            LOG_DEBUG(Service_NVDRV,
+                      "Native object context rejected: fd={}, class={:#x}, flags={:#x}, result={}",
+                      fd, params[0], params[1], static_cast<u32>(result));
+        }
         if (result == NvResult::Success) {
             // The native driver preserves the opaque obj_id field in this ABI.
             std::memmove(output.data(), input.data(), RequestSize);
@@ -230,6 +235,10 @@ NvResult nvhost_native_gpu::Ioctl2(DeviceFD fd, Ioctl command, std::span<const u
         const auto result =
             channels.ReserveSubmission(&job, &fence, fd, owner, entries, request[3], request[5]);
         if (result != NvResult::Success) {
+            LOG_DEBUG(Service_NVDRV,
+                      "Native submission rejected: fd={}, entries={}, flags={:#x}, increments={}, "
+                      "result={}",
+                      fd, count, request[3], request[5], static_cast<u32>(result));
             return result;
         }
         if (!system.IsPoweredOn()) {
@@ -239,13 +248,14 @@ NvResult nvhost_native_gpu::Ioctl2(DeviceFD fd, Ioctl command, std::span<const u
         if (!system.GPU().PushNativeGPUJob(job)) {
             return NvResult::Busy;
         }
+        LOG_DEBUG(Service_NVDRV,
+                  "Native GPU job queued: fd={}, entries={}, syncpoint={}, counter={}, "
+                  "flags={:#x}, increments={}",
+                  fd, count, fence.id, fence.value, request[3], request[5]);
         request[3] = 0;
         request[4] = static_cast<u32>(fence.id);
         request[5] = fence.value;
         std::memcpy(output.data(), request.data(), RequestSize);
-        LOG_DEBUG(Service_NVDRV,
-                  "Native GPU job queued: fd={}, entries={}, syncpoint={}, counter={}", fd, count,
-                  fence.id, fence.value);
         return NvResult::Success;
     } catch (const std::bad_alloc&) {
         return NvResult::InsufficientMemory;

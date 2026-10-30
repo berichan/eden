@@ -2,8 +2,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <array>
+#include <atomic>
+#include <barrier>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
+#include <thread>
 #include <catch2/catch_test_macros.hpp>
 #include "common/swap.h"
 #include "core/core.h"
@@ -50,12 +54,15 @@ struct Fixture {
     std::shared_ptr<NvCore::NativeGpuSchedulingGroup> group =
         std::make_shared<NvCore::NativeGpuSchedulingGroup>(owner);
     std::shared_ptr<NvCore::NativeGpuChannel> channel;
-    Fixture() {
+    explicit Fixture(u32 initial_fence = 0) {
         REQUIRE(channels.Allocate(4, owner, 0) == NvResult::Success);
         channel = channels.Get(4, owner);
         REQUIRE(channel->BindAddressSpace(space) == NvResult::Success);
         REQUIRE(channel->BindGroup(group, 0) == NvResult::Success);
         REQUIRE(channels.AllocateObjectContext(4, owner, 0xc797, 0) == NvResult::Success);
+        if (initial_fence) {
+            REQUIRE(syncpoints.PublishNativeCompletion(17, initial_fence, initial_fence));
+        }
         NvFence fence;
         REQUIRE(channels.AllocateCommandRing(&fence, 4, owner, 8, 3, 0) == NvResult::Success);
     }
@@ -109,7 +116,11 @@ TEST_CASE("Queued native jobs retain resources and cancel without GPU initializa
     Fixture fixture;
     using Job = NvCore::NativeGpuSubmission;
     std::shared_ptr<Job> job;
-    REQUIRE(fixture.Reserve(job) == NvResult::Success);
+    const std::array<u64, 1> entries{};
+    NvFence fence{};
+    REQUIRE(fixture.channels.ReserveSubmission(&job, &fence, 4, fixture.owner, entries, 0x104, 1) ==
+            NvResult::Success);
+    REQUIRE(fence.value == 1);
     REQUIRE(job->MarkQueued());
     const std::weak_ptr<Tegra::MemoryManager> retained_space = fixture.space;
     fixture.channels.Close(4, fixture.owner);
@@ -123,6 +134,7 @@ TEST_CASE("Queued native jobs retain resources and cancel without GPU initializa
     REQUIRE(job->GetState() == Job::State::Cancelled);
     REQUIRE(job->GetResult().error == Tegra::Control::NativeCommandStream::Error::Cancelled);
     REQUIRE(fixture.syncpoints.GetHostSyncpointValue(17) == 0);
+    REQUIRE(fixture.syncpoints.GetGuestSyncpointValue(17) == 0);
     job.reset();
     REQUIRE(retained_space.expired());
     REQUIRE(fixture.channels.Allocate(6, fixture.owner, 0) == NvResult::Success);
@@ -137,7 +149,8 @@ TEST_CASE("Native queue rejection and ioctl validation preserve outputs and rese
         REQUIRE(fixture.Reserve(job, 1, flags) == NvResult::NotSupported);
         REQUIRE_FALSE(job);
     }
-    REQUIRE(fixture.Reserve(job, 1, 0x104, 1) == NvResult::NotSupported);
+    REQUIRE(fixture.Reserve(job, 1, 0x104, 65) == NvResult::BadParameter);
+    REQUIRE(fixture.Reserve(job, 1, 4, 1) == NvResult::NotSupported);
     REQUIRE(fixture.Reserve(job, 0) == NvResult::BadParameter);
     REQUIRE(fixture.Reserve(job) == NvResult::Success);
     auto queue = std::make_unique<VideoCommon::GPUThread::ThreadManager>(fixture.system);
@@ -171,6 +184,153 @@ TEST_CASE("Native queue rejection and ioctl validation preserve outputs and rese
     REQUIRE(output.front() == 0xcc);
     REQUIRE(output.back() == 0xcc);
     REQUIRE(fixture.Reserve(job, 7) == NvResult::Success);
+}
+
+TEST_CASE("Native counted fences reserve targets and roll back failed queue publication",
+          "[core][ipc]") {
+    Fixture fixture;
+    using Job = NvCore::NativeGpuSubmission;
+    const std::array<u64, 1> entries{};
+    std::shared_ptr<Job> first, second, third;
+    NvFence fence{-1, 0xcccccccc};
+    const auto reserve = [&](auto& job, u32 flags, u32 increments) {
+        return fixture.channels.ReserveSubmission(&job, &fence, 4, fixture.owner, entries, flags,
+                                                  increments);
+    };
+    REQUIRE(reserve(first, 0x104, 65) == NvResult::BadParameter);
+    REQUIRE(fence.id == -1);
+    REQUIRE(fence.value == 0xcccccccc);
+    REQUIRE(reserve(first, 0x104, 1) == NvResult::Success);
+    REQUIRE(fence.value == 1);
+    REQUIRE(reserve(second, 0x114, 2) == NvResult::Success);
+    REQUIRE(fence.value == 3);
+    REQUIRE(fixture.syncpoints.GetHostSyncpointValue(17) == 0);
+    REQUIRE(fixture.syncpoints.GetGuestSyncpointValue(17) == 0);
+    REQUIRE(first->MarkQueued());
+    REQUIRE(second->MarkQueued());
+    second->CancelUnpublished();
+    REQUIRE(second->GetState() == Job::State::Cancelled);
+    REQUIRE(reserve(third, 0x104, 4) == NvResult::Success);
+    REQUIRE(fence.value == 5);
+    third.reset();
+    REQUIRE(reserve(third, 0x104, 1) == NvResult::Success);
+    REQUIRE(fence.value == 2);
+    third.reset();
+    REQUIRE(reserve(third, 0x104, 64) == NvResult::Success);
+    REQUIRE(fence.value == 65);
+    third.reset();
+    first->Cancel();
+    REQUIRE(reserve(third, 0x104, 1) == NvResult::InvalidState);
+    REQUIRE(fixture.syncpoints.GetHostSyncpointValue(17) == 0);
+    REQUIRE(fixture.syncpoints.GetGuestSyncpointValue(17) == 0);
+}
+
+TEST_CASE("Native counted reservations reject overflow and reuse unpublished tail targets",
+          "[core][ipc]") {
+    Fixture fixture{std::numeric_limits<u32>::max() - 1};
+    const std::array<u64, 1> entries{};
+    std::shared_ptr<NvCore::NativeGpuSubmission> job;
+    NvFence fence{};
+    REQUIRE(fixture.channels.ReserveSubmission(&job, &fence, 4, fixture.owner, entries, 0x104, 2) ==
+            NvResult::OverFlow);
+    REQUIRE(fixture.channels.ReserveSubmission(&job, &fence, 4, fixture.owner, entries, 0x104, 1) ==
+            NvResult::Success);
+    REQUIRE(fence.value == std::numeric_limits<u32>::max());
+    job.reset();
+    REQUIRE(fixture.channels.ReserveSubmission(&job, &fence, 4, fixture.owner, entries, 0x114, 1) ==
+            NvResult::Success);
+    REQUIRE(fence.value == std::numeric_limits<u32>::max());
+    REQUIRE(job->MarkQueued());
+    job->CancelUnpublished();
+    job.reset();
+    REQUIRE(fixture.channels.ReserveSubmission(&job, &fence, 4, fixture.owner, entries, 4, 0) ==
+            NvResult::Success);
+    REQUIRE(fence.value == std::numeric_limits<u32>::max() - 1);
+}
+
+TEST_CASE("Cancelling an earlier native counted reservation cannot bridge a fence gap",
+          "[core][ipc]") {
+    Fixture fixture;
+    const std::array<u64, 1> entries{};
+    std::shared_ptr<NvCore::NativeGpuSubmission> first, second, third;
+    NvFence fence{};
+    REQUIRE(fixture.channels.ReserveSubmission(&first, &fence, 4, fixture.owner, entries, 0x104,
+                                               1) == NvResult::Success);
+    REQUIRE(fixture.channels.ReserveSubmission(&second, &fence, 4, fixture.owner, entries, 0x104,
+                                               0) == NvResult::Success);
+    REQUIRE(fence.value == 1);
+    first->Cancel();
+    REQUIRE_FALSE(second->MarkQueued());
+    REQUIRE(fixture.channels.ReserveSubmission(&third, &fence, 4, fixture.owner, entries, 0x104,
+                                               1) == NvResult::InvalidState);
+    REQUIRE(fixture.syncpoints.GetHostSyncpointValue(17) == 0);
+    REQUIRE(fixture.syncpoints.GetGuestSyncpointValue(17) == 0);
+}
+
+TEST_CASE("Native completion publishes both counters before all ready notifications",
+          "[core][ipc]") {
+    Tegra::Host1x::SyncpointManager syncpoints;
+    bool guest_seen{}, host_seen{}, after_throw{}, future_seen{};
+    const auto check_counters = [&] {
+        REQUIRE(syncpoints.GetGuestSyncpointValue(17) == 3);
+        REQUIRE(syncpoints.GetHostSyncpointValue(17) == 3);
+    };
+    syncpoints.RegisterGuestAction(17, 1, [&] {
+        check_counters();
+        guest_seen = true;
+    });
+    syncpoints.RegisterGuestAction(17, 2, [] { throw std::runtime_error("notification failed"); });
+    syncpoints.RegisterGuestAction(17, 3, [&] { after_throw = true; });
+    syncpoints.RegisterHostAction(17, 3, [&] {
+        check_counters();
+        host_seen = true;
+    });
+    syncpoints.RegisterHostAction(17, 4, [&] { future_seen = true; });
+    REQUIRE_FALSE(syncpoints.PublishNativeCompletion(17, 3, 2));
+    REQUIRE(syncpoints.GetGuestSyncpointValue(17) == 0);
+    REQUIRE(syncpoints.GetHostSyncpointValue(17) == 0);
+    REQUIRE(syncpoints.PublishNativeCompletion(17, 3, 3));
+    REQUIRE(guest_seen);
+    REQUIRE(host_seen);
+    REQUIRE(after_throw);
+    REQUIRE_FALSE(future_seen);
+    REQUIRE_FALSE(syncpoints.PublishNativeCompletion(17, 5, 1));
+    REQUIRE_FALSE(syncpoints.PublishNativeCompletion(17, 0, 1));
+    REQUIRE_FALSE(syncpoints.PublishNativeCompletion(17, 3, 0));
+    REQUIRE_FALSE(syncpoints.PublishNativeCompletion(448, 1, 1));
+    syncpoints.IncrementGuest(17);
+    syncpoints.IncrementHost(17);
+    REQUIRE(future_seen);
+    REQUIRE(syncpoints.PublishNativeCompletion(17, 5, 1));
+}
+
+TEST_CASE("Concurrent native fence registration observes the published host counter",
+          "[core][ipc]") {
+    Tegra::Host1x::SyncpointManager syncpoints;
+    constexpr u32 Count = 10000;
+    std::barrier start{2};
+    std::atomic<bool> ordered{true};
+    std::atomic<u32> notified{};
+    std::jthread registration([&] {
+        start.arrive_and_wait();
+        for (u32 target = 1; target <= Count; ++target) {
+            syncpoints.RegisterGuestAction(17, target, [&, target] {
+                if (syncpoints.GetHostSyncpointValue(17) < target) {
+                    ordered.store(false);
+                }
+                notified.fetch_add(1);
+            });
+        }
+    });
+    start.arrive_and_wait();
+    bool published = true;
+    for (u32 target = 1; target <= Count; ++target) {
+        published &= syncpoints.PublishNativeCompletion(17, target, 1);
+    }
+    registration.join();
+    REQUIRE(published);
+    REQUIRE(ordered.load());
+    REQUIRE(notified.load() == Count);
 }
 
 TEST_CASE("Retired channel caches release state and preserve distinct address-space slots",

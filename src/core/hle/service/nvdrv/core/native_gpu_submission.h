@@ -26,6 +26,8 @@ public:
     bool MarkQueued();
     void Execute(Core::System& system, std::stop_token stop_token);
     void Cancel();
+    // Only the producer may use this after an enqueue failed, before worker visibility.
+    void CancelUnpublished();
     State GetState() const;
     Tegra::Control::NativeCommandStream::Result GetResult() const;
     const std::vector<u64>& GetEntries() const;
@@ -33,7 +35,7 @@ public:
 private:
     friend class NativeGpuChannel;
     NativeGpuSubmission(std::shared_ptr<NativeGpuChannel> channel, std::vector<u64> entries,
-                        NvFence fence);
+                        NvFence fence, u32 increments);
     void Release();
     void Finish(State state, Tegra::Control::NativeCommandStream::Result result);
 
@@ -42,6 +44,7 @@ private:
     const std::shared_ptr<const Tegra::Control::NativeGpuGraphicsContext> graphics;
     const std::vector<u64> entries;
     const NvFence fence;
+    const u32 increments;
     const std::optional<u32> timeout;
     u64 sequence{};
     std::atomic<State> state{State::Reserved};

@@ -83,7 +83,7 @@ bool ThreadManager::SubmitNative(
     }
     const u64 fence = state.last_fence + 1;
     if (!state.queue.TryEmplace(CommandData{SubmitNativeCommand{submission}}, fence, false)) {
-        submission->Cancel();
+        submission->CancelUnpublished();
         return false;
     }
     state.last_fence = fence;

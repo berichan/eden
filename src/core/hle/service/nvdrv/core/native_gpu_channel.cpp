@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <iterator>
 #include <limits>
 #include <new>
 #include <stdexcept>
@@ -339,8 +340,8 @@ NvResult NativeGpuChannel::AllocateCommandRing(NvFence* out_fence, u32 entries, 
     } catch (const std::length_error&) {
         return NvResult::InsufficientMemory;
     }
-    *out_fence = NvFence{static_cast<s32>(syncpoint->GetId()),
-                         manager.GetHostSyncpointValue(syncpoint->GetId())};
+    reserved_fence = manager.GetHostSyncpointValue(syncpoint->GetId());
+    *out_fence = NvFence{static_cast<s32>(syncpoint->GetId()), reserved_fence};
     return NvResult::Success;
 }
 
@@ -364,13 +365,18 @@ void NativeGpuChannel::Close() {
 NvResult NativeGpuChannel::ReserveSubmission(std::shared_ptr<NativeGpuSubmission>* out_job,
                                              NvFence* out_fence,
                                              const std::shared_ptr<NativeGpuChannel>& self,
-                                             std::span<const u64> entries, u32 flags, u32 increment,
-                                             Tegra::Host1x::SyncpointManager& manager) {
+                                             std::span<const u64> entries, u32 flags,
+                                             u32 increment) {
     if (*out_job) {
         return NvResult::BadParameter;
     }
-    if ((flags & ~0x104U) || increment != 0) {
+    if ((flags & ~0x114U) || (!(flags & 0x100U) && increment != 0)) {
         return NvResult::NotSupported;
+    }
+    // The native bit-8 extension requests ordered completion increments. Keep the
+    // supported count bounded; WAIT and the separate bit-1 increment mode stay rejected.
+    if (increment > 64) {
+        return NvResult::BadParameter;
     }
     if (entries.empty() || entries.size() > Tegra::Control::NativeCommandStream::MaxEntries) {
         return NvResult::BadParameter;
@@ -388,18 +394,19 @@ NvResult NativeGpuChannel::ReserveSubmission(std::shared_ptr<NativeGpuSubmission
     if (slot == command_ring->jobs.end()) {
         return NvResult::Busy;
     }
-    if (next_submission == 0) {
+    if (next_submission == 0 || increment > std::numeric_limits<u32>::max() - reserved_fence) {
         return NvResult::OverFlow;
     }
-    const NvFence submitted_fence{static_cast<s32>(syncpoint->GetId()),
-                                  manager.GetHostSyncpointValue(syncpoint->GetId())};
+    const NvFence submitted_fence{static_cast<s32>(syncpoint->GetId()), reserved_fence + increment};
     try {
         auto submission = std::shared_ptr<NativeGpuSubmission>(new NativeGpuSubmission(
-            self, std::vector<u64>{entries.begin(), entries.end()}, submitted_fence));
+            self, std::vector<u64>{entries.begin(), entries.end()}, submitted_fence, increment));
         const u32 slot_index = static_cast<u32>(slot - command_ring->jobs.begin());
         const u32 count = static_cast<u32>(entries.size());
         pending_submissions.push_back({next_submission, slot_index, count});
+        pending_submissions.back().increments = increment;
         submission->sequence = next_submission++;
+        reserved_fence = submitted_fence.value;
         *slot = {ring_put, count, submitted_fence.value};
         const u32 mask = static_cast<u32>(command_ring->entries.size() - 1);
         for (const u64 entry : entries) {
@@ -415,17 +422,34 @@ NvResult NativeGpuChannel::ReserveSubmission(std::shared_ptr<NativeGpuSubmission
     return NvResult::Success;
 }
 
-void NativeGpuChannel::ReleaseSubmission(u64 sequence) {
-    std::scoped_lock lock{mutex};
-    const auto found =
-        std::ranges::find(pending_submissions, sequence, &PendingSubmission::sequence);
-    ASSERT(found != pending_submissions.end() && !found->released);
-    found->released = true;
-    command_ring->jobs[found->slot] = {};
-    // Out-of-order cancellation cannot reuse entries still covered by an older job.
-    while (!pending_submissions.empty() && pending_submissions.front().released) {
-        ring_used -= pending_submissions.front().entries;
-        pending_submissions.pop_front();
+void NativeGpuChannel::ReleaseSubmission(u64 sequence, bool completed) {
+    bool cancel_channel{};
+    {
+        std::scoped_lock lock{mutex};
+        const auto found =
+            std::ranges::find(pending_submissions, sequence, &PendingSubmission::sequence);
+        ASSERT(found != pending_submissions.end() && !found->released);
+        if (found->increments && !completed) {
+            const bool tail = std::all_of(std::next(found), pending_submissions.end(),
+                                          [](const auto& job) { return job.released; });
+            if (!found->published && tail) {
+                reserved_fence -= found->increments;
+            } else if (!found->completion_committed) {
+                // Never let later completions bridge a cancelled fence and report it ready.
+                faulted = true;
+                cancel_channel = true;
+            }
+        }
+        found->released = true;
+        command_ring->jobs[found->slot] = {};
+        // Out-of-order cancellation cannot reuse entries still covered by an older job.
+        while (!pending_submissions.empty() && pending_submissions.front().released) {
+            ring_used -= pending_submissions.front().entries;
+            pending_submissions.pop_front();
+        }
+    }
+    if (cancel_channel) {
+        cancellation.request_stop();
     }
 }
 
@@ -523,9 +547,9 @@ NvResult NativeGpuChannels::ReserveSubmission(std::shared_ptr<NativeGpuSubmissio
                                               std::span<const u64> entries, u32 flags,
                                               u32 increment) {
     const auto channel = Get(fd, owner);
-    return channel ? channel->ReserveSubmission(out_job, out_fence, channel, entries, flags,
-                                                increment, manager)
-                   : NvResult::BadParameter;
+    return channel
+               ? channel->ReserveSubmission(out_job, out_fence, channel, entries, flags, increment)
+               : NvResult::BadParameter;
 }
 
 } // namespace Service::Nvidia::NvCore

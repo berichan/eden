@@ -112,9 +112,8 @@ private:
     friend class NativeGpuSubmission;
     NvResult ReserveSubmission(std::shared_ptr<NativeGpuSubmission>* out_job, NvFence* out_fence,
                                const std::shared_ptr<NativeGpuChannel>& self,
-                               std::span<const u64> entries, u32 flags, u32 increment,
-                               Tegra::Host1x::SyncpointManager& manager);
-    void ReleaseSubmission(u64 sequence);
+                               std::span<const u64> entries, u32 flags, u32 increment);
+    void ReleaseSubmission(u64 sequence, bool completed);
     void Close();
     NvResult AllocateObjectContext(u32 class_id, u32 flags);
     NvResult BindZCull(u64 address, u32 mode);
@@ -147,11 +146,14 @@ private:
         u32 entries;
         bool released{};
         bool published{};
+        u32 increments{};
+        bool completion_committed{};
     };
     std::deque<PendingSubmission> pending_submissions;
     u64 next_submission{1};
     u32 ring_put{};
     u32 ring_used{};
+    u32 reserved_fence{};
     bool faulted{};
     std::stop_source cancellation;
 };

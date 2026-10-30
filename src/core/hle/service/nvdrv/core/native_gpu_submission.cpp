@@ -16,6 +16,7 @@
 #include "video_core/control/native_atomic_sequence.h"
 #include "video_core/control/native_gpu_context.h"
 #include "video_core/gpu.h"
+#include "video_core/host1x/host1x.h"
 #include "video_core/memory_manager.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/renderer_base.h"
@@ -185,10 +186,10 @@ bool NativeGpuChannel::RetireBackend(Core::System& system) {
 }
 
 NativeGpuSubmission::NativeGpuSubmission(std::shared_ptr<NativeGpuChannel> channel_,
-                                         std::vector<u64> entries_, NvFence fence_)
+                                         std::vector<u64> entries_, NvFence fence_, u32 increments_)
     : channel{std::move(channel_)}, ring{channel->command_ring},
       graphics{channel->graphics_context}, entries{std::move(entries_)}, fence{fence_},
-      timeout{channel->timeout} {}
+      increments{increments_}, timeout{channel->timeout} {}
 
 NativeGpuSubmission::~NativeGpuSubmission() {
     Release();
@@ -196,7 +197,7 @@ NativeGpuSubmission::~NativeGpuSubmission() {
 
 void NativeGpuSubmission::Release() {
     if (sequence && !released.exchange(true)) {
-        channel->ReleaseSubmission(sequence);
+        channel->ReleaseSubmission(sequence, state.load() == State::Complete);
     }
 }
 
@@ -225,6 +226,21 @@ void NativeGpuSubmission::Cancel() {
             return;
         }
     }
+}
+
+void NativeGpuSubmission::CancelUnpublished() {
+    {
+        std::scoped_lock lock{channel->mutex};
+        State expected = State::Queued;
+        if (!state.compare_exchange_strong(expected, State::Cancelled)) {
+            return;
+        }
+        const auto found = std::ranges::find(channel->pending_submissions, sequence,
+                                             &NativeGpuChannel::PendingSubmission::sequence);
+        ASSERT(found != channel->pending_submissions.end());
+        found->published = false;
+    }
+    Release();
 }
 
 void NativeGpuSubmission::Finish(State final_state, Stream::Result final_result) {
@@ -371,6 +387,28 @@ void NativeGpuSubmission::Execute(Core::System& system, std::stop_token stop_tok
     const auto token = cancellation.get_token();
     if (token.stop_requested() && executed.Succeeded()) {
         executed.error = Stream::Error::Cancelled;
+    }
+    if (executed.Succeeded() && increments) {
+        bool committed{};
+        {
+            std::scoped_lock lock{channel->mutex};
+            if (channel->open && !channel->faulted && !token.stop_requested()) {
+                const auto found =
+                    std::ranges::find(channel->pending_submissions, sequence,
+                                      &NativeGpuChannel::PendingSubmission::sequence);
+                ASSERT(found != channel->pending_submissions.end());
+                found->completion_committed = true;
+                committed = true;
+            }
+        }
+        // Issued GPU work has actually drained. Parked QMDs retain their own dependencies
+        // and releases; this publishes the driver's FIFO completion, not a QMD completion.
+        if (!committed) {
+            executed.error = Stream::Error::Cancelled;
+        } else if (!system.Host1x().GetSyncpointManager().PublishNativeCompletion(
+                       static_cast<u32>(fence.id), fence.value, increments)) {
+            executed.error = Stream::Error::MethodFailed;
+        }
     }
     const bool was_cancelled = token.stop_requested();
     if (!executed.Succeeded()) {

@@ -5,8 +5,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <bitset>
+#include <exception>
 #include <utility>
 #include "common/assert.h"
+#include "common/logging.h"
 #include "video_core/host1x/syncpoint_manager.h"
 
 namespace Tegra {
@@ -75,13 +77,10 @@ std::optional<SyncpointManager::Reservation> SyncpointManager::AllocateNativeCha
 SyncpointManager::ActionHandle SyncpointManager::RegisterAction(
     std::atomic<u32>& syncpoint, std::list<RegisteredAction>& action_storage, u32 expected_value,
     std::function<void()>&& action) {
-    if (syncpoint.load(std::memory_order_acquire) >= expected_value) {
-        action();
-        return {};
-    }
-
-    std::scoped_lock lk(guard);
+    // Serialize the readiness decision with native publication of both counters.
+    std::unique_lock lk(guard);
     if (syncpoint.load(std::memory_order_relaxed) >= expected_value) {
+        lk.unlock();
         action();
         return {};
     }
@@ -127,6 +126,39 @@ void SyncpointManager::IncrementHost(u32 syncpoint_id) {
     Increment(syncpoints_host[syncpoint_id], wait_host_cv, host_action_storage[syncpoint_id]);
 }
 
+bool SyncpointManager::PublishNativeCompletion(u32 syncpoint_id, u32 target, u32 increments) {
+    if (syncpoint_id >= NUM_MAX_SYNCPOINTS || increments == 0 || target < increments) {
+        return false;
+    }
+    std::scoped_lock lock{guard};
+    const auto previous = target - increments;
+    if (syncpoints_guest[syncpoint_id].load(std::memory_order_acquire) != previous ||
+        syncpoints_host[syncpoint_id].load(std::memory_order_acquire) != previous) {
+        return false;
+    }
+    syncpoints_guest[syncpoint_id].store(target, std::memory_order_release);
+    syncpoints_host[syncpoint_id].store(target, std::memory_order_release);
+    const auto notify = [target](auto& actions) {
+        while (!actions.empty() && actions.front().expected_value <= target) {
+            auto action = std::move(actions.front().action);
+            actions.pop_front();
+            try {
+                action();
+            } catch (const std::exception& error) {
+                LOG_ERROR(HW_GPU, "Native syncpoint completion notification failed: {}",
+                          error.what());
+            } catch (...) {
+                LOG_ERROR(HW_GPU, "Native syncpoint completion notification failed");
+            }
+        }
+    };
+    notify(guest_action_storage[syncpoint_id]);
+    notify(host_action_storage[syncpoint_id]);
+    wait_guest_cv.notify_all();
+    wait_host_cv.notify_all();
+    return true;
+}
+
 void SyncpointManager::WaitGuest(u32 syncpoint_id, u32 expected_value) {
     Wait(syncpoints_guest[syncpoint_id], wait_guest_cv, expected_value);
 }
@@ -137,9 +169,8 @@ void SyncpointManager::WaitHost(u32 syncpoint_id, u32 expected_value) {
 
 void SyncpointManager::Increment(std::atomic<u32>& syncpoint, std::condition_variable& wait_cv,
                                  std::list<RegisteredAction>& action_storage) {
-    auto new_value{syncpoint.fetch_add(1, std::memory_order_acq_rel) + 1};
-
     std::scoped_lock lk(guard);
+    auto new_value{syncpoint.fetch_add(1, std::memory_order_acq_rel) + 1};
     auto it = action_storage.begin();
     while (it != action_storage.end()) {
         if (it->expected_value > new_value) {
